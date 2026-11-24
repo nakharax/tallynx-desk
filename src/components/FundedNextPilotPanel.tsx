@@ -255,7 +255,7 @@ export function FundedNextPilotPanel({
       {reconnect && <div role="status" style={{ color: 'var(--rose)' }}>{t("Reconnect FundedNext to resume syncing.", "เชื่อมต่อ FundedNext ใหม่เพื่อซิงก์ข้อมูลต่อ")}</div>}
       <div className="fundednext-actions">
         <button type="button" className="btn sm primary" disabled={actionDisabled} onClick={() => void run(async () => {
-          const result = await onConnectPilot(portId, reconnectId || (connectionMissing ? undefined : connectionId));
+          const result = await onConnectPilot(portId, connectionMissing ? undefined : (reconnectId || connectionId));
           if (!result) return '';
           setReconnectId(null);
           setDirectory(null);

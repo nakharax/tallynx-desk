@@ -108,13 +108,18 @@ function checkedUrl(value: string, allowLocal = false) {
 }
 
 export class OAuthTokenError extends Error {
-  constructor(readonly reconnect: boolean, readonly retryAfter?: string | null) {
+  constructor(readonly reconnect: boolean, readonly retryAfter?: string | null, readonly oauthError?: string) {
     super('FundedNext OAuth token request failed');
   }
 }
 
-async function requestTokens(endpoint: string, input: Record<string, string>, previousRefreshToken?: string): Promise<FundedNextTokens> {
-  const response = await fetch(checkedUrl(endpoint), {
+async function requestTokens(
+  endpoint: string,
+  input: Record<string, string>,
+  previousRefreshToken?: string,
+  requestFetch: typeof fetch = fetch
+): Promise<FundedNextTokens> {
+  const response = await requestFetch(checkedUrl(endpoint), {
     method: 'POST', headers: { Accept: 'application/json' }, body: new URLSearchParams(input),
     redirect: 'error', signal: AbortSignal.timeout(10_000),
   });
@@ -124,7 +129,7 @@ async function requestTokens(endpoint: string, input: Record<string, string>, pr
   if (!response.ok || !result || result.error) {
     const reconnect = response.status === 401 || response.status === 403 ||
       ['invalid_grant', 'invalid_client', 'invalid_token'].includes(result?.error ?? '');
-    throw new OAuthTokenError(reconnect, response.headers.get('Retry-After'));
+    throw new OAuthTokenError(reconnect, response.headers.get('Retry-After'), result?.error);
   }
   const expiresIn = Number(result.expires_in);
   if (typeof result.access_token !== 'string' || !result.access_token || !Number.isFinite(expiresIn) || expiresIn <= 0) {
@@ -160,7 +165,7 @@ function readFirebaseAppletDefaults(): { projectId?: string; firestoreDatabaseId
 
 export function createFundedNextRuntimeForStore(
   store: PilotStore,
-  options: { kmsKeyName?: string; getAccessToken?: () => Promise<string> } = {}
+  options: { kmsKeyName?: string; getAccessToken?: () => Promise<string>; fetch?: typeof fetch } = {}
 ) {
   const kmsKeyName = String(options.kmsKeyName ?? '').trim();
   const masterKey = parseMasterKeyBytes(process.env.FUNDEDNEXT_MASTER_KEY);
@@ -169,39 +174,67 @@ export function createFundedNextRuntimeForStore(
       ? new GcpCloudKmsProvider({ keyName: kmsKeyName, getAccessToken: options.getAccessToken })
       : new LocalAesGcmKmsProvider(masterKey);
   const cipher = new KmsEnvelopeCipher(cipherProvider);
+  const requestFetch = options.fetch ?? fetch;
   const mcpUrl = process.env.FUNDEDNEXT_MCP_URL ?? DEFAULT_MCP_URL;
   const resource = process.env.FUNDEDNEXT_OAUTH_RESOURCE ?? new URL(mcpUrl).origin;
   const tokenEndpoint = process.env.FUNDEDNEXT_OAUTH_TOKEN_ENDPOINT ?? oauthOrigin + '/oauth/token';
+  const configuredClientId = process.env.FUNDEDNEXT_OAUTH_CLIENT_ID?.trim() || undefined;
+  let registeredClient: { redirectUri: string; clientId: string } | undefined;
+
+  const requestTokensWithClientReset = async (input: Record<string, string>, previousRefreshToken?: string) => {
+    try {
+      return await requestTokens(tokenEndpoint, input, previousRefreshToken, requestFetch);
+    } catch (error) {
+      if (error instanceof OAuthTokenError && (error.oauthError === 'invalid_client' || error.oauthError === 'unauthorized_client')) {
+        registeredClient = undefined;
+      }
+      throw error;
+    }
+  };
+
   const oauth = new OAuthPkceManager({
     store, cipher, resource,
     authorizationEndpoint: process.env.FUNDEDNEXT_OAUTH_AUTHORIZE_ENDPOINT ?? oauthOrigin + '/oauth/authorize',
-    clientId: process.env.FUNDEDNEXT_OAUTH_CLIENT_ID,
+    clientId: configuredClientId,
     clientSecret: process.env.FUNDEDNEXT_OAUTH_CLIENT_SECRET,
     redirectUri:
       process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI ??
       'https://desk.tallynx.com/api/fundednext/oauth/callback',
     registerClient: async redirectUri => {
-      const response = await fetch(checkedUrl(process.env.FUNDEDNEXT_OAUTH_REGISTRATION_ENDPOINT ?? oauthOrigin + '/oauth/register'), {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          client_name: 'Tredyn Desk', redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'],
-          response_types: ['code'], token_endpoint_auth_method: 'none', scope: 'mcp:read',
-        }),
-        redirect: 'error', signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error('FundedNext OAuth registration failed');
-      const result = await response.json() as { client_id?: string };
-      if (typeof result.client_id !== 'string' || !result.client_id) throw new Error('Invalid FundedNext OAuth registration response');
+      if (registeredClient?.redirectUri === redirectUri) {
+        return registeredClient.clientId;
+      }
+      let response: Response;
+      try {
+        response = await requestFetch(checkedUrl(process.env.FUNDEDNEXT_OAUTH_REGISTRATION_ENDPOINT ?? oauthOrigin + '/oauth/register'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            client_name: 'Tredyn Desk', redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'],
+            response_types: ['code'], token_endpoint_auth_method: 'none', scope: 'mcp:read',
+          }),
+          redirect: 'error', signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new PilotStoreError(502, 'FundedNext OAuth registration endpoint is unreachable');
+      }
+      if (!response.ok) {
+        throw new PilotStoreError(502, `FundedNext OAuth registration failed (HTTP ${response.status})`);
+      }
+      const result = await response.json().catch(() => null) as { client_id?: string } | null;
+      if (typeof result?.client_id !== 'string' || !result.client_id) {
+        throw new PilotStoreError(502, 'Invalid FundedNext OAuth registration response');
+      }
+      registeredClient = { redirectUri, clientId: result.client_id };
       return result.client_id;
     },
-    fetchTokens: exchange => requestTokens(tokenEndpoint, {
+    fetchTokens: exchange => requestTokensWithClientReset({
       ...clientParams(exchange), grant_type: 'authorization_code', code: exchange.code,
       code_verifier: exchange.codeVerifier, redirect_uri: exchange.redirectUri, resource,
     }),
   });
   const refreshTokens = (tokens: FundedNextTokens) => {
     if (!tokens.refreshToken || !tokens.clientId) throw new OAuthTokenError(true);
-    return requestTokens(tokenEndpoint, { ...clientParams({ ...tokens, clientId: tokens.clientId }),
+    return requestTokensWithClientReset({ ...clientParams({ ...tokens, clientId: tokens.clientId }),
       grant_type: 'refresh_token', refresh_token: tokens.refreshToken, resource,
     }, tokens.refreshToken);
   };

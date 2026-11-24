@@ -9,7 +9,7 @@ export type ConnectionStatus = 'CONNECTED' | 'DEGRADED' | 'RECONNECT_REQUIRED' |
 export type AccountSyncStatus = 'SYNCING' | 'PARTIAL' | 'COMPLETE' | 'DEGRADED' | 'RECONNECT_REQUIRED';
 
 export class PilotStoreError extends Error {
-  constructor(readonly status: 400 | 403 | 404 | 409, message: string, readonly code?: 'reconnect_required') { super(message); }
+  constructor(readonly status: 400 | 403 | 404 | 409 | 502 | 503, message: string, readonly code?: 'reconnect_required') { super(message); }
 }
 
 interface LeaseLock {
