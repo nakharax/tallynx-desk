@@ -487,3 +487,83 @@ test('pilot USD fallback helper and snapshot cache stay scoped cleanly', () => {
     else (globalThis as { window?: unknown }).window = originalWindow;
   }
 });
+
+test('connectFundedNextPilot falls back to a fresh connection when stale connectionId returns 404', async t => {
+  const { connectFundedNextPilot } = await import('./fundedNextPilot.js');
+  const originalWindow = (globalThis as { window?: unknown }).window;
+  const originalNavigator = (globalThis as { navigator?: unknown }).navigator;
+  const listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+  let popupClosed = false;
+  const popup = {
+    closed: false,
+    close: () => {
+      popupClosed = true;
+      popup.closed = true;
+    },
+    location: {
+      replace: () => {
+        const event = {
+          origin: 'https://desk.example',
+          source: popup,
+          data: {
+            type: 'TALLYNX_FN_PILOT_OAUTH_RESULT',
+            ok: true,
+            status: 'CONNECTED',
+            connectionId: 'fresh-conn-2',
+          },
+        } as unknown as MessageEvent;
+        for (const fn of listeners.get('message') ?? []) fn(event);
+      },
+    },
+  };
+  (globalThis as { window?: unknown }).window = {
+    location: { origin: 'https://desk.example' },
+    open: () => popup,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    addEventListener: (type: string, fn: (event: MessageEvent) => void) => {
+      const set = listeners.get(type) ?? new Set();
+      set.add(fn);
+      listeners.set(type, set);
+    },
+    removeEventListener: (type: string, fn: (event: MessageEvent) => void) => {
+      listeners.get(type)?.delete(fn);
+    },
+  };
+  Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true });
+
+  const startBodies: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
+    const path = new URL(url, 'https://desk.example');
+    if (path.pathname === '/api/fundednext/connections') {
+      const body = String(init?.body ?? '');
+      startBodies.push(body);
+      if (body.includes('stale-conn-1')) {
+        return Response.json({ error: 'FundedNext resource not found' }, { status: 404 });
+      }
+      return Response.json({
+        authorizeUrl: 'https://mcp.fundednext.com/oauth/authorize?redirect_uri=https%3A%2F%2Fdesk.example%2Fapi%2Ffundednext%2Foauth%2Fcallback',
+      }, { status: 201 });
+    }
+    if (path.pathname === '/api/fundednext/accounts') {
+      assert.equal(path.searchParams.get('connectionId'), 'fresh-conn-2');
+      return Response.json({ accounts: [], connectionStatus: 'CONNECTED' });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const result = await connectFundedNextPilot(async () => 'test-token', 'stale-conn-1', new AbortController().signal);
+    assert.deepEqual(result, { connectionId: 'fresh-conn-2', status: 'CONNECTED' });
+    assert.deepEqual(startBodies, [
+      JSON.stringify({ connectionId: 'stale-conn-1' }),
+      JSON.stringify({}),
+    ]);
+    assert.equal(popupClosed, true);
+  } finally {
+    if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = originalWindow;
+    if (originalNavigator === undefined) delete (globalThis as { navigator?: unknown }).navigator;
+    else Object.defineProperty(globalThis, 'navigator', { value: originalNavigator, configurable: true });
+  }
+});

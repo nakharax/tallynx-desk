@@ -871,7 +871,7 @@ function createRemoteVpsPilotServices(options) {
     });
     const parsed = await response.json().catch(() => null);
     if (!response.ok) {
-      if (response.status === 400 || response.status === 403 || response.status === 404 || response.status === 409) {
+      if (response.status === 400 || response.status === 403 || response.status === 404 || response.status === 409 || response.status === 502) {
         throw new PilotStoreError(
           response.status,
           typeof parsed?.error === "string" ? parsed.error : "FundedNext request rejected",

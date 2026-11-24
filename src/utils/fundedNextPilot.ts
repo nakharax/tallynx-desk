@@ -344,9 +344,21 @@ export async function connectFundedNextPilot(getToken: PilotTokenGetter, connect
   const popup = window.open('', '_blank', 'popup,width=540,height=700');
   if (!popup) throw new Error('กรุณาอนุญาตหน้าต่างป๊อปอัปสำหรับ FundedNext');
   const run = async () => {
-    const { authorizeUrl } = await requestFundedNext<{ authorizeUrl: string }>(getToken, '/connections', {
-      method: 'POST', body: JSON.stringify(connectionId ? { connectionId } : {}), signal,
-    });
+    let expectedConnectionId = connectionId;
+    let authorizeUrl: string;
+    try {
+      ({ authorizeUrl } = await requestFundedNext<{ authorizeUrl: string }>(getToken, '/connections', {
+        method: 'POST', body: JSON.stringify(expectedConnectionId ? { connectionId: expectedConnectionId } : {}), signal,
+      }));
+    } catch (error) {
+      if (!(error instanceof FundedNextPilotError) || error.httpStatus !== 404 || !expectedConnectionId) {
+        throw error;
+      }
+      expectedConnectionId = undefined;
+      ({ authorizeUrl } = await requestFundedNext<{ authorizeUrl: string }>(getToken, '/connections', {
+        method: 'POST', body: JSON.stringify({}), signal,
+      }));
+    }
     const destination = new URL(authorizeUrl);
     const redirect = destination.searchParams.get('redirect_uri');
     if (destination.protocol !== 'https:' || !redirect || new URL(redirect).origin !== window.location.origin) {
@@ -371,7 +383,7 @@ export async function connectFundedNextPilot(getToken: PilotTokenGetter, connect
         if (data.ok === false) {
           finish(new Error(typeof data.error === 'string' ? data.error : 'เชื่อมต่อ FundedNext ไม่สำเร็จ'));
         } else if (data.ok === true && data.status === 'CONNECTED' && typeof data.connectionId === 'string' &&
-          /^[\w-]{1,128}$/.test(data.connectionId) && (!connectionId || data.connectionId === connectionId)) {
+          /^[\w-]{1,128}$/.test(data.connectionId) && (!expectedConnectionId || data.connectionId === expectedConnectionId)) {
           finish(null, { connectionId: data.connectionId, status: data.status });
         }
       }

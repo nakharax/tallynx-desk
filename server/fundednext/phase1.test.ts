@@ -785,3 +785,99 @@ test('End-to-end Vercel BFF <-> HMAC VPS RPC <-> SqlitePilotStore + Worker syncs
   const snapJson = await snapResp.json();
   assert.equal(snapJson.snapshot.balance, '6250');
 });
+
+test('createFundedNextRuntimeForStore caches dynamic client_id, resets on invalid_client, and surfaces 502 on registration failure', async (t) => {
+  const store = new InMemoryPilotStore();
+  await seedPilot(store, 'alice');
+  const prevMaster = process.env.FUNDEDNEXT_MASTER_KEY;
+  const prevClientId = process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+  const prevRedirect = process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI;
+  let registrations = 0;
+  let failRegistration = false;
+  let failTokenInvalidClient = false;
+
+  try {
+    process.env.FUNDEDNEXT_MASTER_KEY = 'b'.repeat(64);
+    delete process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+    process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI = 'https://desk.example/api/fundednext/oauth/callback';
+
+    const { createFundedNextRuntimeForStore } = await import('./oauthPkce.js');
+    const runtime = createFundedNextRuntimeForStore(store, {
+      fetch: async (url) => {
+        const target = String(url);
+        if (target.endsWith('/oauth/register')) {
+          registrations++;
+          if (failRegistration) {
+            return Response.json({ error: 'invalid_client_metadata' }, { status: 400 });
+          }
+          return Response.json({ client_id: `dyn_client_${registrations}` }, { status: 201 });
+        }
+        if (target.endsWith('/oauth/token')) {
+          if (failTokenInvalidClient) {
+            return Response.json({ error: 'invalid_client' }, { status: 401 });
+          }
+          return Response.json({ access_token: 'tok', refresh_token: 'ref', expires_in: 3600 });
+        }
+        throw new Error(`Unexpected fetch: ${target}`);
+      },
+    });
+
+    const s1 = await runtime.oauth.start('alice');
+    const s2 = await runtime.oauth.start('alice');
+    assert.equal(registrations, 1);
+    assert.equal(new URL(s1.authorizeUrl).searchParams.get('client_id'), 'dyn_client_1');
+    assert.equal(new URL(s2.authorizeUrl).searchParams.get('client_id'), 'dyn_client_1');
+
+    failTokenInvalidClient = true;
+    await assert.rejects(
+      runtime.oauth.callback({ state: s1.state, code: 'code-1', browserSession: s1.browserSession, uid: 'alice' })
+    );
+    failTokenInvalidClient = false;
+
+    const s3 = await runtime.oauth.start('alice');
+    assert.equal(registrations, 2);
+    assert.equal(new URL(s3.authorizeUrl).searchParams.get('client_id'), 'dyn_client_2');
+
+    // Verify 502 registration error surfaces across VPS RPC -> BFF router
+    const rpcSecret = 'r'.repeat(64);
+    const handleRpc = createFundedNextVpsHandler({ store, oauth: runtime.oauth, secret: rpcSecret });
+    const vpsServer = createServer((req, res) => {
+      void handleRpc(req, res).then((handled) => {
+        if (!handled) res.writeHead(404).end();
+      });
+    });
+    vpsServer.listen(0, '127.0.0.1');
+    t.after(() => vpsServer.close());
+    await once(vpsServer, 'listening');
+    const vpsAddr = vpsServer.address();
+    assert.ok(vpsAddr && typeof vpsAddr === 'object');
+    const bff = express();
+    bff.use(express.json());
+    bff.use('/api/fundednext', createFundedNextRouter({
+      verifyIdToken: async () => ({ uid: 'alice' }),
+      services: () => createRemoteVpsPilotServices({ baseUrl: `http://127.0.0.1:${vpsAddr.port}`, secret: rpcSecret }),
+    }));
+    const bffOrigin = await listen(bff, t);
+
+    // Trigger invalid_client again so next start hits /oauth/register
+    failTokenInvalidClient = true;
+    await assert.rejects(
+      runtime.oauth.callback({ state: s3.state, code: 'code-3', browserSession: s3.browserSession, uid: 'alice' })
+    );
+    failRegistration = true;
+    const failedStart = await fetch(`${bffOrigin}/api/fundednext/connections`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer alice' },
+    });
+    assert.equal(failedStart.status, 502);
+    const failedJson = await failedStart.json() as { error?: string };
+    assert.match(failedJson.error ?? '', /FundedNext OAuth registration failed \(HTTP 400\)/);
+  } finally {
+    if (prevMaster === undefined) delete process.env.FUNDEDNEXT_MASTER_KEY;
+    else process.env.FUNDEDNEXT_MASTER_KEY = prevMaster;
+    if (prevClientId === undefined) delete process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+    else process.env.FUNDEDNEXT_OAUTH_CLIENT_ID = prevClientId;
+    if (prevRedirect === undefined) delete process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI;
+    else process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI = prevRedirect;
+  }
+});
