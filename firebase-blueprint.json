@@ -1,0 +1,185 @@
+{
+  "entities": {
+    "WorkspaceState": {
+      "title": "WorkspaceState",
+      "description": "Real-time trading desk state, portfolios, cycle days, and trade journal for an authenticated user",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the workspace owner",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "payloadJson": {
+          "type": "string",
+          "description": "Serialized JSON string of the complete Tredyn GHR workspace state",
+          "minLength": 2,
+          "maxLength": 900000
+        },
+        "tradeCount": {
+          "type": "number",
+          "description": "Total number of trades recorded in the journal"
+        },
+        "portCount": {
+          "type": "number",
+          "description": "Total number of trading accounts/portfolios"
+        },
+        "clientUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of the latest local mutation",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of document creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest update"
+        }
+      },
+      "required": ["ownerId", "payloadJson", "tradeCount", "portCount", "clientUpdatedAt", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized platform administrator record",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "LicenseKey": {
+      "title": "LicenseKey",
+      "description": "Commercial product license key redeemable by verified customers",
+      "type": "object",
+      "properties": {
+        "licenseKey": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["TRIAL", "PRO", "LIFETIME"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "REVOKED"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "redeemedByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "redeemedEmail": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["licenseKey", "plan", "status", "notes", "redeemedByUid", "redeemedEmail", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "UserEntitlement": {
+      "title": "UserEntitlement",
+      "description": "Verified customer commercial subscription or license entitlement",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["FREE", "TRIAL", "PRO", "LIFETIME", "ADMIN"]
+        },
+        "licenseKey": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "SUSPENDED"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "email", "plan", "licenseKey", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/workspaces/{userId}": {
+      "schema": {
+        "$ref": "#/entities/WorkspaceState"
+      },
+      "description": "Stores the primary real-time trading workspace and journal for each user"
+    },
+    "/admins/{userId}": {
+      "schema": {
+        "$ref": "#/entities/AdminRecord"
+      },
+      "description": "Stores platform administrator allowlist entries"
+    },
+    "/licenses/{licenseKey}": {
+      "schema": {
+        "$ref": "#/entities/LicenseKey"
+      },
+      "description": "Stores purchasable customer license keys and claim status"
+    },
+    "/entitlements/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserEntitlement"
+      },
+      "description": "Stores active plan entitlement and linked license key per user"
+    }
+  }
+}

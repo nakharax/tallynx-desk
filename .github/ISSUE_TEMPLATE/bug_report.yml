@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a reproducible bug in TallyNX Desk & Mall (do NOT report security vulnerabilities here)
+title: "fix: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve **TallyNX Desk & Mall**!
+        For security vulnerabilities, please use [GitHub Security Advisories](https://github.com/nakharax/tallynx-desk/security/advisories/new) instead of a public issue.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - 3-TP Ladder & Position Sizing
+        - 30-Second Statement Autopsy
+        - News Blackout Radar
+        - Community Mall & Marketplace
+        - Non-Custodial MT5 Bridge (TredynLiveBridge)
+        - Backend API / Firestore Rules
+        - Build / CI / Developer Tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What Happened?
+      description: A clear and concise description of the bug.
+      placeholder: Describe the unexpected behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps, sample input (redacted of personal data), or commands to reproduce.
+      placeholder: |
+        1. Navigate to '...'
+        2. Enter '...'
+        3. Observe error '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      placeholder: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Browser (and viewport width if UI), Node.js version, or MT5 build.
+      placeholder: "e.g., Windows 11, Chrome 131 (390px mobile), Node 22.14"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-Submission Checklist
+      options:
+        - label: I have redacted any personal account numbers, API keys, or private statements.
+          required: true
+        - label: I have searched existing open issues to avoid duplicates.
+          required: true

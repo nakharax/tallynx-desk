@@ -1,0 +1,391 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && 'admin' in request.auth.token && request.auth.token.admin == true;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin()
+        || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidWorkspaceState(data, userId) {
+      return data.keys().hasAll(['ownerId', 'payloadJson', 'tradeCount', 'portCount', 'clientUpdatedAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'payloadJson', 'tradeCount', 'portCount', 'clientUpdatedAt', 'createdAt', 'updatedAt'])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.payloadJson is string
+        && data.payloadJson.size() >= 2
+        && data.payloadJson.size() <= 900000
+        && data.tradeCount is number
+        && data.tradeCount >= 0
+        && data.tradeCount <= 100000
+        && data.portCount is number
+        && data.portCount >= 0
+        && data.portCount <= 1000
+        && data.clientUpdatedAt is string
+        && data.clientUpdatedAt.size() >= 10
+        && data.clientUpdatedAt.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 200
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLicenseKey(data, keyId) {
+      return data.keys().hasAll(['licenseKey', 'plan', 'status', 'notes', 'redeemedByUid', 'redeemedEmail', 'createdByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['licenseKey', 'plan', 'status', 'notes', 'redeemedByUid', 'redeemedEmail', 'createdByUid', 'createdAt', 'updatedAt'])
+        && isValidId(data.licenseKey)
+        && data.licenseKey.size() >= 6
+        && data.licenseKey.size() <= 64
+        && data.licenseKey == keyId
+        && data.plan in ['TRIAL', 'PRO', 'LIFETIME']
+        && data.status in ['ACTIVE', 'REVOKED']
+        && data.notes is string
+        && data.notes.size() <= 200
+        && data.redeemedByUid is string
+        && data.redeemedByUid.size() <= 128
+        && data.redeemedEmail is string
+        && data.redeemedEmail.size() <= 200
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEntitlement(data, userId) {
+      return data.keys().hasAll(['ownerId', 'email', 'plan', 'licenseKey', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'email', 'plan', 'licenseKey', 'status', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 200
+        && data.plan in ['FREE', 'TRIAL', 'PRO', 'LIFETIME', 'ADMIN']
+        && data.licenseKey is string
+        && data.licenseKey.size() <= 64
+        && data.status in ['ACTIVE', 'SUSPENDED']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function hasRedeemedMatchingLicense(data, userId) {
+      return isValidId(data.licenseKey)
+        && data.licenseKey.size() >= 6
+        && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.redeemedByUid == userId
+        && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.status == 'ACTIVE'
+        && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.plan == data.plan;
+    }
+
+    match /workspaces/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidWorkspaceState(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidWorkspaceState(incoming(), userId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['payloadJson', 'tradeCount', 'portCount', 'clientUpdatedAt', 'updatedAt'])
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    match /admins/{userId} {
+      allow get: if isAdmin() || (isSignedIn() && isValidId(userId) && request.auth.uid == userId);
+      allow list: if isAdmin();
+
+      allow create: if isBootstrappedAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming(), userId)
+        && incoming().createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isBootstrappedAdmin() && isValidId(userId);
+    }
+
+    match /licenses/{licenseKey} {
+      allow get: if isAdmin()
+        || (isSignedIn() && isValidId(licenseKey) && (resource.data.redeemedByUid == '' || resource.data.redeemedByUid == request.auth.uid));
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(licenseKey)
+        && isValidLicenseKey(incoming(), licenseKey)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(licenseKey)
+        && isValidLicenseKey(incoming(), licenseKey)
+        && incoming().updatedAt == request.time
+        && incoming().createdAt == existing().createdAt
+        && incoming().licenseKey == existing().licenseKey
+        && incoming().createdByUid == existing().createdByUid
+        && (
+          isAdmin()
+          || (
+            isSignedIn()
+            && existing().status == 'ACTIVE'
+            && existing().redeemedByUid == ''
+            && incoming().redeemedByUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['redeemedByUid', 'redeemedEmail', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(licenseKey);
+    }
+
+    match /entitlements/{userId} {
+      allow get: if isAdmin() || (isSignedIn() && isValidId(userId) && request.auth.uid == userId);
+      allow list: if isAdmin();
+
+      allow create: if isValidId(userId)
+        && isValidEntitlement(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isSignedIn()
+            && request.auth.uid == userId
+            && incoming().ownerId == request.auth.uid
+            && incoming().status == 'ACTIVE'
+            && (
+              (incoming().plan == 'FREE' && incoming().licenseKey == '')
+              || (incoming().plan in ['TRIAL', 'PRO', 'LIFETIME'] && hasRedeemedMatchingLicense(incoming(), userId))
+            )
+          )
+        );
+
+      allow update: if isValidId(userId)
+        && isValidEntitlement(incoming(), userId)
+        && incoming().updatedAt == request.time
+        && incoming().createdAt == existing().createdAt
+        && incoming().ownerId == existing().ownerId
+        && (
+          isAdmin()
+          || (
+            isSignedIn()
+            && request.auth.uid == userId
+            && incoming().ownerId == request.auth.uid
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'plan', 'licenseKey', 'updatedAt'])
+            && (
+              incoming().plan == existing().plan
+              || (incoming().plan == 'FREE' && incoming().licenseKey == '')
+              || (incoming().plan in ['TRIAL', 'PRO', 'LIFETIME'] && hasRedeemedMatchingLicense(incoming(), userId))
+            )
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // ===============================================================
+    // FundedNext Phase 1 — Assumed Data Models & Validators
+    // ===============================================================
+    //
+    // Collection: pilot_allowlist/{uid}
+    //   - Admin-managed cohort allowlist. Non-admin users may only `get`
+    //     their own document to check pilot eligibility.
+    //   - Optional validated fields: uid (== uid), enabled (bool),
+    //     email (string <= 200), notes (string <= 500),
+    //     createdByUid, updatedByUid, createdAt, updatedAt.
+    //
+    // Collection: fundednext_connections/{connectionId}
+    //   - Server-managed broker connection metadata (ownerUid == uid).
+    //   - Client reads (`get` and owner-filtered `list`) only; writes denied.
+    //
+    // Collection: fundednext_credentials/{connectionId}
+    //   - Encrypted OAuth/credential envelopes. 100% locked from clients.
+    //
+    // Collection: account_snapshots/{accountId}
+    //   - Server-managed live balance/equity/open position snapshots (ownerUid == uid).
+    //   - Client reads (`get` and owner-filtered `list`) only; writes denied.
+    //
+    // Collection: trade_executions/{accountId}/items/{executionKey}
+    //   - Server-managed immutable broker execution/cashflow records (ownerUid == uid).
+    //   - Client reads (`get` and owner-filtered `list`) only; writes denied.
+    //
+    // Collection: journal_annotations/{uid}/entries/{annotationId}
+    //   - Owner-only discretionary notes, tags, and linkage metadata.
+    //   - Required: ownerUid (== uid, immutable), note (string <= 5000),
+    //     createdAt (timestamp == request.time on create, immutable),
+    //     updatedAt (timestamp == request.time).
+    //   - Optional: executionKey (ID/empty/null), accountId (ID/empty/null),
+    //     tags (list <= 20 of string 1..40), legacyUnlinked (bool/null),
+    //     importId (safe string <= 128/null).
+    //   - Strictly rejects broker execution fields (netPnl, balance, equity, volume).
+    //
+    // Collection: sync_jobs/{jobId}
+    //   - Server/worker leased sync jobs and cursors. 100% locked from clients.
+    // ===============================================================
+
+    function isValidPilotAllowlist(data, uid) {
+      return data is map
+        && data.size() <= 16
+        && (!('uid' in data) || (isValidId(data.uid) && data.uid == uid))
+        && (!('enabled' in data) || data.enabled is bool)
+        && (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 200))
+        && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 500))
+        && (!('createdByUid' in data) || isValidId(data.createdByUid))
+        && (!('updatedByUid' in data) || isValidId(data.updatedByUid))
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidAnnotationTag(tag) {
+      return tag is string && tag.size() >= 1 && tag.size() <= 40;
+    }
+
+    function isValidAnnotationTags(tags) {
+      return tags is list
+        && tags.size() <= 20
+        && (tags.size() < 1 || isValidAnnotationTag(tags[0]))
+        && (tags.size() < 2 || isValidAnnotationTag(tags[1]))
+        && (tags.size() < 3 || isValidAnnotationTag(tags[2]))
+        && (tags.size() < 4 || isValidAnnotationTag(tags[3]))
+        && (tags.size() < 5 || isValidAnnotationTag(tags[4]))
+        && (tags.size() < 6 || isValidAnnotationTag(tags[5]))
+        && (tags.size() < 7 || isValidAnnotationTag(tags[6]))
+        && (tags.size() < 8 || isValidAnnotationTag(tags[7]))
+        && (tags.size() < 9 || isValidAnnotationTag(tags[8]))
+        && (tags.size() < 10 || isValidAnnotationTag(tags[9]))
+        && (tags.size() < 11 || isValidAnnotationTag(tags[10]))
+        && (tags.size() < 12 || isValidAnnotationTag(tags[11]))
+        && (tags.size() < 13 || isValidAnnotationTag(tags[12]))
+        && (tags.size() < 14 || isValidAnnotationTag(tags[13]))
+        && (tags.size() < 15 || isValidAnnotationTag(tags[14]))
+        && (tags.size() < 16 || isValidAnnotationTag(tags[15]))
+        && (tags.size() < 17 || isValidAnnotationTag(tags[16]))
+        && (tags.size() < 18 || isValidAnnotationTag(tags[17]))
+        && (tags.size() < 19 || isValidAnnotationTag(tags[18]))
+        && (tags.size() < 20 || isValidAnnotationTag(tags[19]));
+    }
+
+    function isValidJournalAnnotation(data, uid) {
+      return data.keys().hasAll(['ownerUid', 'note', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerUid', 'note', 'executionKey', 'accountId', 'tags', 'legacyUnlinked', 'importId', 'createdAt', 'updatedAt'])
+        && !data.keys().hasAny(['netPnl', 'balance', 'equity', 'volume'])
+        && isValidId(data.ownerUid)
+        && data.ownerUid == request.auth.uid
+        && data.ownerUid == uid
+        && data.note is string
+        && data.note.size() <= 5000
+        && (!('executionKey' in data) || data.executionKey == null || data.executionKey == '' || isValidId(data.executionKey))
+        && (!('accountId' in data) || data.accountId == null || data.accountId == '' || isValidId(data.accountId))
+        && (!('tags' in data) || data.tags == null || isValidAnnotationTags(data.tags))
+        && (!('legacyUnlinked' in data) || data.legacyUnlinked == null || data.legacyUnlinked is bool)
+        && (!('importId' in data) || data.importId == null || data.importId == '' || (data.importId is string && data.importId.size() <= 128 && data.importId.matches('^[a-zA-Z0-9_.:\\-]+$')))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /pilot_allowlist/{uid} {
+      allow get: if isAdmin() || (isSignedIn() && isValidId(uid) && request.auth.uid == uid);
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(uid)
+        && isValidPilotAllowlist(incoming(), uid);
+
+      allow update: if isAdmin()
+        && isValidId(uid)
+        && isValidPilotAllowlist(incoming(), uid);
+
+      allow delete: if isAdmin() && isValidId(uid);
+    }
+
+    match /fundednext_connections/{connectionId} {
+      allow get: if isSignedIn() && isValidId(connectionId) && resource.data.ownerUid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    match /fundednext_credentials/{connectionId} {
+      allow read, write: if false;
+    }
+
+    match /account_snapshots/{accountId} {
+      allow get: if isSignedIn() && isValidId(accountId) && resource.data.ownerUid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    match /trade_executions/{accountId}/items/{executionKey} {
+      allow get: if isSignedIn() && isValidId(accountId) && isValidId(executionKey) && resource.data.ownerUid == request.auth.uid;
+      allow list: if isSignedIn() && isValidId(accountId) && resource.data.ownerUid == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    match /journal_annotations/{uid}/entries/{annotationId} {
+      allow get: if isSignedIn() && isValidId(uid) && isValidId(annotationId) && request.auth.uid == uid;
+      allow list: if isSignedIn() && isValidId(uid) && request.auth.uid == uid;
+
+      allow create: if isSignedIn()
+        && isValidId(uid)
+        && isValidId(annotationId)
+        && request.auth.uid == uid
+        && isValidJournalAnnotation(incoming(), uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(uid)
+        && isValidId(annotationId)
+        && request.auth.uid == uid
+        && isValidJournalAnnotation(incoming(), uid)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['note', 'executionKey', 'accountId', 'tags', 'legacyUnlinked', 'importId', 'updatedAt'])
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isSignedIn() && isValidId(uid) && isValidId(annotationId) && request.auth.uid == uid;
+    }
+
+    match /sync_jobs/{jobId} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Tredyn · GHR v3.2 Desk & Trade Journal",
+  "description": "Tredyn (tredyn.com) · ระบบบริหารจัดการพอร์ตเทรด คำนวณ 3-TP เช็กกฎ 40% และบันทึกการเทรดแบบเรียลไทม์พร้อมรองรับการใช้งานออฟไลน์ (Offline-First PWA & Cloud Sync)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

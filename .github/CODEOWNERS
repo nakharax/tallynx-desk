@@ -1,0 +1,13 @@
+# TallyNX Desk & Mall — Code Owners
+# All pull requests require owner review before merging to master.
+
+# Default owner for the entire repository
+* @nakharax
+
+# High-sensitivity infrastructure, CI/CD, and governance paths
+/.github/ @nakharax
+/scripts/ @nakharax
+/server.ts @nakharax
+/src/services/ @nakharax
+/firestore.rules @nakharax
+/SECURITY.md @nakharax

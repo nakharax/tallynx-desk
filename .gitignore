@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build & bundle outputs
+build/
+dist/
+dev-dist/
+dist-worker/
+coverage/
+
+# Local archives & packaging artifacts
+*.zip
+
+# Python caches (gateway & smoke scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local databases & worker state
+pilot.db
+pilot.db-shm
+pilot.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment & secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Deployment & CI local artifacts
+.vercel/
+sentinel-ci-receipt.json
+
+# Logs
+*.log
+*.err
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

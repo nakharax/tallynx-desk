@@ -1,0 +1,196 @@
+/* Mall & Marketplace performance, virtualization, and responsive UX polish */
+
+/* Skip offscreen layout/paint for long Mall feeds and large Marketplace grids */
+.mall-feed > .mall-message:not(.is-compact) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 156px;
+}
+
+.mkt-cards-grid > .mkt-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
+  contain: style;
+}
+
+.mall-blueprint {
+  contain: style;
+}
+
+/* Inline search clear control */
+.mall-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.mall-search-clear:hover {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+/* Active filter summary & quick reset strip */
+.mall-filter-status,
+.mkt-filter-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.mall-filter-status {
+  margin: 0 14px 4px;
+  flex-shrink: 0;
+}
+
+.mkt-filter-summary {
+  margin-bottom: 10px;
+}
+
+.mall-filter-status button,
+.mkt-filter-summary button {
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--bento-raised);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mall-filter-status button:hover,
+.mkt-filter-summary button:hover {
+  background: var(--accent);
+  color: var(--accent-on-fill);
+  border-color: var(--accent);
+}
+
+/* Feed window expansion & jump-to-latest affordances */
+.mall-window-banner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  align-self: center;
+  padding: 5px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--bento-raised);
+  color: var(--accent-ink);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.mall-window-banner:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.mall-jump-latest {
+  position: sticky;
+  bottom: 6px;
+  align-self: center;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-on-fill);
+  font-size: 11.5px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.mall-jump-latest:hover {
+  filter: brightness(1.06);
+}
+
+/* Marketplace pagination footer */
+.mkt-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* Subtle deferred-search visual feedback */
+.mall-feed[data-stale="true"],
+.mkt-cards-grid[data-stale="true"] {
+  opacity: 0.78;
+  transition: opacity 120ms ease;
+}
+
+/* Smooth horizontal room strip scrolling on mobile/tablet */
+@media (max-width: 768px) {
+  .mall-zones {
+    scroll-behavior: smooth;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mall-zones button {
+    scroll-snap-align: start;
+  }
+
+  .mall-filter-status {
+    margin-inline: 10px;
+  }
+}
+
+/* Smooth mobile/tablet inspector drawer entrance without altering geometry */
+@media (width < 1200px) {
+  .mall-drawer-backdrop {
+    animation: mallBackdropIn 150ms ease-out;
+  }
+
+  .mall-shell .mall-inspector.mall-drawer {
+    animation: mallDrawerIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    overscroll-behavior: contain;
+  }
+}
+
+@keyframes mallBackdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mallDrawerIn {
+  from {
+    opacity: 0.6;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mall-drawer-backdrop,
+  .mall-shell .mall-inspector.mall-drawer {
+    animation: none;
+  }
+
+  .mall-zones {
+    scroll-behavior: auto;
+  }
+}
