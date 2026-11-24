@@ -257,6 +257,10 @@ jobs:
         id: preview
         if: steps.vercel_auth.outputs.valid == 'true'
         run: |
+          set -euo pipefail
+          GIT_BACKUP="$(mktemp -d)"
+          mv .git "$GIT_BACKUP/.git"
+          trap 'mv "$GIT_BACKUP/.git" .git 2>/dev/null || true; rm -rf "$GIT_BACKUP"' EXIT
           URL=$(vercel deploy --prebuilt --yes --token="$VERCEL_TOKEN")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
       - name: Post Preview URL on PR
@@ -320,6 +324,11 @@ jobs:
           echo "Authenticated to Vercel as: $WHOAMI_OUT"
           vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
           vercel build --prod --token="$VERCEL_TOKEN"
+          # Hide .git during prebuilt upload so Vercel deploys under the maintainer's VERCEL_TOKEN
+          # without blocking external OSS contributor commit authors (TEAM_ACCESS_REQUIRED).
+          GIT_BACKUP="$(mktemp -d)"
+          mv .git "$GIT_BACKUP/.git"
+          trap 'mv "$GIT_BACKUP/.git" .git 2>/dev/null || true; rm -rf "$GIT_BACKUP"' EXIT
           URL=$(vercel deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
       - name: Post-Deploy Verification & Receipt
