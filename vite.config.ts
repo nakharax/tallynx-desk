@@ -14,9 +14,9 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
-          name: 'TallyNX Mall — Community Mall & Trading OS',
-          short_name: 'TallyNX Mall',
-          description: 'TallyNX Mall (mall.tallynx.com) · คอมมูนิตี้สองภาษาเพื่อทบทวนความเสี่ยงและสถิติ MT5 พร้อมเครื่องมือวิเคราะห์พอร์ตแบบอ่านอย่างเดียว',
+          name: 'TallyNX Desk — Risk Analytics & Trade Journal',
+          short_name: 'TallyNX Desk',
+          description: 'TallyNX Desk (desk.tallynx.com) · Prop firm risk analytics, 3-TP calculator, read-only MT5 sync, and bilingual trade journal.',
           theme_color: '#FFFFFF',
           background_color: '#FFFFFF',
           display: 'standalone',

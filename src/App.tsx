@@ -219,6 +219,7 @@ import {
   buildWebPortalUrl,
   deskThemeToWeb,
   parseWebHandoff,
+  resolveBrandHomeSection,
   resolveDeskSection,
   resolveDeskTheme,
   stripWebHandoffParams,
@@ -377,13 +378,13 @@ CooldownBanner.displayName = 'CooldownBanner';
 
 export default function App() {
   const [initialHandoff] = useState(() => {
-    const { pathname, search, hash } = window.location;
+    const { pathname, search, hash, hostname } = window.location;
     const sandbox = parseWebHandoff(search);
     return {
       sandbox,
       theme: resolveDeskTheme(search),
       section: resolveDeskSection(search, hash, pathname)
-        ?? (sandbox ? 'sec-calc' : window.location.hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts'),
+        ?? (sandbox ? 'sec-calc' : resolveBrandHomeSection(hostname)),
     };
   });
   const [webSandbox, setWebSandbox] = useState(initialHandoff.sandbox);
@@ -632,9 +633,11 @@ export default function App() {
 
   const deskBrandName = workspaceBrandDisplayName(state.deskBrandName);
   useEffect(() => {
-    document.title = activeNavSection === 'sec-mall' || deskBrandName === DEFAULT_WORKSPACE_BRAND
+    document.title = activeNavSection === 'sec-mall'
       ? deskText(deskLang, 'TallyNX Mall — Community Mall & Trading OS', 'TallyNX Mall — คอมมูนิตี้มอลล์และระบบเทรด')
-      : `${deskBrandName} — ${deskText(deskLang, 'Risk Analytics & Trade Journal', 'วิเคราะห์ความเสี่ยงและบันทึกการเทรด')}`;
+      : deskBrandName === DEFAULT_WORKSPACE_BRAND
+        ? deskText(deskLang, 'TallyNX Desk — Risk Analytics & Trade Journal', 'TallyNX Desk — วิเคราะห์ความเสี่ยงและบันทึกการเทรด')
+        : `${deskBrandName} — ${deskText(deskLang, 'Risk Analytics & Trade Journal', 'วิเคราะห์ความเสี่ยงและบันทึกการเทรด')}`;
   }, [activeNavSection, deskBrandName, deskLang]);
 
   const addToast = useCallback((text: string, textTh?: string, lang?: DeskLanguage, action?: DeskToastAction) => {
@@ -1720,6 +1723,14 @@ export default function App() {
   }, [commitWorkspaceChange]);
 
   const handleOpenMallDefault = useCallback(() => openMall(), [openMall]);
+  const handleOpenBrandHome = useCallback(() => {
+    const homeSection = resolveBrandHomeSection(window.location.hostname);
+    if (homeSection === 'sec-mall') {
+      openMall();
+    } else {
+      handleSwitchPage(homeSection);
+    }
+  }, [handleSwitchPage, openMall]);
   const handleOpenSettings = useCallback(() => {
     setShowAccountsDrawer(false);
     handleSwitchPage('sec-settings');
@@ -3497,6 +3508,7 @@ export default function App() {
       <WorkspaceSidebar
         lang={deskLang}
         activePillar={activePillar}
+        onGoHome={handleOpenBrandHome}
         onOpenMall={handleOpenMallDefault}
         onSwitchPage={handleSwitchPage}
         onOpenSettings={handleOpenSettings}
@@ -3510,7 +3522,14 @@ export default function App() {
           <div className="topbar-inner">
             {/* LEFT: Brand, Active Port Selector + Health Pill, Command Palette */}
             <div className="fx-breadcrumb">
-              <button type="button" className="mall-top-brand" onClick={() => openMall()} title="mall.tallynx.com · Community Mall & Risk OS">
+              <button
+                type="button"
+                className="mall-top-brand"
+                onClick={handleOpenBrandHome}
+                title={resolveBrandHomeSection(window.location.hostname) === 'sec-mall'
+                  ? 'mall.tallynx.com · Community Mall & Risk OS'
+                  : 'desk.tallynx.com · TallyNX Desk'}
+              >
                 <strong>TALLY<span className="mall-top-brand-accent">NX</span></strong>
                 <small>{activePageTitle}</small>
               </button>

@@ -51,6 +51,10 @@ const TRANSIENT_PARAMS = [
   'source', 'connected_via', 'consistency_cap', 'day_share', 'step',
 ];
 
+export function resolveBrandHomeSection(hostname: string): DeskSectionId {
+  return hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts';
+}
+
 export function resolveDeskSection(search: string, hash = '', pathname = ''): DeskSectionId | undefined {
   const hashKey = hash.replace(/^#\/?|\/+$/g, '').trim().toLowerCase();
   const pageKey = new URLSearchParams(search).get('page')?.trim().toLowerCase() ?? '';

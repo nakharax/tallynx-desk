@@ -4,11 +4,19 @@ import {
   buildWebPortalUrl,
   calculateWebSandboxRisk,
   parseWebHandoff,
+  resolveBrandHomeSection,
   resolveDeskSection,
   resolveDeskTheme,
   stripWebHandoffParams,
   updateDeskPageUrl,
 } from './webHandoff.ts';
+
+test('uses Desk Home by default and Mall Home on the Mall hostname', () => {
+  assert.equal(resolveBrandHomeSection('desk.tallynx.com'), 'sec-accounts');
+  assert.equal(resolveBrandHomeSection('localhost'), 'sec-accounts');
+  assert.equal(resolveBrandHomeSection(new URL('https://tallynx-desk-git-preview.vercel.app/').hostname), 'sec-accounts');
+  assert.equal(resolveBrandHomeSection('mall.tallynx.com'), 'sec-mall');
+});
 
 test('resolves each Desk page from its clean path, query alias, hash alias or section ID', () => {
   const pages = {
