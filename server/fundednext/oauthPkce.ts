@@ -13,9 +13,96 @@ import type { PilotStore } from './store.js';
 
 export const PKCE_TTL_MS = 10 * 60 * 1000;
 export const DEFAULT_MCP_URL = 'https://mcp.fundednext.com/mcp';
+export const OAUTH_CALLBACK_PATH = '/api/fundednext/oauth/callback';
+export const DEFAULT_OAUTH_REDIRECT_URI = `https://desk.tallynx.com${OAUTH_CALLBACK_PATH}`;
+export const DEFAULT_TRUSTED_DESK_ORIGINS = Object.freeze([
+  'https://desk.tallynx.com',
+  'https://mall.tallynx.com',
+  'https://tallynx-desk.vercel.app',
+  'https://tredyn-desk.vercel.app',
+]);
 const oauthOrigin = 'https://mcp.fundednext.com';
 const nonce = () => randomBytes(32).toString('base64url');
 const browserHash = (browserSession: string) => createHash('sha256').update(browserSession).digest('hex');
+
+function isLocalhostOrigin(url: URL): boolean {
+  return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+}
+
+function parseTrustedOrigin(raw: string | undefined): string | null {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== 'https:' && !isLocalhostOrigin(url)) || url.username || url.password || url.hash) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function collectTrustedOrigins(extraOrigins: Iterable<string> = []): Set<string> {
+  const trusted = new Set<string>(DEFAULT_TRUSTED_DESK_ORIGINS);
+  const envRedirectOrigin = parseTrustedOrigin(process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI);
+  if (envRedirectOrigin) trusted.add(envRedirectOrigin);
+  for (const part of String(process.env.FUNDEDNEXT_ALLOWED_ORIGINS ?? '').split(',')) {
+    const origin = parseTrustedOrigin(part);
+    if (origin) trusted.add(origin);
+  }
+  for (const extra of extraOrigins) {
+    const origin = parseTrustedOrigin(extra);
+    if (origin) trusted.add(origin);
+  }
+  return trusted;
+}
+
+export function isTrustedDeskRedirectUri(
+  rawUri: string,
+  options: { allowLocalhost?: boolean; extraOrigins?: Iterable<string> } = {}
+): string | null {
+  try {
+    const url = new URL(rawUri);
+    if (url.pathname !== OAUTH_CALLBACK_PATH || url.search || url.hash || url.username || url.password) {
+      return null;
+    }
+    const trusted = collectTrustedOrigins(options.extraOrigins);
+    const allowLocalhost = options.allowLocalhost ?? process.env.NODE_ENV !== 'production';
+    if (url.protocol === 'https:' && trusted.has(url.origin)) {
+      return `${url.origin}${OAUTH_CALLBACK_PATH}`;
+    }
+    if (isLocalhostOrigin(url) && (allowLocalhost || trusted.has(url.origin))) {
+      return `${url.origin}${OAUTH_CALLBACK_PATH}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveTrustedDeskRedirectUri(
+  headers: Record<string, string | string[] | undefined>,
+  options: { protocol?: string; allowLocalhost?: boolean } = {}
+): string | undefined {
+  const rawProto = Array.isArray(headers['x-forwarded-proto'])
+    ? headers['x-forwarded-proto'][0]
+    : headers['x-forwarded-proto'];
+  const protoCandidate = String(rawProto ?? '').split(',')[0].trim().toLowerCase();
+  const proto = protoCandidate === 'http' || protoCandidate === 'https'
+    ? protoCandidate
+    : (options.protocol === 'http' || options.protocol === 'https' ? options.protocol : 'https');
+  const rawHost = Array.isArray(headers['x-forwarded-host'])
+    ? headers['x-forwarded-host'][0]
+    : (headers['x-forwarded-host'] ?? (Array.isArray(headers.host) ? headers.host[0] : headers.host));
+  const host = String(rawHost ?? '').split(',')[0].trim();
+  if (!host || /[^a-zA-Z0-9.:-]/.test(host)) {
+    return undefined;
+  }
+  return isTrustedDeskRedirectUri(`${proto}://${host}${OAUTH_CALLBACK_PATH}`, {
+    allowLocalhost: options.allowLocalhost,
+  }) ?? undefined;
+}
 
 interface OAuthClient {
   clientId: string;
@@ -36,6 +123,7 @@ interface PkceOptions {
   clientId?: string;
   clientSecret?: string;
   resource?: string;
+  allowLocalhost?: boolean;
   isAllowlisted?: (uid: string) => boolean | Promise<boolean>;
   registerClient?: (redirectUri: string) => Promise<string>;
   fetchTokens: (exchange: TokenExchange) => Promise<FundedNextTokens>;
@@ -49,9 +137,20 @@ export class OAuthPkceManager {
     this.now = options.now ?? Date.now;
   }
 
-  async start(uid: string, opts: { connectionId?: string } = {}) {
+  async start(uid: string, opts: { connectionId?: string; redirectUri?: string } = {}) {
     await this.requirePilot(uid);
-    const redirectUri = checkedUrl(this.options.redirectUri, true);
+    const defaultRedirectUri = checkedUrl(this.options.redirectUri, true);
+    let redirectUri = defaultRedirectUri;
+    if (opts.redirectUri !== undefined) {
+      const validated = isTrustedDeskRedirectUri(opts.redirectUri, {
+        allowLocalhost: this.options.allowLocalhost,
+        extraOrigins: [new URL(defaultRedirectUri).origin],
+      });
+      if (!validated) {
+        throw new PilotStoreError(400, 'Invalid redirect URI');
+      }
+      redirectUri = validated;
+    }
     const authorizeUrl = new URL(checkedUrl(this.options.authorizationEndpoint));
     const previous = opts.connectionId ? await this.options.store.getConnection(uid, opts.connectionId) : null;
     const clientId = this.options.clientId ?? await this.options.registerClient?.(redirectUri);
@@ -63,7 +162,7 @@ export class OAuthPkceManager {
     await this.options.store.putPkceSession(state, {
       uid, browserSessionHash: browserHash(browserSession), codeVerifier,
       expiresAt: this.now() + PKCE_TTL_MS, connectionId: previous?.id ?? nonce(),
-      expectedGeneration: previous?.generation ?? 0, clientId,
+      expectedGeneration: previous?.generation ?? 0, clientId, redirectUri,
     });
     const params = {
       response_type: 'code', client_id: clientId, redirect_uri: redirectUri, scope: 'mcp:read', state,
@@ -82,8 +181,9 @@ export class OAuthPkceManager {
     const session = await this.options.store.consumePkceSession(state, uid, browserHash(browserSession), this.now());
     if (!session) throw new PilotStoreError(400, 'Invalid or expired OAuth session');
     const clientSecret = session.clientId === this.options.clientId ? this.options.clientSecret : undefined;
+    const redirectUri = checkedUrl(session.redirectUri ?? this.options.redirectUri, true);
     const tokens = await this.options.fetchTokens({
-      code, codeVerifier: session.codeVerifier, redirectUri: checkedUrl(this.options.redirectUri, true),
+      code, codeVerifier: session.codeVerifier, redirectUri,
       clientId: session.clientId, clientSecret,
     });
     const envelope = await this.options.cipher.encryptTokens({ ...tokens, clientId: session.clientId, clientSecret });
@@ -179,14 +279,19 @@ export function createFundedNextRuntimeForStore(
   const resource = process.env.FUNDEDNEXT_OAUTH_RESOURCE ?? new URL(mcpUrl).origin;
   const tokenEndpoint = process.env.FUNDEDNEXT_OAUTH_TOKEN_ENDPOINT ?? oauthOrigin + '/oauth/token';
   const configuredClientId = process.env.FUNDEDNEXT_OAUTH_CLIENT_ID?.trim() || undefined;
-  let registeredClient: { redirectUri: string; clientId: string } | undefined;
+  const registeredClients = new Map<string, string>();
 
-  const requestTokensWithClientReset = async (input: Record<string, string>, previousRefreshToken?: string) => {
+  const requestTokensWithClientReset = async (
+    input: Record<string, string>,
+    previousRefreshToken?: string,
+    redirectUri?: string
+  ) => {
     try {
       return await requestTokens(tokenEndpoint, input, previousRefreshToken, requestFetch);
     } catch (error) {
       if (error instanceof OAuthTokenError && (error.oauthError === 'invalid_client' || error.oauthError === 'unauthorized_client')) {
-        registeredClient = undefined;
+        if (redirectUri) registeredClients.delete(redirectUri);
+        else registeredClients.clear();
       }
       throw error;
     }
@@ -199,10 +304,11 @@ export function createFundedNextRuntimeForStore(
     clientSecret: process.env.FUNDEDNEXT_OAUTH_CLIENT_SECRET,
     redirectUri:
       process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI ??
-      'https://desk.tallynx.com/api/fundednext/oauth/callback',
+      DEFAULT_OAUTH_REDIRECT_URI,
     registerClient: async redirectUri => {
-      if (registeredClient?.redirectUri === redirectUri) {
-        return registeredClient.clientId;
+      const cached = registeredClients.get(redirectUri);
+      if (cached) {
+        return cached;
       }
       let response: Response;
       try {
@@ -224,13 +330,13 @@ export function createFundedNextRuntimeForStore(
       if (typeof result?.client_id !== 'string' || !result.client_id) {
         throw new PilotStoreError(502, 'Invalid FundedNext OAuth registration response');
       }
-      registeredClient = { redirectUri, clientId: result.client_id };
+      registeredClients.set(redirectUri, result.client_id);
       return result.client_id;
     },
     fetchTokens: exchange => requestTokensWithClientReset({
       ...clientParams(exchange), grant_type: 'authorization_code', code: exchange.code,
       code_verifier: exchange.codeVerifier, redirect_uri: exchange.redirectUri, resource,
-    }),
+    }, undefined, exchange.redirectUri),
   });
   const refreshTokens = (tokens: FundedNextTokens) => {
     if (!tokens.refreshToken || !tokens.clientId) throw new OAuthTokenError(true);

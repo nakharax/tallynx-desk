@@ -335,10 +335,10 @@ jobs:
         run: |
           set -euo pipefail
           URL="${{ steps.deploy.outputs.url }}"
-          STATUS_CODE=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 15 "https://tredyn-desk.vercel.app/api/health")
-          echo "Live HTTP check https://tredyn-desk.vercel.app/api/health -> $STATUS_CODE"
+          STATUS_CODE=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 15 "https://desk.tallynx.com/api/health")
+          echo "Live HTTP check https://desk.tallynx.com/api/health -> $STATUS_CODE"
           test "$STATUS_CODE" = 200
           echo "### Tredyn Desk Production Release Receipt" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Deployment URL:** $URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Production Domain:** https://tredyn-desk.vercel.app (HTTP $STATUS_CODE)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Production Domain:** https://desk.tallynx.com (HTTP $STATUS_CODE)" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Commit:** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

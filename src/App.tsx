@@ -106,6 +106,7 @@ import {
   isProOrHigher,
   OperationType,
   pushWorkspaceToFirestore,
+  resolveUserAdminStatus,
   signInWithGooglePopup,
   signOutFirebase,
   testFirestoreConnection,
@@ -374,6 +375,7 @@ export default function App() {
   const [idbReady, setIdbReady] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [entitlement, setEntitlement] = useState<EntitlementRecord | null>(null);
+  const [isClaimAdmin, setIsClaimAdmin] = useState(false);
   const [inviteKey, setInviteKey] = useState<string>('');
   const [cloudSyncing, setCloudSyncing] = useState(false);
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
@@ -872,6 +874,7 @@ export default function App() {
 
       if (!user) {
         setEntitlement(null);
+        setIsClaimAdmin(false);
         setCloudSyncing(false);
 
         if (prevUid !== null) {
@@ -911,13 +914,18 @@ export default function App() {
       }
 
       // Signed in / switched to a Google account -> load ONLY this UID's isolated local cache first
-      fetchOrInitEntitlement(user)
-        .then((ent) => {
-          if (authTransitionIdRef.current === transitionId) {
-            setEntitlement(ent);
-          }
-        })
-        .catch(() => {});
+      Promise.allSettled([
+        fetchOrInitEntitlement(user),
+        resolveUserAdminStatus(user),
+      ]).then(([entResult, adminResult]) => {
+        if (authTransitionIdRef.current !== transitionId) return;
+        if (entResult.status === 'fulfilled') {
+          setEntitlement(entResult.value);
+        }
+        if (adminResult.status === 'fulfilled') {
+          setIsClaimAdmin(adminResult.value);
+        }
+      });
 
       const preserveLicenseModal = !!stateRef.current.showLicenseModal;
       const preserveDbManager = !!stateRef.current.showDbManager;
@@ -3228,7 +3236,7 @@ export default function App() {
               <button
                 type="button"
                 className={`topbar-plan-btn ${
-                  isAdminUser(currentUser, entitlement) || isProOrHigher(currentUser, entitlement)
+                  isAdminUser(currentUser, entitlement, isClaimAdmin) || isProOrHigher(currentUser, entitlement, isClaimAdmin)
                     ? 'pro'
                     : ''
                 }`}
@@ -3248,7 +3256,7 @@ export default function App() {
                 }}
               >
                 <span className="mono">
-                  {isAdminUser(currentUser, entitlement)
+                  {isAdminUser(currentUser, entitlement, isClaimAdmin)
                     ? 'PRO+'
                     : entitlement?.plan || (currentUser ? 'FREE' : ui.topbar.signIn)}
                 </span>
@@ -3316,7 +3324,7 @@ export default function App() {
                         }}
                       >
                         <span className="mono">
-                          {isAdminUser(currentUser, entitlement)
+                          {isAdminUser(currentUser, entitlement, isClaimAdmin)
                             ? 'PRO+'
                             : entitlement?.plan || (currentUser ? 'FREE' : ui.topbar.signIn)}
                         </span>
@@ -3604,6 +3612,7 @@ export default function App() {
                     brandName={deskBrandName}
                     currentUser={currentUser}
                     entitlement={entitlement}
+                    isClaimAdmin={isClaimAdmin}
                     inviteKey={inviteKey}
                     onClearInviteKey={() => setInviteKey('')}
                     onClose={() =>
@@ -3613,6 +3622,7 @@ export default function App() {
                     onGoogleLogout={async () => {
                       await signOutFirebase();
                       setEntitlement(null);
+                      setIsClaimAdmin(false);
                       addToast('Signed out. Local data is still available.', 'ออกจากระบบแล้ว ข้อมูลในเครื่องยังอยู่ครบ');
                     }}
                     onEntitlementUpdated={(next) => setEntitlement(next)}
@@ -4370,7 +4380,7 @@ export default function App() {
                 workspaceState={state}
                 pageSnapshot={activePageSnapshot}
                 isOnline={isOnline}
-                hasProAccess={isProOrHigher(currentUser, entitlement)}
+                hasProAccess={isProOrHigher(currentUser, entitlement, isClaimAdmin)}
                 alerts={behavioralAlerts}
                 analytics={realtimeAnalytics}
                 currentUserUid={currentUser?.uid ?? null}

@@ -79,6 +79,7 @@ export interface PkceSession {
   connectionId: string;
   expectedGeneration: number;
   clientId: string;
+  redirectUri?: string;
 }
 
 type Collection = 'pilot_allowlist' | 'fundednext_connections' | 'fundednext_credentials' | 'account_snapshots'

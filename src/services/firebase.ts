@@ -28,6 +28,12 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { EntitlementRecord, GhrWorkspaceState, LicenseRecord, PlanTier } from '../types/ghr';
 import { compressWorkspaceJsonForCloud } from '../utils/cloudPayloadCodec';
+import {
+  assertRedemptionAllowed,
+  buildBoundedWorkspacePayload,
+  hasAdminAccess,
+  hasProOrHigherAccess,
+} from '../utils/firebaseHelpers';
 
 const rawBootstrapAdminEmails = String(
   (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BOOTSTRAP_ADMIN_EMAILS || ''
@@ -37,11 +43,6 @@ export const BOOTSTRAP_ADMIN_EMAILS: readonly string[] = rawBootstrapAdminEmails
   .split(',')
   .map((entry) => entry.trim().toLowerCase())
   .filter(Boolean);
-
-function isBootstrapAdminEmail(email: string | null | undefined): boolean {
-  if (!email || BOOTSTRAP_ADMIN_EMAILS.length === 0) return false;
-  return BOOTSTRAP_ADMIN_EMAILS.includes(email.trim().toLowerCase());
-}
 
 const app = initializeApp(firebaseConfig);
 
@@ -108,8 +109,15 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 export async function testFirestoreConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
+  const currentUser = auth.currentUser;
+  if (!currentUser || !currentUser.emailVerified) {
+    return typeof navigator === 'undefined' ? true : navigator.onLine;
+  }
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    await getDocFromServer(doc(db, 'entitlements', currentUser.uid));
     return true;
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
@@ -171,28 +179,51 @@ export async function signOutFirebase() {
   return await signOut(auth);
 }
 
-export function isAdminUser(user: User | null | undefined, entitlement?: EntitlementRecord | null): boolean {
-  if (!user) return false;
-  if (user.emailVerified && isBootstrapAdminEmail(user.email)) return true;
-  return entitlement?.plan === 'ADMIN' && entitlement?.status === 'ACTIVE';
+export async function resolveUserAdminStatus(user: User | null | undefined): Promise<boolean> {
+  if (!user || !user.emailVerified) return false;
+  try {
+    const tokenResult = await user.getIdTokenResult();
+    if (tokenResult?.claims?.admin === true) {
+      return true;
+    }
+  } catch {
+    // Fall through to /admins/{uid} lookup if token claims are temporarily unavailable
+  }
+  try {
+    const adminSnap = await getDoc(doc(db, 'admins', user.uid));
+    return adminSnap.exists();
+  } catch {
+    return false;
+  }
 }
 
-export function isProOrHigher(user: User | null | undefined, entitlement?: EntitlementRecord | null): boolean {
-  if (isAdminUser(user, entitlement)) return true;
-  if (!entitlement || entitlement.status !== 'ACTIVE') return false;
-  return entitlement.plan === 'TRIAL' || entitlement.plan === 'PRO' || entitlement.plan === 'LIFETIME';
+export function isAdminUser(
+  user: User | null | undefined,
+  entitlement?: EntitlementRecord | null,
+  hasClaimAdmin?: boolean
+): boolean {
+  return hasAdminAccess(user, entitlement, hasClaimAdmin);
+}
+
+export function isProOrHigher(
+  user: User | null | undefined,
+  entitlement?: EntitlementRecord | null,
+  hasClaimAdmin?: boolean
+): boolean {
+  return hasProOrHigherAccess(user, entitlement, hasClaimAdmin);
 }
 
 export async function fetchOrInitEntitlement(user: User): Promise<EntitlementRecord> {
   const path = `entitlements/${user.uid}`;
   const ref = doc(db, 'entitlements', user.uid);
   const email = (user.email || `${user.uid}@user.local`).slice(0, 200);
+  const hasServerAdmin = await resolveUserAdminStatus(user);
 
-  if (user.emailVerified && isBootstrapAdminEmail(user.email)) {
-    try {
-      const snap = await getDoc(ref);
+  try {
+    const snap = await getDoc(ref);
+    if (hasServerAdmin) {
       if (!snap.exists()) {
-        const payload = {
+        await setDoc(ref, {
           ownerId: user.uid,
           email,
           plan: 'ADMIN' as PlanTier,
@@ -200,29 +231,27 @@ export async function fetchOrInitEntitlement(user: User): Promise<EntitlementRec
           status: 'ACTIVE' as const,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        };
-        await setDoc(ref, payload);
+        });
+      } else {
+        const existing = snap.data();
+        if (existing.plan !== 'ADMIN' || existing.status !== 'ACTIVE') {
+          await updateDoc(ref, {
+            email,
+            plan: 'ADMIN' as PlanTier,
+            status: 'ACTIVE' as const,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
       return {
         ownerId: user.uid,
         email,
         plan: 'ADMIN',
-        licenseKey: '',
-        status: 'ACTIVE',
-      };
-    } catch {
-      return {
-        ownerId: user.uid,
-        email,
-        plan: 'ADMIN',
-        licenseKey: '',
+        licenseKey: snap.exists() ? String(snap.data().licenseKey || '') : '',
         status: 'ACTIVE',
       };
     }
-  }
 
-  try {
-    const snap = await getDoc(ref);
     if (snap.exists()) {
       const data = snap.data();
       return {
@@ -233,6 +262,7 @@ export async function fetchOrInitEntitlement(user: User): Promise<EntitlementRec
         status: (data.status as 'ACTIVE' | 'SUSPENDED') || 'ACTIVE',
       };
     }
+
     await setDoc(ref, {
       ownerId: user.uid,
       email,
@@ -265,6 +295,12 @@ export async function redeemLicenseKey(user: User, rawKey: string): Promise<Enti
   const entRef = doc(db, 'entitlements', user.uid);
   const email = (user.email || `${user.uid}@user.local`).slice(0, 200);
 
+  const existingEnt = await getDoc(entRef);
+  const existingStatus = existingEnt.exists()
+    ? ((existingEnt.data()?.status as 'ACTIVE' | 'SUSPENDED') || 'ACTIVE')
+    : 'ACTIVE';
+  assertRedemptionAllowed(existingEnt.exists() ? { status: existingStatus } : null);
+
   let licSnap;
   try {
     licSnap = await getDoc(licRef);
@@ -284,7 +320,6 @@ export async function redeemLicenseKey(user: User, rawKey: string): Promise<Enti
     throw new Error('License Key นี้ถูกผูกใช้งานกับบัญชีอื่นแล้ว');
   }
 
-  const existingEnt = await getDoc(entRef);
   const batch = writeBatch(db);
   if (!licData.redeemedByUid) {
     batch.update(licRef, {
@@ -324,7 +359,7 @@ export async function redeemLicenseKey(user: User, rawKey: string): Promise<Enti
     email,
     plan: licData.plan,
     licenseKey: cleanKey,
-    status: 'ACTIVE',
+    status: existingStatus,
   };
 }
 
@@ -390,70 +425,47 @@ export async function pushWorkspaceToFirestore(uid: string, state: GhrWorkspaceS
   const path = `workspaces/${uid}`;
   const docRef = doc(db, 'workspaces', uid);
 
-  let payloadJson = await compressWorkspaceJsonForCloud(JSON.stringify(state));
-  if (payloadJson.length > 860000) {
-    // 1. Strip raw MT5 spreadsheet caches first
-    const slimState: GhrWorkspaceState = {
-      ...state,
-      mt5RawReports: {},
-    };
-    payloadJson = await compressWorkspaceJsonForCloud(JSON.stringify(slimState));
-
-    // 2. If still near Firestore 1MB limit after Gzip, trim chat history & oldest journal tail safely
-    if (payloadJson.length > 860000) {
-      const compactState: GhrWorkspaceState = {
-        ...slimState,
-        chatMessages: (slimState.chatMessages || []).slice(-20),
-      };
-      payloadJson = await compressWorkspaceJsonForCloud(JSON.stringify(compactState));
-      if (payloadJson.length > 880000) {
-        const cappedTrades = [...compactState.journal];
-        while (cappedTrades.length > 100) {
-          cappedTrades.pop();
-          if (cappedTrades.length % 100 === 0 || cappedTrades.length <= 150) {
-            const candidate = await compressWorkspaceJsonForCloud(
-              JSON.stringify({ ...compactState, journal: cappedTrades })
-            );
-            payloadJson = candidate;
-            if (candidate.length <= 880000) break;
-          }
-        }
-        if (payloadJson.length > 880000) {
-          payloadJson = await compressWorkspaceJsonForCloud(
-            JSON.stringify({ ...compactState, journal: cappedTrades })
-          );
-        }
-      }
-    }
-  }
-
+  const payloadJson = await buildBoundedWorkspacePayload(state, compressWorkspaceJsonForCloud);
   const clientUpdatedAt = (state.lastSavedAt || new Date().toISOString()).slice(0, 64);
   const tradeCount = Math.min(100000, Math.max(0, state.journal.length));
   const portCount = Math.min(1000, Math.max(0, Object.keys(state.accounts || {}).length));
 
+  const updateFields = {
+    payloadJson,
+    tradeCount,
+    portCount,
+    clientUpdatedAt,
+    updatedAt: serverTimestamp(),
+  };
+
   try {
-    const existingSnap = await getDoc(docRef);
+    let existingSnap = await getDoc(docRef);
     if (!existingSnap.exists()) {
+      const serverSnap = await getDocFromServer(docRef).catch(() => null);
+      if (serverSnap) {
+        existingSnap = serverSnap;
+      }
+    }
+
+    if (existingSnap.exists()) {
+      await updateDoc(docRef, updateFields);
+      return;
+    }
+
+    try {
       await setDoc(docRef, {
         ownerId: uid.slice(0, 128),
-        payloadJson,
-        tradeCount,
-        portCount,
-        clientUpdatedAt,
+        ...updateFields,
         createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       });
-    } else {
-      const existingData = existingSnap.data();
-      await setDoc(docRef, {
-        ownerId: existingData.ownerId || uid.slice(0, 128),
-        payloadJson,
-        tradeCount,
-        portCount,
-        clientUpdatedAt,
-        createdAt: existingData.createdAt || serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+    } catch (createErr) {
+      // Handle concurrent first-create race where another tab/device created the doc first
+      const serverSnap = await getDocFromServer(docRef).catch(() => null);
+      if (serverSnap?.exists()) {
+        await updateDoc(docRef, updateFields);
+        return;
+      }
+      throw createErr;
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);

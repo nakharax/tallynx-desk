@@ -102,7 +102,12 @@ export function createMallRouter(options: {
     },
   });
   const { telemetryBus } = options;
-  const configuredSecret = (process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET)?.trim();
+  const legacyBaseUrl = options.legacyBaseUrl.trim().replace(/\/+$/, '');
+  const configuredSecret = (
+    process.env.TALLYNX_MALL_SNAPSHOT_SECRET ||
+    process.env.TALLYNX_SSO_SECRET ||
+    process.env.SSO_SHARED_SECRET
+  )?.trim();
   const snapshotSecret = configuredSecret && configuredSecret.length >= 16 ? configuredSecret : processSnapshotSecret;
   const snapshotSignature = (snapshot: MallSnapshotAttachment) => createHmac('sha256', snapshotSecret)
     .update('mall:snapshot:v1:' + JSON.stringify(snapshot)).digest('hex');
@@ -127,10 +132,11 @@ export function createMallRouter(options: {
   let nextLegacyRead = 0;
   let legacyAvailable = false;
   function readLegacyHistory() {
+    if (!legacyBaseUrl) return Promise.resolve();
     if (legacyRead) return legacyRead;
     if (Date.now() < nextLegacyRead) return Promise.resolve();
     legacyAvailable = false;
-    legacyRead = fetch(options.legacyBaseUrl + '/desk-room', {
+    legacyRead = fetch(legacyBaseUrl + '/desk-room', {
       headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(2500),
     }).then(async (response) => {
       if (!response.ok) return;
@@ -154,8 +160,8 @@ export function createMallRouter(options: {
     } else if (event.type === 'message' && !event.message.threadRootId) {
       const item = toDeskRoomMessage(event.message);
       telemetryBus.emit('desk_room_update', { type: 'message', item });
-      if (item.text) {
-        void fetch(options.legacyBaseUrl + '/desk-room', {
+      if (legacyBaseUrl && item.text) {
+        void fetch(legacyBaseUrl + '/desk-room', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item }),
           signal: AbortSignal.timeout(2500),
         }).catch(() => {});
@@ -243,10 +249,10 @@ export function createMallRouter(options: {
     const body = req.body || {};
     const source = await resolveSource(req, body.verifiedChannel);
     const local = engine.updatePresence(zoneId, body, source?.verifiedBadge.channel);
-    if (zoneId === DESK_ROOM_ZONE_ID) {
+    if (zoneId === DESK_ROOM_ZONE_ID && legacyBaseUrl) {
       const current = local.find((item) => item.handle === mallHandle(body.handle))!;
       try {
-        const response = await fetch(options.legacyBaseUrl + '/desk-room/presence', {
+        const response = await fetch(legacyBaseUrl + '/desk-room/presence', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(2500),
           body: JSON.stringify(toDeskRoomPresence(current)),
         });

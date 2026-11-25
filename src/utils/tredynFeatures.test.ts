@@ -185,11 +185,18 @@ test('generateLiveBridgeApiKey & generateTredynLiveBridgeMq5 format valid EA sou
   const key = generateLiveBridgeApiKey('port1');
   assert.ok(key.startsWith('trd_live_port1_'));
   const mq5 = generateTredynLiveBridgeMq5({
-    endpointUrl: 'https://desk.example.com/api/mt5/live-bridge/ingest',
+    endpointUrl: 'https://desk.example.com/api/mt5/live-bridge/push',
     apiKey: key,
     symbolFilter: 'XAUUSD',
   });
   assert.ok(mq5.includes('#property strict'));
   assert.ok(mq5.includes(key));
+  assert.ok(mq5.includes('https://desk.example.com/api/mt5/live-bridge/push'));
   assert.ok(mq5.includes('WebRequest("POST"'));
+
+  const fallbackMq5 = generateTredynLiveBridgeMq5({
+    endpointUrl: '',
+    apiKey: key,
+  });
+  assert.ok(fallbackMq5.includes('https://YOUR_DOMAIN/api/mt5/live-bridge/push'));
 });

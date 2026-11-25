@@ -12,7 +12,7 @@ export interface RemoteVpsPilotClientOptions {
 export interface RemoteVpsPilotServices {
   remoteRpc: true;
   oauth: {
-    start(uid: string, opts?: { connectionId?: string }): Promise<{ authorizeUrl: string; browserSession: string }>;
+    start(uid: string, opts?: { connectionId?: string; redirectUri?: string }): Promise<{ authorizeUrl: string; browserSession: string }>;
     callback(input: { state: string; code: string; browserSession: string; uid: string }): Promise<{ connectionId: string; status: 'CONNECTED' }>;
   };
   listDirectory(uid: string, connectionId?: string): Promise<{ accounts: PilotAccount[]; connectionStatus?: ConnectionStatus }>;
@@ -87,7 +87,10 @@ export function createRemoteVpsPilotServices(options: RemoteVpsPilotClientOption
   return {
     remoteRpc: true,
     oauth: {
-      start: (uid, opts) => callRpc('/fundednext-rpc/connections/start', uid, { ...(opts?.connectionId ? { connectionId: opts.connectionId } : {}) }),
+      start: (uid, opts) => callRpc('/fundednext-rpc/connections/start', uid, {
+        ...(opts?.connectionId ? { connectionId: opts.connectionId } : {}),
+        ...(opts?.redirectUri ? { redirectUri: opts.redirectUri } : {}),
+      }),
       callback: ({ state, code, browserSession, uid }) =>
         callRpc('/fundednext-rpc/oauth/callback', uid, { state, code, browserSession }),
     },

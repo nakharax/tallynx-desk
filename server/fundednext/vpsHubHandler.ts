@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RawRow } from './brokerTypes.js';
-import type { OAuthPkceManager } from './oauthPkce.js';
+import { isTrustedDeskRedirectUri, type OAuthPkceManager } from './oauthPkce.js';
 import { PilotStoreError } from './store.js';
 import type { PilotStore } from './store.js';
 import { ReplayNonceCache, verifyVpsRpcRequest } from './vpsRpc.js';
@@ -11,6 +11,7 @@ export interface FundedNextVpsHubOptions {
   store: PilotStore;
   oauth: Pick<OAuthPkceManager, 'start' | 'callback'>;
   secret: string | undefined;
+  allowLocalhost?: boolean;
   onWake?: () => void;
   now?: () => number;
 }
@@ -107,7 +108,24 @@ export function createFundedNextVpsHandler(options: FundedNextVpsHubOptions) {
           if (connectionId !== undefined && (typeof connectionId !== 'string' || !connectionId || connectionId.length > 128)) {
             throw new PilotStoreError(400, 'Invalid connection identifier');
           }
-          writeJson(res, 201, await options.oauth.start(uid, { connectionId }));
+          const rawRedirectUri = body.redirectUri;
+          let redirectUri: string | undefined;
+          if (rawRedirectUri !== undefined) {
+            if (typeof rawRedirectUri !== 'string') {
+              throw new PilotStoreError(400, 'Invalid redirect URI');
+            }
+            const validated = isTrustedDeskRedirectUri(rawRedirectUri, {
+              allowLocalhost: options.allowLocalhost,
+            });
+            if (!validated) {
+              throw new PilotStoreError(400, 'Invalid redirect URI');
+            }
+            redirectUri = validated;
+          }
+          writeJson(res, 201, await options.oauth.start(uid, {
+            ...(connectionId ? { connectionId } : {}),
+            ...(redirectUri ? { redirectUri } : {}),
+          }));
           return true;
         }
 

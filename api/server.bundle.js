@@ -888,7 +888,10 @@ function createRemoteVpsPilotServices(options) {
   return {
     remoteRpc: true,
     oauth: {
-      start: (uid, opts) => callRpc("/fundednext-rpc/connections/start", uid, { ...opts?.connectionId ? { connectionId: opts.connectionId } : {} }),
+      start: (uid, opts) => callRpc("/fundednext-rpc/connections/start", uid, {
+        ...opts?.connectionId ? { connectionId: opts.connectionId } : {},
+        ...opts?.redirectUri ? { redirectUri: opts.redirectUri } : {}
+      }),
       callback: ({ state, code, browserSession: browserSession2, uid }) => callRpc("/fundednext-rpc/oauth/callback", uid, { state, code, browserSession: browserSession2 })
     },
     listDirectory: (uid, connectionId) => callRpc("/fundednext-rpc/accounts/list", uid, { ...connectionId ? { connectionId } : {} }),
@@ -911,6 +914,76 @@ import { Router } from "express";
 
 // server/fundednext/oauthPkce.ts
 var PKCE_TTL_MS = 10 * 60 * 1e3;
+var OAUTH_CALLBACK_PATH = "/api/fundednext/oauth/callback";
+var DEFAULT_OAUTH_REDIRECT_URI = `https://desk.tallynx.com${OAUTH_CALLBACK_PATH}`;
+var DEFAULT_TRUSTED_DESK_ORIGINS = Object.freeze([
+  "https://desk.tallynx.com",
+  "https://mall.tallynx.com",
+  "https://tallynx-desk.vercel.app",
+  "https://tredyn-desk.vercel.app"
+]);
+function isLocalhostOrigin(url) {
+  return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+}
+function parseTrustedOrigin(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && !isLocalhostOrigin(url) || url.username || url.password || url.hash) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+function collectTrustedOrigins(extraOrigins = []) {
+  const trusted = new Set(DEFAULT_TRUSTED_DESK_ORIGINS);
+  const envRedirectOrigin = parseTrustedOrigin(process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI);
+  if (envRedirectOrigin) trusted.add(envRedirectOrigin);
+  for (const part of String(process.env.FUNDEDNEXT_ALLOWED_ORIGINS ?? "").split(",")) {
+    const origin = parseTrustedOrigin(part);
+    if (origin) trusted.add(origin);
+  }
+  for (const extra of extraOrigins) {
+    const origin = parseTrustedOrigin(extra);
+    if (origin) trusted.add(origin);
+  }
+  return trusted;
+}
+function isTrustedDeskRedirectUri(rawUri, options = {}) {
+  try {
+    const url = new URL(rawUri);
+    if (url.pathname !== OAUTH_CALLBACK_PATH || url.search || url.hash || url.username || url.password) {
+      return null;
+    }
+    const trusted = collectTrustedOrigins(options.extraOrigins);
+    const allowLocalhost = options.allowLocalhost ?? process.env.NODE_ENV !== "production";
+    if (url.protocol === "https:" && trusted.has(url.origin)) {
+      return `${url.origin}${OAUTH_CALLBACK_PATH}`;
+    }
+    if (isLocalhostOrigin(url) && (allowLocalhost || trusted.has(url.origin))) {
+      return `${url.origin}${OAUTH_CALLBACK_PATH}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function resolveTrustedDeskRedirectUri(headers, options = {}) {
+  const rawProto = Array.isArray(headers["x-forwarded-proto"]) ? headers["x-forwarded-proto"][0] : headers["x-forwarded-proto"];
+  const protoCandidate = String(rawProto ?? "").split(",")[0].trim().toLowerCase();
+  const proto = protoCandidate === "http" || protoCandidate === "https" ? protoCandidate : options.protocol === "http" || options.protocol === "https" ? options.protocol : "https";
+  const rawHost = Array.isArray(headers["x-forwarded-host"]) ? headers["x-forwarded-host"][0] : headers["x-forwarded-host"] ?? (Array.isArray(headers.host) ? headers.host[0] : headers.host);
+  const host = String(rawHost ?? "").split(",")[0].trim();
+  if (!host || /[^a-zA-Z0-9.:-]/.test(host)) {
+    return void 0;
+  }
+  return isTrustedDeskRedirectUri(`${proto}://${host}${OAUTH_CALLBACK_PATH}`, {
+    allowLocalhost: options.allowLocalhost
+  }) ?? void 0;
+}
 
 // server/fundednext/router.ts
 var cookieName = "fundednext_pkce";
@@ -1039,7 +1112,14 @@ function createFundedNextRouter(options) {
     if (connectionId !== void 0 && (typeof connectionId !== "string" || !connectionId || connectionId.length > 128)) {
       throw badRequest("Invalid connection identifier");
     }
-    const { authorizeUrl, browserSession: proof } = await oauth.start(uid, { connectionId });
+    const redirectUri = resolveTrustedDeskRedirectUri(req.headers, {
+      protocol: req.protocol,
+      allowLocalhost: options.secureCookies === false
+    });
+    const { authorizeUrl, browserSession: proof } = await oauth.start(uid, {
+      ...connectionId ? { connectionId } : {},
+      ...redirectUri ? { redirectUri } : {}
+    });
     res.cookie(cookieName, Buffer.from(uid).toString("base64url") + "." + proof, { ...cookieOptions, maxAge: PKCE_TTL_MS });
     res.status(201).json({ authorizeUrl });
   }));
@@ -1729,7 +1809,8 @@ function createMallRouter(options) {
     }
   });
   const { telemetryBus: telemetryBus2 } = options;
-  const configuredSecret = (process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET)?.trim();
+  const legacyBaseUrl = options.legacyBaseUrl.trim().replace(/\/+$/, "");
+  const configuredSecret = (process.env.TALLYNX_MALL_SNAPSHOT_SECRET || process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET)?.trim();
   const snapshotSecret = configuredSecret && configuredSecret.length >= 16 ? configuredSecret : processSnapshotSecret;
   const snapshotSignature = (snapshot) => createHmac2("sha256", snapshotSecret).update("mall:snapshot:v1:" + JSON.stringify(snapshot)).digest("hex");
   function verifyInternalSnapshot(snapshot, proof) {
@@ -1750,10 +1831,11 @@ function createMallRouter(options) {
   let nextLegacyRead = 0;
   let legacyAvailable = false;
   function readLegacyHistory() {
+    if (!legacyBaseUrl) return Promise.resolve();
     if (legacyRead) return legacyRead;
     if (Date.now() < nextLegacyRead) return Promise.resolve();
     legacyAvailable = false;
-    legacyRead = fetch(options.legacyBaseUrl + "/desk-room", {
+    legacyRead = fetch(legacyBaseUrl + "/desk-room", {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(2500)
     }).then(async (response) => {
@@ -1778,8 +1860,8 @@ function createMallRouter(options) {
     } else if (event.type === "message" && !event.message.threadRootId) {
       const item = toDeskRoomMessage(event.message);
       telemetryBus2.emit("desk_room_update", { type: "message", item });
-      if (item.text) {
-        void fetch(options.legacyBaseUrl + "/desk-room", {
+      if (legacyBaseUrl && item.text) {
+        void fetch(legacyBaseUrl + "/desk-room", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ item }),
@@ -1871,10 +1953,10 @@ function createMallRouter(options) {
     const body = req.body || {};
     const source = await resolveSource(req, body.verifiedChannel);
     const local = engine.updatePresence(zoneId, body, source?.verifiedBadge.channel);
-    if (zoneId === DESK_ROOM_ZONE_ID) {
+    if (zoneId === DESK_ROOM_ZONE_ID && legacyBaseUrl) {
       const current = local.find((item) => item.handle === mallHandle(body.handle));
       try {
-        const response = await fetch(options.legacyBaseUrl + "/desk-room/presence", {
+        const response = await fetch(legacyBaseUrl + "/desk-room/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: AbortSignal.timeout(2500),
@@ -2726,7 +2808,7 @@ async function probeSinglePropFirm(firm, forceRefresh = false) {
 function createApp() {
   const app2 = express2();
   app2.use(express2.json({ limit: "8mb" }));
-  const sovereignMt5BaseUrl = (process.env.MT5_SOVEREIGN_BASE_URL || "").trim().replace(/\/+$/, "");
+  const sovereignMt5BaseUrl = (process.env.MT5_SOVEREIGN_BASE_URL || process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || "").trim().replace(/\/+$/, "");
   const fundedNextVpsBaseUrl = (process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || sovereignMt5BaseUrl).trim().replace(/\/+$/, "");
   let fundedNext;
   const connectedMallSnapshots = /* @__PURE__ */ new Map();
@@ -3571,7 +3653,10 @@ function createApp() {
         "LIVE_BRIDGE",
         "DIRECT_INVESTOR",
         "METAAPI_CLOUD",
-        "MANUAL_XLSX"
+        "MANUAL_XLSX",
+        "FUNDEDNEXT_MCP",
+        "MYFXBOOK_API",
+        "PROJECTX_API"
       ];
       const verificationChannel = allowedChannels.includes(
         body.verificationChannel
@@ -4388,18 +4473,31 @@ ${safeChart}` : ""}`;
       });
     }
   });
-  const configuredSsoSecret = process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET;
-  const ssoHmacKey = configuredSsoSecret && configuredSsoSecret.trim().length >= 16 ? configuredSsoSecret.trim() : crypto.createHash("sha256").update("tallynx-cross-subdomain-sso-v4-shared-hmac").digest("hex");
-  const signSsoPayload = (payload) => {
+  let devEphemeralSsoSecret = null;
+  function getSsoSigningKey() {
+    const configuredSsoSecret = (process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET || "").trim();
+    if (configuredSsoSecret.length >= 16) {
+      return configuredSsoSecret;
+    }
+    const isProdRuntime = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+    if (isProdRuntime) {
+      return null;
+    }
+    if (!devEphemeralSsoSecret) {
+      devEphemeralSsoSecret = crypto.randomBytes(32).toString("hex");
+    }
+    return devEphemeralSsoSecret;
+  }
+  const signSsoPayload = (payload, key) => {
     const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-    const sig = crypto.createHmac("sha256", ssoHmacKey).update(encoded).digest("base64url");
+    const sig = crypto.createHmac("sha256", key).update(encoded).digest("base64url");
     return `${encoded}.${sig}`;
   };
-  const verifySsoToken = (token) => {
+  const verifySsoToken = (token, key) => {
     const parts = String(token || "").trim().split(".");
     if (parts.length !== 2) return null;
     const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac("sha256", ssoHmacKey).update(encoded).digest("base64url");
+    const expectedSig = crypto.createHmac("sha256", key).update(encoded).digest("base64url");
     const sigBuf = Buffer.from(sig, "utf8");
     const expBuf = Buffer.from(expectedSig, "utf8");
     if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
@@ -4421,6 +4519,12 @@ ${safeChart}` : ""}`;
     }
   };
   app2.post("/api/auth/sso-handoff", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const ssoHmacKey = getSsoSigningKey();
+    if (!ssoHmacKey) {
+      res.status(503).json({ ok: false, error: "TALLYNX_SSO_SECRET is not configured on the server." });
+      return;
+    }
     const rawHandle = typeof req.body?.handle === "string" ? req.body.handle.trim() : "@alex_quant";
     const handle = rawHandle.startsWith("@") ? rawHandle : `@${rawHandle}`;
     const expSec = Math.floor(Date.now() / 1e3) + 300;
@@ -4429,12 +4533,18 @@ ${safeChart}` : ""}`;
       sub: handle.replace(/^@/, ""),
       exp: expSec,
       nonce: crypto.randomUUID()
-    });
+    }, ssoHmacKey);
     res.json({ ok: true, token: ssoToken, ssoToken, handle, expiresInSec: 300 });
   });
   const handleDeskSsoExchange = (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const ssoHmacKey = getSsoSigningKey();
+    if (!ssoHmacKey) {
+      res.status(503).json({ ok: false, valid: false, error: "TALLYNX_SSO_SECRET is not configured on the server." });
+      return;
+    }
     const token = typeof req.query.token === "string" && req.query.token.trim() || typeof req.query.ssoToken === "string" && req.query.ssoToken.trim() || typeof req.body?.ssoToken === "string" && req.body.ssoToken.trim() || typeof req.body?.token === "string" && req.body.token.trim() || "";
-    const verified = verifySsoToken(token);
+    const verified = verifySsoToken(token, ssoHmacKey);
     if (!verified) {
       res.status(401).json({ ok: false, valid: false, error: "Invalid or expired TallyNX SSO token" });
       return;
