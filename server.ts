@@ -330,7 +330,10 @@ export function createApp() {
   const app = express();
   app.use(express.json({ limit: '8mb' }));
   const sovereignMt5BaseUrl = (
-    process.env.MT5_SOVEREIGN_BASE_URL || ''
+    process.env.MT5_SOVEREIGN_BASE_URL ||
+    process.env.FUNDEDNEXT_VPS_BASE_URL ||
+    process.env.FUNDEDNEXT_GATEWAY_URL ||
+    ''
   ).trim().replace(/\/+$/, '');
   const fundedNextVpsBaseUrl = (
     process.env.FUNDEDNEXT_VPS_BASE_URL ||
@@ -1410,6 +1413,9 @@ export function createApp() {
         'DIRECT_INVESTOR',
         'METAAPI_CLOUD',
         'MANUAL_XLSX',
+        'FUNDEDNEXT_MCP',
+        'MYFXBOOK_API',
+        'PROJECTX_API',
       ];
       const verificationChannel: Mt5VerificationChannel = allowedChannels.includes(
         body.verificationChannel as Mt5VerificationChannel
@@ -2320,28 +2326,38 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
   });
 
   // Cross-Subdomain SSO Handoff & Exchange
-  const configuredSsoSecret = process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET;
-  const ssoHmacKey =
-    configuredSsoSecret && configuredSsoSecret.trim().length >= 16
-      ? configuredSsoSecret.trim()
-      : crypto
-          .createHash('sha256')
-          .update('tallynx-cross-subdomain-sso-v4-shared-hmac')
-          .digest('hex');
+  let devEphemeralSsoSecret: string | null = null;
+  function getSsoSigningKey(): string | null {
+    const configuredSsoSecret = (process.env.TALLYNX_SSO_SECRET || process.env.SSO_SHARED_SECRET || '').trim();
+    if (configuredSsoSecret.length >= 16) {
+      return configuredSsoSecret;
+    }
+    const isProdRuntime =
+      process.env.NODE_ENV === 'production' ||
+      Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+    if (isProdRuntime) {
+      return null;
+    }
+    if (!devEphemeralSsoSecret) {
+      devEphemeralSsoSecret = crypto.randomBytes(32).toString('hex');
+    }
+    return devEphemeralSsoSecret;
+  }
 
-  const signSsoPayload = (payload: { handle: string; sub: string; exp: number; nonce: string }) => {
+  const signSsoPayload = (payload: { handle: string; sub: string; exp: number; nonce: string }, key: string) => {
     const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-    const sig = crypto.createHmac('sha256', ssoHmacKey).update(encoded).digest('base64url');
+    const sig = crypto.createHmac('sha256', key).update(encoded).digest('base64url');
     return `${encoded}.${sig}`;
   };
 
   const verifySsoToken = (
-    token: string
+    token: string,
+    key: string
   ): { handle: string; exp: number; claims: Record<string, unknown> } | null => {
     const parts = String(token || '').trim().split('.');
     if (parts.length !== 2) return null;
     const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac('sha256', ssoHmacKey).update(encoded).digest('base64url');
+    const expectedSig = crypto.createHmac('sha256', key).update(encoded).digest('base64url');
     const sigBuf = Buffer.from(sig, 'utf8');
     const expBuf = Buffer.from(expectedSig, 'utf8');
     if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
@@ -2367,6 +2383,12 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
   };
 
   app.post('/api/auth/sso-handoff', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const ssoHmacKey = getSsoSigningKey();
+    if (!ssoHmacKey) {
+      res.status(503).json({ ok: false, error: 'TALLYNX_SSO_SECRET is not configured on the server.' });
+      return;
+    }
     const rawHandle = typeof req.body?.handle === 'string' ? req.body.handle.trim() : '@alex_quant';
     const handle = rawHandle.startsWith('@') ? rawHandle : `@${rawHandle}`;
     const expSec = Math.floor(Date.now() / 1000) + 300;
@@ -2375,18 +2397,24 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
       sub: handle.replace(/^@/, ''),
       exp: expSec,
       nonce: crypto.randomUUID(),
-    });
+    }, ssoHmacKey);
     res.json({ ok: true, token: ssoToken, ssoToken, handle, expiresInSec: 300 });
   });
 
   const handleDeskSsoExchange = (req: express.Request, res: express.Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const ssoHmacKey = getSsoSigningKey();
+    if (!ssoHmacKey) {
+      res.status(503).json({ ok: false, valid: false, error: 'TALLYNX_SSO_SECRET is not configured on the server.' });
+      return;
+    }
     const token =
       (typeof req.query.token === 'string' && req.query.token.trim()) ||
       (typeof req.query.ssoToken === 'string' && req.query.ssoToken.trim()) ||
       (typeof req.body?.ssoToken === 'string' && req.body.ssoToken.trim()) ||
       (typeof req.body?.token === 'string' && req.body.token.trim()) ||
       '';
-    const verified = verifySsoToken(token);
+    const verified = verifySsoToken(token, ssoHmacKey);
     if (!verified) {
       res.status(401).json({ ok: false, valid: false, error: 'Invalid or expired TallyNX SSO token' });
       return;

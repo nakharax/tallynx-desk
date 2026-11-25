@@ -14,7 +14,7 @@
         },
         "payloadJson": {
           "type": "string",
-          "description": "Serialized JSON string of the complete Tredyn GHR workspace state",
+          "description": "Serialized JSON or GZB64-compressed string of the complete TallyNX workspace state (max 900,000 bytes)",
           "minLength": 2,
           "maxLength": 900000
         },
@@ -47,7 +47,7 @@
     },
     "AdminRecord": {
       "title": "AdminRecord",
-      "description": "Authorized platform administrator record",
+      "description": "Authorized platform administrator record managed by bootstrapped custom-claim admins",
       "type": "object",
       "properties": {
         "uid": {
@@ -154,6 +154,182 @@
         }
       },
       "required": ["ownerId", "email", "plan", "licenseKey", "status", "createdAt", "updatedAt"]
+    },
+    "PilotAllowlist": {
+      "title": "PilotAllowlist",
+      "description": "Admin-managed FundedNext MCP pilot cohort allowlist entry",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "email": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "maxLength": 500
+        },
+        "createdByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "FundedNextConnection": {
+      "title": "FundedNextConnection",
+      "description": "Server-managed FundedNext MCP broker connection metadata (client read-only)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "generation": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["CONNECTED", "DEGRADED", "RECONNECT_REQUIRED", "DISCONNECTED"]
+        },
+        "connectedAt": { "type": "number" },
+        "blockedReason": { "type": ["string", "null"] },
+        "statusJobId": { "type": ["string", "null"] }
+      },
+      "required": ["id", "ownerUid", "generation", "status"]
+    },
+    "FundedNextCredential": {
+      "title": "FundedNextCredential",
+      "description": "Encrypted OAuth/KMS credential envelope for FundedNext MCP (100% locked from clients)",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string" },
+        "connectionId": { "type": "string" },
+        "generation": { "type": "number" },
+        "envelope": { "type": "object" }
+      },
+      "required": ["ownerUid", "connectionId", "generation", "envelope"]
+    },
+    "FundedNextAccountSnapshot": {
+      "title": "FundedNextAccountSnapshot",
+      "description": "Server-managed FundedNext account metadata and live balance/equity snapshot (client read-only)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "accountId": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "connectionId": { "type": "string" },
+        "tracked": { "type": "boolean" },
+        "snapshot": { "type": "object" },
+        "lastCheckedAt": { "type": "string" }
+      },
+      "required": ["id", "accountId", "ownerUid", "connectionId", "tracked"]
+    },
+    "FundedNextTradeExecution": {
+      "title": "FundedNextTradeExecution",
+      "description": "Server-managed immutable FundedNext broker execution/cashflow record (client read-only)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "accountRef": { "type": "string" },
+        "connectionId": { "type": "string" },
+        "dealId": { "type": "string" },
+        "cycleId": { "type": ["string", "null"] },
+        "kind": { "type": "string" }
+      },
+      "required": ["id", "ownerUid", "accountRef", "connectionId"]
+    },
+    "FundedNextJournalAnnotation": {
+      "title": "FundedNextJournalAnnotation",
+      "description": "Owner-only discretionary notes, tags, and execution linkage metadata",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "executionKey": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "accountId": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "tags": {
+          "type": ["array", "null"],
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "legacyUnlinked": {
+          "type": ["boolean", "null"]
+        },
+        "importId": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerUid", "note", "createdAt", "updatedAt"]
+    },
+    "FundedNextSyncJob": {
+      "title": "FundedNextSyncJob",
+      "description": "Server/worker leased sync job queue and cursors (100% locked from clients)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "connectionId": { "type": "string" },
+        "connectionKey": { "type": "string" },
+        "generation": { "type": "number" },
+        "accountRef": { "type": ["string", "null"] },
+        "type": {
+          "type": "string",
+          "enum": ["SNAPSHOT", "INITIAL_DISCOVERY", "BACKFILL_PAGE", "INCREMENTAL"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["QUEUED", "LEASED", "COMPLETE", "CANCELLED", "PARTIAL"]
+        }
+      },
+      "required": ["id", "uid", "connectionId", "generation", "type", "status"]
     }
   },
   "firestore": {
@@ -180,6 +356,48 @@
         "$ref": "#/entities/UserEntitlement"
       },
       "description": "Stores active plan entitlement and linked license key per user"
+    },
+    "/pilot_allowlist/{uid}": {
+      "schema": {
+        "$ref": "#/entities/PilotAllowlist"
+      },
+      "description": "Stores FundedNext pilot allowlist eligibility per UID"
+    },
+    "/fundednext_connections/{connectionId}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextConnection"
+      },
+      "description": "Stores server-managed FundedNext MCP connection metadata"
+    },
+    "/fundednext_credentials/{connectionId}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextCredential"
+      },
+      "description": "Stores encrypted FundedNext OAuth/KMS credential envelopes (server-only)"
+    },
+    "/account_snapshots/{accountId}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextAccountSnapshot"
+      },
+      "description": "Stores FundedNext synced accounts and latest balance/equity snapshots"
+    },
+    "/trade_executions/{accountId}/items/{executionKey}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextTradeExecution"
+      },
+      "description": "Stores FundedNext immutable broker trade executions and cashflows"
+    },
+    "/journal_annotations/{uid}/entries/{annotationId}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextJournalAnnotation"
+      },
+      "description": "Stores owner-only discretionary journal notes, tags, and execution links"
+    },
+    "/sync_jobs/{jobId}": {
+      "schema": {
+        "$ref": "#/entities/FundedNextSyncJob"
+      },
+      "description": "Stores leased background sync jobs and pagination cursors (server-only)"
     }
   }
 }

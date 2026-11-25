@@ -597,7 +597,7 @@ export function generateTredynLiveBridgeMq5(params: {
   apiKey: string;
   symbolFilter?: string;
 }): string {
-  const url = params.endpointUrl || 'https://YOUR_DOMAIN/api/mt5/live-bridge/ingest';
+  const url = params.endpointUrl || 'https://YOUR_DOMAIN/api/mt5/live-bridge/push';
   const key = params.apiKey || 'trd_live_port1_replace_me';
   const sym = params.symbolFilter || 'XAUUSD';
 

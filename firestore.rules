@@ -103,6 +103,7 @@ service cloud.firestore {
     function hasRedeemedMatchingLicense(data, userId) {
       return isValidId(data.licenseKey)
         && data.licenseKey.size() >= 6
+        && existsAfter(/databases/$(database)/documents/licenses/$(data.licenseKey))
         && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.redeemedByUid == userId
         && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.status == 'ACTIVE'
         && getAfter(/databases/$(database)/documents/licenses/$(data.licenseKey)).data.plan == data.plan;
@@ -145,8 +146,14 @@ service cloud.firestore {
     }
 
     match /licenses/{licenseKey} {
-      allow get: if isAdmin()
-        || (isSignedIn() && isValidId(licenseKey) && (resource.data.redeemedByUid == '' || resource.data.redeemedByUid == request.auth.uid));
+      allow get: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isValidId(licenseKey)
+            && (resource == null || resource.data.redeemedByUid == '' || resource.data.redeemedByUid == request.auth.uid)
+          )
+        );
       allow list: if isAdmin();
 
       allow create: if isAdmin()
@@ -212,7 +219,7 @@ service cloud.firestore {
             && incoming().status == existing().status
             && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'plan', 'licenseKey', 'updatedAt'])
             && (
-              incoming().plan == existing().plan
+              (incoming().plan == existing().plan && incoming().licenseKey == existing().licenseKey)
               || (incoming().plan == 'FREE' && incoming().licenseKey == '')
               || (incoming().plan in ['TRIAL', 'PRO', 'LIFETIME'] && hasRedeemedMatchingLicense(incoming(), userId))
             )

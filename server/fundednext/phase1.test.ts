@@ -881,3 +881,205 @@ test('createFundedNextRuntimeForStore caches dynamic client_id, resets on invali
     else process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI = prevRedirect;
   }
 });
+
+test('multi-origin FundedNext OAuth enforces strict Desk allowlist, caches client_id per origin, and preserves session redirectUri in token exchange', async (t) => {
+  const {
+    createFundedNextRuntimeForStore,
+    isTrustedDeskRedirectUri,
+    resolveTrustedDeskRedirectUri,
+  } = await import('./oauthPkce.js');
+
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'desk.tallynx.com, proxy.internal' }),
+    'https://desk.tallynx.com/api/fundednext/oauth/callback'
+  );
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'mall.tallynx.com' }),
+    'https://mall.tallynx.com/api/fundednext/oauth/callback'
+  );
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'tallynx-desk.vercel.app' }),
+    'https://tallynx-desk.vercel.app/api/fundednext/oauth/callback'
+  );
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'evil-clone.vercel.app' }),
+    undefined
+  );
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ host: 'localhost:3000' }, { protocol: 'http', allowLocalhost: false }),
+    undefined
+  );
+  assert.equal(
+    resolveTrustedDeskRedirectUri({ host: 'localhost:3000' }, { protocol: 'http', allowLocalhost: true }),
+    'http://localhost:3000/api/fundednext/oauth/callback'
+  );
+  assert.equal(
+    isTrustedDeskRedirectUri('https://mall.tallynx.com/api/fundednext/oauth/callback?next=https://evil.test'),
+    null
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), 'fn-multi-origin-'));
+  const store = new SqlitePilotStore({ dbPath: join(dir, 'pilot.db') });
+  await store.setAllowlisted('alice', true);
+  const prevMaster = process.env.FUNDEDNEXT_MASTER_KEY;
+  const prevClientId = process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+  const prevRedirect = process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI;
+  const prevAllowed = process.env.FUNDEDNEXT_ALLOWED_ORIGINS;
+  const registeredByRedirect = new Map<string, string>();
+  const tokenExchanges: Array<{ redirectUri: string; clientId: string }> = [];
+
+  try {
+    process.env.FUNDEDNEXT_MASTER_KEY = 'c'.repeat(64);
+    delete process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+    process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI = 'https://desk.tallynx.com/api/fundednext/oauth/callback';
+    process.env.FUNDEDNEXT_ALLOWED_ORIGINS = 'https://custom-desk.example';
+
+    assert.equal(
+      resolveTrustedDeskRedirectUri({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'custom-desk.example' }),
+      'https://custom-desk.example/api/fundednext/oauth/callback'
+    );
+
+    const runtime = createFundedNextRuntimeForStore(store, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith('/oauth/register')) {
+          const payload = JSON.parse(String(init?.body ?? '{}')) as { redirect_uris?: string[] };
+          const redirectUri = payload.redirect_uris?.[0] ?? '';
+          const clientId = `dyn_${registeredByRedirect.size + 1}`;
+          registeredByRedirect.set(redirectUri, clientId);
+          return Response.json({ client_id: clientId }, { status: 201 });
+        }
+        if (target.endsWith('/oauth/token')) {
+          const params = new URLSearchParams(String(init?.body ?? ''));
+          tokenExchanges.push({
+            redirectUri: params.get('redirect_uri') ?? '',
+            clientId: params.get('client_id') ?? '',
+          });
+          return Response.json({ access_token: 'tok-multi', refresh_token: 'ref-multi', expires_in: 3600 });
+        }
+        throw new Error(`Unexpected fetch: ${target}`);
+      },
+    });
+
+    const rpcSecret = 'm'.repeat(64);
+    const handleRpc = createFundedNextVpsHandler({ store, oauth: runtime.oauth, secret: rpcSecret, allowLocalhost: false });
+    const vpsServer = createServer((req, res) => {
+      void handleRpc(req, res).then((handled) => {
+        if (!handled) res.writeHead(404).end();
+      });
+    });
+    vpsServer.listen(0, '127.0.0.1');
+    await once(vpsServer, 'listening');
+    const vpsAddr = vpsServer.address();
+    assert.ok(vpsAddr && typeof vpsAddr === 'object');
+    const vpsOrigin = `http://127.0.0.1:${vpsAddr.port}`;
+
+    const bff = express();
+    bff.use(express.json());
+    bff.use('/api/fundednext', createFundedNextRouter({
+      verifyIdToken: async () => ({ uid: 'alice' }),
+      services: () => createRemoteVpsPilotServices({ baseUrl: vpsOrigin, secret: rpcSecret }),
+    }));
+    const bffOrigin = await listen(bff, t);
+    t.after(() => {
+      vpsServer.close();
+      store.close();
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      } catch {
+        // ignore Windows temp lock
+      }
+    });
+
+    // 1) mall.tallynx.com start -> uses mall redirect_uri & registers mall client_id
+    const mallStart = await fetch(`${bffOrigin}/api/fundednext/connections`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer alice',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'mall.tallynx.com',
+      },
+    });
+    assert.equal(mallStart.status, 201);
+    const mallCookie = mallStart.headers.get('set-cookie')!.split(';', 1)[0];
+    const mallAuthUrl = new URL((await mallStart.json() as { authorizeUrl: string }).authorizeUrl);
+    assert.equal(mallAuthUrl.searchParams.get('redirect_uri'), 'https://mall.tallynx.com/api/fundednext/oauth/callback');
+    assert.equal(mallAuthUrl.searchParams.get('client_id'), 'dyn_1');
+
+    // 2) desk.tallynx.com start -> uses desk redirect_uri & registers separate client_id
+    const deskStart = await fetch(`${bffOrigin}/api/fundednext/connections`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer alice',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'desk.tallynx.com',
+      },
+    });
+    assert.equal(deskStart.status, 201);
+    const deskAuthUrl = new URL((await deskStart.json() as { authorizeUrl: string }).authorizeUrl);
+    assert.equal(deskAuthUrl.searchParams.get('redirect_uri'), 'https://desk.tallynx.com/api/fundednext/oauth/callback');
+    assert.equal(deskAuthUrl.searchParams.get('client_id'), 'dyn_2');
+
+    // 3) Repeat mall.tallynx.com start -> reuses cached dyn_1 without re-registering
+    const mallStart2 = await fetch(`${bffOrigin}/api/fundednext/connections`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer alice',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'mall.tallynx.com',
+      },
+    });
+    assert.equal(mallStart2.status, 201);
+    const mallAuthUrl2 = new URL((await mallStart2.json() as { authorizeUrl: string }).authorizeUrl);
+    assert.equal(mallAuthUrl2.searchParams.get('client_id'), 'dyn_1');
+    assert.equal(registeredByRedirect.size, 2);
+
+    // 4) Untrusted host header -> falls back safely to desk.tallynx.com default (never evil.vercel.app)
+    const untrustedStart = await fetch(`${bffOrigin}/api/fundednext/connections`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer alice',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'evil.vercel.app',
+      },
+    });
+    assert.equal(untrustedStart.status, 201);
+    const untrustedAuthUrl = new URL((await untrustedStart.json() as { authorizeUrl: string }).authorizeUrl);
+    assert.equal(untrustedAuthUrl.searchParams.get('redirect_uri'), 'https://desk.tallynx.com/api/fundednext/oauth/callback');
+
+    // 5) Direct signed RPC attempting untrusted redirectUri is rejected fail-closed with 400
+    const badBody = JSON.stringify({ redirectUri: 'https://evil.vercel.app/api/fundednext/oauth/callback' });
+    const badHeaders = signVpsRpcRequest({
+      secret: rpcSecret,
+      method: 'POST',
+      path: '/fundednext-rpc/connections/start',
+      uid: 'alice',
+      body: badBody,
+    });
+    const rejectedRpc = await fetch(`${vpsOrigin}/fundednext-rpc/connections/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...badHeaders },
+      body: badBody,
+    });
+    assert.equal(rejectedRpc.status, 400);
+
+    // 6) Completing mall callback passes mall redirect_uri (session.redirectUri) to /oauth/token
+    const mallState = mallAuthUrl.searchParams.get('state')!;
+    const mallCb = await fetch(`${bffOrigin}/api/fundednext/oauth/callback?state=${mallState}&code=code-mall`, {
+      headers: { cookie: mallCookie, Accept: 'application/json' },
+    });
+    assert.equal(mallCb.status, 200);
+    assert.deepEqual(tokenExchanges, [
+      { redirectUri: 'https://mall.tallynx.com/api/fundednext/oauth/callback', clientId: 'dyn_1' },
+    ]);
+  } finally {
+    if (prevMaster === undefined) delete process.env.FUNDEDNEXT_MASTER_KEY;
+    else process.env.FUNDEDNEXT_MASTER_KEY = prevMaster;
+    if (prevClientId === undefined) delete process.env.FUNDEDNEXT_OAUTH_CLIENT_ID;
+    else process.env.FUNDEDNEXT_OAUTH_CLIENT_ID = prevClientId;
+    if (prevRedirect === undefined) delete process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI;
+    else process.env.FUNDEDNEXT_OAUTH_REDIRECT_URI = prevRedirect;
+    if (prevAllowed === undefined) delete process.env.FUNDEDNEXT_ALLOWED_ORIGINS;
+    else process.env.FUNDEDNEXT_ALLOWED_ORIGINS = prevAllowed;
+  }
+});

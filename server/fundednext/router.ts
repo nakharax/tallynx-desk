@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import type { CookieOptions, Request, Response } from 'express';
 import type { RawRow, TradeExecution } from './brokerTypes.js';
-import { PKCE_TTL_MS } from './oauthPkce.js';
+import { PKCE_TTL_MS, resolveTrustedDeskRedirectUri } from './oauthPkce.js';
 import { MAX_JOURNAL_ROWS, PilotStoreError } from './store.js';
 import type { PilotStore } from './store.js';
 import type { RemoteVpsPilotServices } from './vpsClient.js';
@@ -12,7 +12,7 @@ interface LocalServices {
   remoteRpc?: false;
   store: PilotStore;
   oauth: {
-    start(uid: string, opts?: { connectionId?: string }): Promise<{ authorizeUrl: string; browserSession: string }>;
+    start(uid: string, opts?: { connectionId?: string; redirectUri?: string }): Promise<{ authorizeUrl: string; browserSession: string }>;
     callback(input: Callback): Promise<{ connectionId: string; status: 'CONNECTED' }>;
   };
 }
@@ -158,7 +158,14 @@ export function createFundedNextRouter(options: {
     if (connectionId !== undefined && (typeof connectionId !== 'string' || !connectionId || connectionId.length > 128)) {
       throw badRequest('Invalid connection identifier');
     }
-    const { authorizeUrl, browserSession: proof } = await oauth.start(uid, { connectionId });
+    const redirectUri = resolveTrustedDeskRedirectUri(req.headers, {
+      protocol: req.protocol,
+      allowLocalhost: options.secureCookies === false,
+    });
+    const { authorizeUrl, browserSession: proof } = await oauth.start(uid, {
+      ...(connectionId ? { connectionId } : {}),
+      ...(redirectUri ? { redirectUri } : {}),
+    });
     res.cookie(cookieName, Buffer.from(uid).toString('base64url') + '.' + proof, { ...cookieOptions, maxAge: PKCE_TTL_MS });
     res.status(201).json({ authorizeUrl });
   }));

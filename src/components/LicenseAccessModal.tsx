@@ -22,6 +22,7 @@ interface LicenseAccessModalProps {
   brandName: string;
   currentUser: User | null;
   entitlement: EntitlementRecord | null;
+  isClaimAdmin?: boolean;
   inviteKey?: string;
   onClearInviteKey?: () => void;
   onClose: () => void;
@@ -37,6 +38,7 @@ const LICENSE_ERROR_LABELS = new Map([
   ['License Key นี้ถูกระงับการใช้งานแล้ว', 'This license key has been revoked.'],
   ['License Key นี้ถูกผูกใช้งานกับบัญชีอื่นแล้ว', 'This license key is linked to another account.'],
   ['รหัส License ต้องมี 6–64 ตัวอักษร (A-Z, 0-9, -, _)', 'Use 6–64 characters for the license key (A–Z, 0–9, hyphen, underscore).'],
+  ['บัญชีสิทธิ์ใช้งานของคุณถูกระงับชั่วคราว (SUSPENDED) กรุณาติดต่อผู้ดูแลระบบ', 'Your entitlement is currently suspended. Please contact support.'],
 ]);
 
 function formatLicenseError(error: unknown, lang: DeskLanguage, fallback: string): string {
@@ -64,6 +66,7 @@ export const LicenseAccessModal: React.FC<LicenseAccessModalProps> = ({
   brandName,
   currentUser,
   entitlement,
+  isClaimAdmin = false,
   inviteKey = '',
   onClearInviteKey,
   onClose,
@@ -73,8 +76,8 @@ export const LicenseAccessModal: React.FC<LicenseAccessModalProps> = ({
   onNotify,
 }) => {
   const t = (english: string, thai: string) => deskText(lang, english, thai);
-  const isAdmin = isAdminUser(currentUser, entitlement);
-  const hasPro = isProOrHigher(currentUser, entitlement);
+  const isAdmin = isAdminUser(currentUser, entitlement, isClaimAdmin);
+  const hasPro = isProOrHigher(currentUser, entitlement, isClaimAdmin);
   const [activeTab, setActiveTab] = useState<'LICENSE' | 'ADMIN'>('LICENSE');
   const [licenseInput, setLicenseInput] = useState(inviteKey);
   const [redeeming, setRedeeming] = useState(false);
