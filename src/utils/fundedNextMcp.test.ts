@@ -636,7 +636,7 @@ test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden
       return Response.json({ executions: [], nextCursor: null });
     }
     if (path.pathname === '/api/mt5/live-bridge/live') {
-      assert.equal((init?.headers as Record<string, string>)['X-Tredyn-Api-Key'], 'trd_live_test_1234');
+      assert.equal((init?.headers as Record<string, string>)['X-Tredyn-Api-Key'], 'test-mock-key-1234');
       return Response.json({
         ok: true,
         provider: 'LIVE_BRIDGE',
@@ -680,7 +680,7 @@ test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden
   assert.equal(r2?.liveTelemetry?.marginLevelPct, 5150);
   assert.equal(hasInFlightTelemetryRequest('fn-pilot:acc-live:live'), false);
 
-  const bridge = await readLiveBridgeTelemetry({ tredynApiKey: 'trd_live_test_1234' });
+  const bridge = await readLiveBridgeTelemetry({ tredynApiKey: 'test-mock-key-1234' });
   assert.equal(bridge?.live.equity, 10155);
 
   const origDoc = (globalThis as { document?: unknown }).document;
@@ -688,7 +688,7 @@ test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden
   try {
     const skipped = await readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', new AbortController().signal);
     assert.equal(skipped, null);
-    const skippedBridge = await readLiveBridgeTelemetry({ tredynApiKey: 'trd_live_test_1234' });
+    const skippedBridge = await readLiveBridgeTelemetry({ tredynApiKey: 'test-mock-key-1234' });
     assert.equal(skippedBridge, null);
   } finally {
     if (origDoc === undefined) delete (globalThis as { document?: unknown }).document;

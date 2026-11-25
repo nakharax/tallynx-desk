@@ -1190,7 +1190,7 @@ test('GET /api/fundednext/accounts/:id?live=1 enforces 3s safe rate floor and su
 
 test('POST /api/mt5/live-bridge/push and GET /api/mt5/live-bridge/live surface openPositions and equity telemetry', async (t) => {
   const origin = await listen(createApp(), t);
-  const apiKey = 'trd_live_3s_telemetry_key_99';
+  const apiKey = 'test-mock-key-3s-live';
 
   const pushResp = await fetch(`${origin}/api/mt5/live-bridge/push`, {
     method: 'POST',
