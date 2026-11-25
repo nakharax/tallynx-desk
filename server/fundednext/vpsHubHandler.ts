@@ -179,10 +179,17 @@ export function createFundedNextVpsHandler(options: FundedNextVpsHubOptions) {
 
         case '/fundednext-rpc/accounts/snapshot': {
           const accountId = body.accountId;
-          if (typeof accountId !== 'string') {
+          const live = body.live;
+          if (typeof accountId !== 'string' || (live !== undefined && typeof live !== 'boolean')) {
             throw new PilotStoreError(400, 'Invalid account identifier');
           }
-          writeJson(res, 200, await options.store.getAccountSnapshotState(uid, accountId));
+          if (live) {
+            const state = await options.store.requestLiveSnapshot(uid, accountId);
+            if (state.syncTriggered) options.onWake?.();
+            writeJson(res, 200, state);
+          } else {
+            writeJson(res, 200, await options.store.getAccountSnapshotState(uid, accountId));
+          }
           return true;
         }
 

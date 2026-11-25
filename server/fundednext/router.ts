@@ -1,11 +1,155 @@
 import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import type { CookieOptions, Request, Response } from 'express';
-import type { RawRow, TradeExecution } from './brokerTypes.js';
+import type { OpenPosition, RawRow, TradeExecution } from './brokerTypes.js';
 import { PKCE_TTL_MS, resolveTrustedDeskRedirectUri } from './oauthPkce.js';
-import { MAX_JOURNAL_ROWS, PilotStoreError } from './store.js';
-import type { PilotStore } from './store.js';
+import { FUNDEDNEXT_LIVE_SYNC_FLOOR_MS, MAX_JOURNAL_ROWS, PilotStoreError } from './store.js';
+import type { LiveSnapshotStateResult, PilotStore, StoredSnapshot } from './store.js';
 import type { RemoteVpsPilotServices } from './vpsClient.js';
+
+export interface FundedNextLiveTelemetry {
+  balance: number | null;
+  equity: number | null;
+  floatingPnl: number | null;
+  margin: number | null;
+  freeMargin: number | null;
+  marginLevelPct: number | null;
+  dailyLossUsedUsd: number | null;
+  dailyLossLimitUsd: number | null;
+  consistencyLiveImpactPct: number | null;
+  openPositionsCount: number;
+  openPositions: OpenPosition[];
+  rateFloorMs: number;
+  nextSafeSyncAt: string | null;
+  syncTriggered: boolean;
+}
+
+function toFinite(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const cleaned = value.trim().replace(/[$,\s]/g, '');
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function pickRawNumber(sources: Array<Record<string, unknown> | null>, keys: string[]): number | null {
+  for (const src of sources) {
+    if (!src) continue;
+    for (const key of keys) {
+      if (key in src) {
+        const val = toFinite(src[key]);
+        if (val !== null) return val;
+      }
+    }
+  }
+  return null;
+}
+
+function asObj(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+export function extractFundedNextLiveTelemetry(
+  snapshot: StoredSnapshot | null,
+  meta?: { rateFloorMs?: number; nextSafeSyncAt?: string | null; syncTriggered?: boolean; syncStatus?: string }
+): FundedNextLiveTelemetry {
+  const rateFloorMs = meta?.rateFloorMs ?? FUNDEDNEXT_LIVE_SYNC_FLOOR_MS;
+  const nextSafeSyncAt = meta?.nextSafeSyncAt ?? null;
+  const syncTriggered = Boolean(meta?.syncTriggered);
+  if (!snapshot) {
+    return {
+      balance: null,
+      equity: null,
+      floatingPnl: null,
+      margin: null,
+      freeMargin: null,
+      marginLevelPct: null,
+      dailyLossUsedUsd: null,
+      dailyLossLimitUsd: null,
+      consistencyLiveImpactPct: null,
+      openPositionsCount: 0,
+      openPositions: [],
+      rateFloorMs,
+      nextSafeSyncAt,
+      syncTriggered,
+    };
+  }
+
+  const raw = asObj(snapshot.rawPayload);
+  const sources = [raw, asObj(raw?.stats), asObj(raw?.account_details), asObj(raw?.account), asObj(raw?.overview)];
+
+  const balance = toFinite(snapshot.balance);
+  const equity = toFinite(snapshot.equity);
+  const floatingPnl =
+    toFinite(snapshot.floatingPnl) ??
+    (balance !== null && equity !== null ? +(equity - balance).toFixed(2) : null);
+  const initialBalance = toFinite(snapshot.initialBalance);
+  const netProfit = toFinite(snapshot.netProfit);
+
+  const margin = pickRawNumber(sources, ['margin', 'used_margin', 'usedMargin', 'margin_used', 'marginUsed']);
+  const rawFreeMargin = pickRawNumber(sources, [
+    'free_margin', 'freeMargin', 'margin_free', 'marginFree', 'available_margin', 'availableMargin',
+  ]);
+  const freeMargin =
+    rawFreeMargin !== null
+      ? +rawFreeMargin.toFixed(2)
+      : margin !== null && equity !== null
+        ? +(equity - margin).toFixed(2)
+        : null;
+  const rawMarginLevel = pickRawNumber(sources, ['margin_level', 'marginLevel', 'margin_level_pct', 'marginLevelPct']);
+  const marginLevelPct =
+    rawMarginLevel !== null
+      ? +rawMarginLevel.toFixed(1)
+      : margin !== null && margin > 0 && equity !== null && equity > 0
+        ? +((equity / margin) * 100).toFixed(1)
+        : null;
+
+  const dailyLossUsedUsd = pickRawNumber(sources, [
+    'daily_dd_used', 'dailyDdUsed', 'daily_loss_used', 'dailyLossUsed', 'daily_drawdown_used', 'dailyDrawdownUsed',
+  ]);
+  const rawDailyLimit = pickRawNumber(sources, [
+    'daily_loss_limit', 'dailyLossLimit', 'max_daily_loss', 'maxDailyLoss', 'daily_drawdown_limit', 'dailyDrawdownLimit',
+  ]);
+  const dailyLossLimitUsd =
+    rawDailyLimit !== null
+      ? +Math.abs(rawDailyLimit).toFixed(2)
+      : initialBalance !== null && initialBalance > 0
+        ? +(initialBalance * 0.05).toFixed(2)
+        : null;
+
+  const todayProfit = pickRawNumber(sources, ['today_profit', 'todayProfit', 'daily_profit', 'dailyProfit']);
+  const bestDayProfit = pickRawNumber(sources, ['best_day_profit', 'bestDayProfit']);
+  let consistencyLiveImpactPct: number | null = null;
+  if (netProfit !== null && floatingPnl !== null && (todayProfit !== null || bestDayProfit !== null)) {
+    const projectedTotal = netProfit + floatingPnl;
+    const projectedBest = Math.max(bestDayProfit ?? 0, (todayProfit ?? 0) + floatingPnl);
+    if (projectedBest > 0) {
+      consistencyLiveImpactPct = projectedTotal > 0 ? +Math.min(100, (projectedBest / projectedTotal) * 100).toFixed(1) : 100;
+    } else {
+      consistencyLiveImpactPct = 0;
+    }
+  }
+
+  return {
+    balance,
+    equity,
+    floatingPnl,
+    margin: margin !== null ? +margin.toFixed(2) : null,
+    freeMargin,
+    marginLevelPct,
+    dailyLossUsedUsd: dailyLossUsedUsd !== null ? +Math.abs(dailyLossUsedUsd).toFixed(2) : null,
+    dailyLossLimitUsd,
+    consistencyLiveImpactPct,
+    openPositionsCount: snapshot.openPositions.length,
+    openPositions: snapshot.openPositions,
+    rateFloorMs,
+    nextSafeSyncAt,
+    syncTriggered,
+  };
+}
 
 type Callback = { state: string; code: string; browserSession: string; uid: string };
 interface LocalServices {
@@ -102,7 +246,11 @@ export function createFundedNextRouter(options: {
         return store.setTracked(uid, account.connectionId, account.id, tracked);
       },
       enqueueSync: (uid: string, id: string) => store.enqueueSync(uid, id),
-      getSnapshotState: (uid: string, id: string) => store.getAccountSnapshotState(uid, id),
+      getSnapshotState: (uid: string, id: string, opts?: { live?: boolean }): Promise<{
+        snapshot: StoredSnapshot | null;
+        syncStatus: import('./store.js').AccountSyncStatus;
+      } & Partial<LiveSnapshotStateResult>> =>
+        opts?.live ? store.requestLiveSnapshot(uid, id) : store.getAccountSnapshotState(uid, id),
       listExecutions: (uid: string, id: string, cursor?: string, limit?: number) => store.listExecutions(uid, id, cursor, limit),
       disconnect: (uid: string, id: string) => store.disconnect(uid, id),
       importJournalBatch: (uid: string, importId: string, rows: RawRow[]) => store.importJournalBatch(uid, importId, rows),
@@ -196,16 +344,45 @@ export function createFundedNextRouter(options: {
     res.status(202).json(await services.enqueueSync(uid, req.params.id));
   }));
 
-  router.get('/accounts/:id/snapshot', route(async (req, res, uid, services) => {
-    const { snapshot, syncStatus } = await services.getSnapshotState(uid, req.params.id);
-    if (syncStatus === 'RECONNECT_REQUIRED') {
+  const isLiveQuery = (req: Request) => req.query.live === '1' || req.query.live === 'true';
+
+  router.get('/accounts/:id', route(async (req, res, uid, services) => {
+    const live = isLiveQuery(req);
+    const state = await services.getSnapshotState(uid, req.params.id, { live });
+    if (state.syncStatus === 'RECONNECT_REQUIRED') {
       throw new PilotStoreError(409, 'Reconnect this FundedNext connection', 'reconnect_required');
     }
-    if (!snapshot) {
-      res.status(404).json({ error: 'FundedNext snapshot not found', syncStatus });
+    res.json({
+      accountId: req.params.id,
+      snapshot: state.snapshot,
+      syncStatus: state.syncStatus,
+      liveTelemetry: extractFundedNextLiveTelemetry(state.snapshot, state),
+    });
+  }));
+
+  router.get('/accounts/:id/snapshot', route(async (req, res, uid, services) => {
+    const live = isLiveQuery(req);
+    const state = await services.getSnapshotState(uid, req.params.id, { live });
+    if (state.syncStatus === 'RECONNECT_REQUIRED') {
+      throw new PilotStoreError(409, 'Reconnect this FundedNext connection', 'reconnect_required');
+    }
+    if (!state.snapshot) {
+      res.status(404).json({
+        error: 'FundedNext snapshot not found',
+        syncStatus: state.syncStatus,
+        ...(live ? { liveTelemetry: extractFundedNextLiveTelemetry(null, state) } : {}),
+      });
       return;
     }
-    res.json({ snapshot, syncStatus });
+    if (live) {
+      res.json({
+        snapshot: state.snapshot,
+        syncStatus: state.syncStatus,
+        liveTelemetry: extractFundedNextLiveTelemetry(state.snapshot, state),
+      });
+      return;
+    }
+    res.json({ snapshot: state.snapshot, syncStatus: state.syncStatus });
   }));
 
   router.get('/accounts/:id/executions', route(async (req, res, uid, services) => {

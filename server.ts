@@ -127,6 +127,34 @@ async function verifyFirebaseBearerToken(authHeader: string | undefined, require
   }
 }
 
+interface LiveBridgeOpenPosition {
+  ticket: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  lots: number;
+  openPrice: number;
+  currentPrice: number | null;
+  slPrice: number | null;
+  tpPrice: number | null;
+  floatingPnl: number;
+  swap: number;
+  commission: number;
+  openTime: string | number | null;
+  comment?: string;
+}
+
+interface LiveBridgeLiveState {
+  balance: number | null;
+  equity: number | null;
+  floatingPnl: number | null;
+  margin: number | null;
+  freeMargin: number | null;
+  marginLevelPct: number | null;
+  dailyLossUsedUsd: number | null;
+  dailyLossLimitUsd: number | null;
+  openPositions: LiveBridgeOpenPosition[];
+}
+
 interface LiveBridgeFeedEntry {
   syncedAt: string;
   reason: string;
@@ -139,8 +167,119 @@ interface LiveBridgeFeedEntry {
     initialDeposit: number;
     summaryNetProfit: number | null;
   };
+  live?: LiveBridgeLiveState;
   positions: ReturnType<typeof normalizeBridgePositionsToMt5Records>['positions'];
   skippedCount: number;
+}
+
+function toFiniteBridgeNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const n = Number(value.trim());
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function normalizeLiveBridgeOpenPositions(rawList: unknown): LiveBridgeOpenPosition[] {
+  if (!Array.isArray(rawList)) return [];
+  const out: LiveBridgeOpenPosition[] = [];
+  for (let i = 0; i < rawList.length; i++) {
+    const raw = rawList[i];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const row = raw as Record<string, unknown>;
+    const rawSide = String(row.side ?? row.dir ?? row.type_str ?? row.type ?? '').trim().toUpperCase();
+    const side: 'BUY' | 'SELL' =
+      rawSide.includes('SELL') || rawSide.includes('SHORT') || rawSide === '1' || rawSide === 'OP_SELL'
+        ? 'SELL'
+        : 'BUY';
+    const openPrice = toFiniteBridgeNumber(row.openPrice ?? row.open_price ?? row.priceOpen) ?? 0;
+    const lots = toFiniteBridgeNumber(row.lots ?? row.volume) ?? 0;
+    if (openPrice <= 0 || lots <= 0) continue;
+    const slRaw = toFiniteBridgeNumber(row.slPrice ?? row.sl ?? row.stopLoss ?? row.stop_loss);
+    const tpRaw = toFiniteBridgeNumber(row.tpPrice ?? row.tp ?? row.takeProfit ?? row.take_profit);
+    const curRaw = toFiniteBridgeNumber(row.currentPrice ?? row.current_price ?? row.price ?? row.mark_price);
+    out.push({
+      ticket: String(row.ticket ?? row.positionId ?? row.id ?? `LIVE-${i + 1}`).trim(),
+      symbol: String(row.symbol || 'XAUUSD').trim().toUpperCase() || 'XAUUSD',
+      side,
+      lots: +lots.toFixed(2),
+      openPrice,
+      currentPrice: curRaw !== null && curRaw > 0 ? curRaw : null,
+      slPrice: slRaw !== null && slRaw > 0 ? slRaw : null,
+      tpPrice: tpRaw !== null && tpRaw > 0 ? tpRaw : null,
+      floatingPnl: +(toFiniteBridgeNumber(row.floatingPnl ?? row.floating_pnl ?? row.profit) ?? 0).toFixed(2),
+      swap: +(toFiniteBridgeNumber(row.swap) ?? 0).toFixed(2),
+      commission: +(toFiniteBridgeNumber(row.commission) ?? 0).toFixed(2),
+      openTime:
+        typeof row.openTime === 'string' || typeof row.openTime === 'number'
+          ? row.openTime
+          : typeof row.openedAt === 'string'
+            ? row.openedAt
+            : null,
+      ...(typeof row.comment === 'string' && row.comment.trim() ? { comment: row.comment.trim().slice(0, 120) } : {}),
+    });
+  }
+  return out;
+}
+
+function normalizeLiveBridgeState(
+  body: Record<string, unknown>,
+  rawMeta: Record<string, unknown>
+): LiveBridgeLiveState {
+  const rawLive = (body.live && typeof body.live === 'object' && !Array.isArray(body.live)
+    ? body.live
+    : {}) as Record<string, unknown>;
+  const openPositions = normalizeLiveBridgeOpenPositions(
+    body.openPositions ?? rawLive.openPositions ?? rawMeta.openPositions
+  );
+  const balance = toFiniteBridgeNumber(rawLive.balance ?? body.balance ?? rawMeta.balance);
+  const equity = toFiniteBridgeNumber(rawLive.equity ?? body.equity ?? rawMeta.equity);
+  const explicitFloat = toFiniteBridgeNumber(
+    rawLive.floatingPnl ?? body.floatingPnl ?? rawMeta.floatingPnl ?? rawMeta.floatingProfit
+  );
+  const floatingPnl =
+    explicitFloat !== null
+      ? +explicitFloat.toFixed(2)
+      : balance !== null && equity !== null
+        ? +(equity - balance).toFixed(2)
+        : openPositions.length > 0
+          ? +openPositions.reduce((sum, p) => sum + p.floatingPnl, 0).toFixed(2)
+          : null;
+  const margin = toFiniteBridgeNumber(rawLive.margin ?? body.margin ?? rawMeta.margin);
+  const rawFreeMargin = toFiniteBridgeNumber(rawLive.freeMargin ?? body.freeMargin ?? rawMeta.freeMargin);
+  const freeMargin =
+    rawFreeMargin !== null
+      ? +rawFreeMargin.toFixed(2)
+      : margin !== null && equity !== null
+        ? +(equity - margin).toFixed(2)
+        : null;
+  const rawMarginLevel = toFiniteBridgeNumber(
+    rawLive.marginLevelPct ?? rawLive.marginLevel ?? body.marginLevelPct ?? rawMeta.marginLevelPct ?? rawMeta.marginLevel
+  );
+  const marginLevelPct =
+    rawMarginLevel !== null
+      ? +rawMarginLevel.toFixed(1)
+      : margin !== null && margin > 0 && equity !== null && equity > 0
+        ? +((equity / margin) * 100).toFixed(1)
+        : null;
+  const dailyLossUsedUsd = toFiniteBridgeNumber(
+    rawLive.dailyLossUsedUsd ?? body.dailyLossUsedUsd ?? rawMeta.dailyLossUsedUsd
+  );
+  const dailyLossLimitUsd = toFiniteBridgeNumber(
+    rawLive.dailyLossLimitUsd ?? body.dailyLossLimitUsd ?? rawMeta.dailyLossLimitUsd
+  );
+  return {
+    balance: balance !== null ? +balance.toFixed(2) : null,
+    equity: equity !== null ? +equity.toFixed(2) : null,
+    floatingPnl,
+    margin: margin !== null ? +margin.toFixed(2) : null,
+    freeMargin,
+    marginLevelPct,
+    dailyLossUsedUsd: dailyLossUsedUsd !== null ? +Math.abs(dailyLossUsedUsd).toFixed(2) : null,
+    dailyLossLimitUsd: dailyLossLimitUsd !== null ? +Math.abs(dailyLossLimitUsd).toFixed(2) : null,
+    openPositions,
+  };
 }
 
 const LIVE_BRIDGE_STORE_PATH = path.join(os.tmpdir(), 'tredyn_live_bridge_store_v32.json');
@@ -849,6 +988,7 @@ export function createApp() {
 
       const pushOffset = normalizeMt5TimeOffsetSetting(body.mt5TimeOffset);
       const { positions, skippedCount } = normalizeBridgePositionsToMt5Records(rawPositions, undefined, pushOffset);
+      const liveState = normalizeLiveBridgeState(body as Record<string, unknown>, rawMeta);
       const syncedAt = new Date().toISOString();
       const entry: LiveBridgeFeedEntry = {
         syncedAt,
@@ -865,6 +1005,7 @@ export function createApp() {
               ? Number(rawMeta.summaryNetProfit)
               : null,
         },
+        live: liveState,
         positions,
         skippedCount,
       };
@@ -876,6 +1017,10 @@ export function createApp() {
         initialDeposit: entry.meta.initialDeposit,
         summaryNetProfit: entry.meta.summaryNetProfit,
         receivedPositions: positions.length,
+        openPositionsCount: liveState.openPositions.length,
+        balance: liveState.balance,
+        equity: liveState.equity,
+        floatingPnl: liveState.floatingPnl,
         syncedAt,
       });
 
@@ -890,6 +1035,8 @@ export function createApp() {
           body: JSON.stringify({
             tredynApiKey: headerKey,
             meta: entry.meta,
+            live: entry.live,
+            openPositions: entry.live?.openPositions ?? [],
             positions: entry.positions,
           }),
           signal: AbortSignal.timeout(4000),
@@ -900,6 +1047,7 @@ export function createApp() {
         ok: true,
         syncedAt,
         receivedPositions: positions.length,
+        openPositionsCount: liveState.openPositions.length,
         skippedCount,
       });
     } catch (err: unknown) {
@@ -908,6 +1056,122 @@ export function createApp() {
         error: err instanceof Error ? err.message : 'Live Bridge push error',
       });
     }
+  });
+
+  app.get('/api/mt5/live-bridge/live', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const headerKey =
+      typeof req.headers['x-tallynx-api-key'] === 'string'
+        ? req.headers['x-tallynx-api-key'].trim()
+        : typeof req.headers['x-tredyn-api-key'] === 'string'
+          ? req.headers['x-tredyn-api-key'].trim()
+          : '';
+    if (!isValidTredynApiKey(headerKey)) {
+      res.status(401).json({
+        ok: false,
+        error: 'Invalid or missing X-TallyNX-Api-Key (or X-Tredyn-Api-Key) header',
+        code: 'INVALID_TREDYN_API_KEY',
+      });
+      return;
+    }
+
+    const rate = checkChatRateLimit(`live_bridge:${hashTredynApiKey(headerKey)}`, Date.now(), 450);
+    if (!rate.allowed) {
+      res.status(429).json({
+        ok: false,
+        error: `Live telemetry rate limit exceeded; retry in ${rate.retryAfterSec}s`,
+        code: 'RATE_LIMITED',
+      });
+      return;
+    }
+
+    let feed = getLiveBridgeFeed(headerKey);
+    const ageMs = feed ? Date.now() - Date.parse(feed.syncedAt) : Infinity;
+    if ((!feed || !Number.isFinite(ageMs) || ageMs >= 2_500) && DEFAULT_SOVEREIGN_MT5_BASE_URL) {
+      try {
+        const pullResp = await fetch(
+          `${DEFAULT_SOVEREIGN_MT5_BASE_URL}/live-bridge/pull?apiKey=${encodeURIComponent(headerKey)}`,
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              'X-Tredyn-Api-Key': headerKey,
+            },
+            signal: AbortSignal.timeout(4000),
+          }
+        );
+        if (pullResp.ok) {
+          const pullData = (await pullResp.json()) as {
+            ok?: boolean;
+            entry?: {
+              syncedAt?: string;
+              meta?: Record<string, unknown>;
+              live?: Record<string, unknown>;
+              openPositions?: unknown[];
+              positions?: unknown[];
+            };
+          };
+          if (pullData?.ok && pullData.entry) {
+            const rawMeta = pullData.entry.meta || {};
+            const rawPositions = Array.isArray(pullData.entry.positions) ? pullData.entry.positions : [];
+            const { positions, skippedCount } = normalizeBridgePositionsToMt5Records(rawPositions);
+            const pulledFeed: LiveBridgeFeedEntry = {
+              syncedAt: String(pullData.entry.syncedAt || new Date().toISOString()),
+              reason: 'VPS01_PERSISTENT_STORE',
+              meta: {
+                holderName: String(rawMeta.holderName || rawMeta.name || 'Tredyn MT5 Trader'),
+                login: String(rawMeta.login || ''),
+                broker: String(rawMeta.broker || 'MT5 Live Bridge'),
+                server: String(rawMeta.server || ''),
+                currency: String(rawMeta.currency || 'USD'),
+                initialDeposit: Number(rawMeta.initialDeposit ?? 0) || 0,
+                summaryNetProfit:
+                  rawMeta.summaryNetProfit !== undefined && rawMeta.summaryNetProfit !== null
+                    ? Number(rawMeta.summaryNetProfit)
+                    : null,
+              },
+              live: normalizeLiveBridgeState(pullData.entry as Record<string, unknown>, rawMeta),
+              positions,
+              skippedCount,
+            };
+            saveLiveBridgeFeed(headerKey, pulledFeed);
+            feed = pulledFeed;
+          }
+        }
+      } catch {
+        // Return cached local feed if VPS01 pull fails transiently
+      }
+    }
+
+    if (!feed) {
+      res.status(404).json({
+        ok: false,
+        error: 'Waiting for MT5 Live Bridge heartbeat for this tredyn-api-key',
+        code: 'LIVE_BRIDGE_WAITING',
+      });
+      return;
+    }
+
+    const live: LiveBridgeLiveState = feed.live ?? {
+      balance: feed.meta.initialDeposit > 0 ? feed.meta.initialDeposit : null,
+      equity: feed.meta.initialDeposit > 0 ? feed.meta.initialDeposit : null,
+      floatingPnl: 0,
+      margin: null,
+      freeMargin: null,
+      marginLevelPct: null,
+      dailyLossUsedUsd: null,
+      dailyLossLimitUsd: null,
+      openPositions: [],
+    };
+    res.json({
+      ok: true,
+      provider: 'LIVE_BRIDGE',
+      syncedAt: feed.syncedAt,
+      meta: feed.meta,
+      live,
+      openPositions: live.openPositions,
+      positionsCount: feed.positions.length,
+    });
   });
 
   app.get('/api/mt5/scripts/:filename', (req, res) => {
@@ -1056,6 +1320,8 @@ export function createApp() {
                 entry?: {
                   syncedAt?: string;
                   meta?: Record<string, unknown>;
+                  live?: Record<string, unknown>;
+                  openPositions?: unknown[];
                   positions?: unknown[];
                 };
               };
@@ -1084,6 +1350,7 @@ export function createApp() {
                         ? Number(rawMeta.summaryNetProfit)
                         : null,
                   },
+                  live: normalizeLiveBridgeState(pullData.entry as Record<string, unknown>, rawMeta),
                   positions,
                   skippedCount,
                 };
@@ -1109,6 +1376,7 @@ export function createApp() {
           provider: 'LIVE_BRIDGE',
           syncedAt: feed.syncedAt,
           meta: feed.meta,
+          live: feed.live ?? null,
           positions: reapplyMt5TimezoneToPositions(feed.positions, mt5TimeOffset),
           skippedCount: feed.skippedCount,
         });

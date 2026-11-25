@@ -1,5 +1,6 @@
 import type { TradeRecord } from '../types/ghr';
 import { getTradeSession } from './ghrRules';
+export { LIVE_TELEMETRY_POLL_MS } from './liveTelemetryBuffer';
 
 export interface RealtimeTelemetrySnapshot {
   balance: number;
@@ -84,7 +85,8 @@ export function computeRealtimeTelemetryBar(
   activePort: string,
   todayIso: string,
   floatingPnlUsd: number = 0,
-  streamMode: RealtimeTelemetrySnapshot['streamMode'] = 'SSE_LIVE'
+  streamMode: RealtimeTelemetrySnapshot['streamMode'] = 'SSE_LIVE',
+  dailyLossLimitUsdOverride?: number
 ): RealtimeTelemetrySnapshot {
   const portTradesToday = (journal || []).filter(
     (t) => t.port === activePort && t.date === todayIso
@@ -96,7 +98,10 @@ export function computeRealtimeTelemetryBar(
   const balance = +Number(account.balance || 0).toFixed(2);
   const equity = +(balance + cleanFloat).toFixed(2);
   const initial = Math.max(100, Number(account.initial || 10000));
-  const dailyDrawdownLimitUsd = +(initial * 0.05).toFixed(2);
+  const dailyDrawdownLimitUsd =
+    typeof dailyLossLimitUsdOverride === 'number' && Number.isFinite(dailyLossLimitUsdOverride) && dailyLossLimitUsdOverride > 0
+      ? +dailyLossLimitUsdOverride.toFixed(2)
+      : +(initial * 0.05).toFixed(2);
   const netToday = dailyRealizedPnlUsd + cleanFloat;
   const dailyDrawdownUsedUsd = +(netToday < 0 ? Math.abs(netToday) : 0).toFixed(2);
   const dailyDrawdownUsedPct = Math.min(

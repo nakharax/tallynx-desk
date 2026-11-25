@@ -4,9 +4,20 @@ import type { FundedNextCredentialEnvelope } from './cryptoEnvelope.js';
 import { reconcileTrade } from './mcpConnector.js';
 
 export const JOB_PRIORITY = ['SNAPSHOT', 'INITIAL_DISCOVERY', 'BACKFILL_PAGE', 'INCREMENTAL'] as const;
+export const FUNDEDNEXT_LIVE_SYNC_FLOOR_MS = 3_000;
+export const FUNDEDNEXT_QUIET_SYNC_FLOOR_MS = 15_000;
 export type SyncType = typeof JOB_PRIORITY[number];
 export type ConnectionStatus = 'CONNECTED' | 'DEGRADED' | 'RECONNECT_REQUIRED' | 'DISCONNECTED';
 export type AccountSyncStatus = 'SYNCING' | 'PARTIAL' | 'COMPLETE' | 'DEGRADED' | 'RECONNECT_REQUIRED';
+
+export interface LiveSnapshotStateResult {
+  snapshot: StoredSnapshot | null;
+  syncStatus: AccountSyncStatus;
+  liveRequested: boolean;
+  syncTriggered: boolean;
+  rateFloorMs: number;
+  nextSafeSyncAt: string | null;
+}
 
 export class PilotStoreError extends Error {
   constructor(readonly status: 400 | 403 | 404 | 409 | 502 | 503, message: string, readonly code?: 'reconnect_required') { super(message); }
@@ -244,25 +255,98 @@ export abstract class PilotStore {
     });
   }
 
+  private resolveSyncStatus(
+    account: AccountDocument,
+    connection: Connection,
+    snapshot: StoredSnapshot | null,
+    backfill: SyncJob | null,
+    incremental: SyncJob | null
+  ): AccountSyncStatus {
+    if (connection.status === 'DEGRADED') return 'DEGRADED';
+    if (account.tracked && ((!snapshot && backfill?.status === 'COMPLETE') ||
+      (backfill && active(backfill) && !backfill.cursor) || (incremental && active(incremental)))) {
+      return 'SYNCING';
+    }
+    const complete = account.tracked && backfill?.status === 'COMPLETE' && incremental?.status !== 'PARTIAL' &&
+      snapshot && !snapshot.missingFields.length && !snapshot.unverifiedFields.length &&
+      snapshot.openPositions.every(position => !position.missingFields.length && !position.unverifiedFields.length);
+    return complete ? 'COMPLETE' : 'PARTIAL';
+  }
+
   getAccountSnapshotState(uid: string, id: string): Promise<{ snapshot: StoredSnapshot | null; syncStatus: AccountSyncStatus }> {
     return this.transact(async tx => {
       const account = await this.ownAccount(tx, uid, id);
       const connection = await this.ownConnection(tx, uid, account.connectionId);
       if (!runnable(connection.status)) return { snapshot: null, syncStatus: 'RECONNECT_REQUIRED' };
       const snapshot = snapshotView(account, connection);
-      if (connection.status === 'DEGRADED') return { snapshot, syncStatus: 'DEGRADED' };
       const [backfill, incremental] = await Promise.all([
         this.findJob(tx, connection, account.id, 'BACKFILL_PAGE'),
         this.findJob(tx, connection, account.id, 'INCREMENTAL'),
       ]);
-      if (account.tracked && ((!snapshot && backfill?.status === 'COMPLETE') ||
-        (backfill && active(backfill) && !backfill.cursor) || (incremental && active(incremental)))) {
-        return { snapshot, syncStatus: 'SYNCING' };
+      return {
+        snapshot,
+        syncStatus: this.resolveSyncStatus(account, connection, snapshot, backfill, incremental),
+      };
+    });
+  }
+
+  requestLiveSnapshot(
+    uid: string,
+    id: string,
+    minFloorMs = FUNDEDNEXT_LIVE_SYNC_FLOOR_MS
+  ): Promise<LiveSnapshotStateResult> {
+    const requestedFloor = Number.isFinite(minFloorMs) ? Math.max(2_000, Math.floor(minFloorMs)) : FUNDEDNEXT_LIVE_SYNC_FLOOR_MS;
+    return this.transact(async tx => {
+      const account = await this.ownAccount(tx, uid, id);
+      const connection = await this.ownConnection(tx, uid, account.connectionId);
+      if (!runnable(connection.status)) {
+        return {
+          snapshot: null,
+          syncStatus: 'RECONNECT_REQUIRED',
+          liveRequested: true,
+          syncTriggered: false,
+          rateFloorMs: requestedFloor,
+          nextSafeSyncAt: null,
+        };
       }
-      const complete = account.tracked && backfill?.status === 'COMPLETE' && incremental?.status !== 'PARTIAL' &&
-        snapshot && !snapshot.missingFields.length && !snapshot.unverifiedFields.length &&
-        snapshot.openPositions.every(position => !position.missingFields.length && !position.unverifiedFields.length);
-      return { snapshot, syncStatus: complete ? 'COMPLETE' : 'PARTIAL' };
+      const snapshot = snapshotView(account, connection);
+      const safeFloorMs = snapshot?.marketQuietConfirmed
+        ? Math.max(requestedFloor, FUNDEDNEXT_QUIET_SYNC_FLOOR_MS)
+        : requestedFloor;
+      const now = this.now();
+      const parsedLastChecked = snapshot?.lastCheckedAt ? Date.parse(snapshot.lastCheckedAt) : NaN;
+      const lastCheckedMs = Number.isFinite(parsedLastChecked) ? parsedLastChecked : 0;
+
+      const [snapshotJob, backfill, incremental] = await Promise.all([
+        this.findJob(tx, connection, account.id, 'SNAPSHOT'),
+        this.findJob(tx, connection, account.id, 'BACKFILL_PAGE'),
+        this.findJob(tx, connection, account.id, 'INCREMENTAL'),
+      ]);
+
+      let syncTriggered = false;
+      const floorElapsed = lastCheckedMs <= 0 || now - lastCheckedMs >= safeFloorMs;
+      if (account.tracked && connection.status === 'CONNECTED' && floorElapsed && snapshotJob?.status !== 'LEASED') {
+        if (snapshotJob && snapshotJob.status === 'QUEUED') {
+          if (snapshotJob.availableAt === undefined || snapshotJob.availableAt > now) {
+            tx.put(jobPath(snapshotJob.id), queued(snapshotJob, now, null));
+          }
+          syncTriggered = true;
+        } else {
+          this.createOrQueue(tx, connection, account.id, 'SNAPSHOT', now, snapshotJob);
+          syncTriggered = true;
+        }
+      }
+
+      const referenceMs = syncTriggered ? now : Math.max(now, lastCheckedMs);
+      const nextSafeSyncAt = new Date(referenceMs + safeFloorMs).toISOString();
+      return {
+        snapshot,
+        syncStatus: this.resolveSyncStatus(account, connection, snapshot, backfill, incremental),
+        liveRequested: true,
+        syncTriggered,
+        rateFloorMs: safeFloorMs,
+        nextSafeSyncAt,
+      };
     });
   }
 
