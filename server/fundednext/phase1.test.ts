@@ -1083,3 +1083,164 @@ test('multi-origin FundedNext OAuth enforces strict Desk allowlist, caches clien
     else process.env.FUNDEDNEXT_ALLOWED_ORIGINS = prevAllowed;
   }
 });
+
+test('GET /api/fundednext/accounts/:id?live=1 enforces 3s safe rate floor and surfaces enriched liveTelemetry', async (t) => {
+  let now = Date.now() - 5_000;
+  const store = new InMemoryPilotStore({ now: () => now });
+  const [account] = await seedAccounts(store, 'alice');
+  await store.setTracked('alice', account.connectionId, account.id, true);
+
+  let wakes = 0;
+  const rpcSecret = 'l'.repeat(64);
+  const handleRpc = createFundedNextVpsHandler({
+    store,
+    oauth: {
+      start: async () => ({ authorizeUrl: 'https://example.test/auth', browserSession: 's'.repeat(43), state: 'state-1' }),
+      callback: async () => ({ connectionId: account.connectionId, status: 'CONNECTED' as const }),
+    },
+    secret: rpcSecret,
+    onWake: () => {
+      wakes++;
+    },
+  });
+  const vpsServer = createServer((req, res) => {
+    void handleRpc(req, res).then((handled) => {
+      if (!handled) res.writeHead(404).end();
+    });
+  });
+  vpsServer.listen(0, '127.0.0.1');
+  t.after(() => vpsServer.close());
+  await once(vpsServer, 'listening');
+  const vpsAddr = vpsServer.address();
+  assert.ok(vpsAddr && typeof vpsAddr === 'object');
+
+  const bff = express();
+  bff.use(express.json());
+  bff.use('/api/fundednext', createFundedNextRouter({
+    verifyIdToken: async (tok) => (tok === 'alice' ? { uid: 'alice' } : null),
+    services: () => createRemoteVpsPilotServices({ baseUrl: `http://127.0.0.1:${vpsAddr.port}`, secret: rpcSecret }),
+  }));
+  const bffOrigin = await listen(bff, t);
+
+  const worker = new FundedNextWorker({
+    store,
+    cipher,
+    now: () => now,
+    refreshTokens: async () => ({ ...token, tokenExpiresAt: now + 120_000 }),
+    openClient: () => ({
+      callTool: async (tool) => {
+        if (tool === 'get_account_overview') {
+          return {
+            account_details: { initial_balance: 6000 },
+            stats: { balance: 6150, equity: 6190, net_profit: 150, margin: 200, free_margin: 5990, daily_dd_used: 0 },
+          };
+        }
+        return [
+          {
+            id: 9001,
+            account_id: account.accountId,
+            symbol: 'XAUUSD',
+            type: 'BUY',
+            lots: 0.04,
+            open_price: 3800,
+            current_price: 3810,
+            sl: 3790,
+            tp: 3812,
+            profit: 40,
+            open_time_str: '2026-11-25T10:00:00Z',
+            close_time_str: 'Currently Running',
+          },
+        ];
+      },
+    }),
+  });
+
+  // Initial snapshot run
+  assert.equal(await worker.runOnce(), true);
+
+  // Within 3s floor -> does not re-trigger worker sync
+  now += 1_000;
+  const r1 = await fetch(`${bffOrigin}/api/fundednext/accounts/${account.id}?live=1`, {
+    headers: { Authorization: 'Bearer alice' },
+  });
+  assert.equal(r1.status, 200);
+  const j1 = await r1.json();
+  assert.equal(j1.liveTelemetry.syncTriggered, false);
+  assert.equal(j1.liveTelemetry.rateFloorMs, 3000);
+  assert.equal(j1.liveTelemetry.balance, 6150);
+  assert.equal(j1.liveTelemetry.equity, 6190);
+  assert.equal(j1.liveTelemetry.floatingPnl, 40);
+  assert.equal(j1.liveTelemetry.margin, 200);
+  assert.equal(j1.liveTelemetry.freeMargin, 5990);
+  assert.equal(j1.liveTelemetry.dailyLossLimitUsd, 300);
+  assert.equal(j1.liveTelemetry.openPositionsCount, 1);
+  assert.equal(wakes, 0);
+
+  // After 3s floor -> triggers SNAPSHOT expedite & wakes worker
+  now += 2_500;
+  const r2 = await fetch(`${bffOrigin}/api/fundednext/accounts/${account.id}/snapshot?live=1`, {
+    headers: { Authorization: 'Bearer alice' },
+  });
+  assert.equal(r2.status, 200);
+  const j2 = await r2.json();
+  assert.equal(j2.liveTelemetry.syncTriggered, true);
+  assert.equal(wakes, 1);
+  assert.equal(await worker.runOnce(), true);
+});
+
+test('POST /api/mt5/live-bridge/push and GET /api/mt5/live-bridge/live surface openPositions and equity telemetry', async (t) => {
+  const origin = await listen(createApp(), t);
+  const apiKey = 'trd_live_3s_telemetry_key_99';
+
+  const pushResp = await fetch(`${origin}/api/mt5/live-bridge/push`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Tredyn-Api-Key': apiKey,
+    },
+    body: JSON.stringify({
+      meta: {
+        holderName: 'Bridge Trader',
+        login: '88001122',
+        broker: 'FundedNext MT5',
+        currency: 'USD',
+        initialDeposit: 10000,
+        balance: 10200,
+        equity: 10245.5,
+        margin: 250,
+        freeMargin: 9995.5,
+      },
+      openPositions: [
+        {
+          ticket: '7701',
+          symbol: 'XAUUSD',
+          side: 'BUY',
+          lots: 0.05,
+          openPrice: 3805,
+          currentPrice: 3814.1,
+          slPrice: 3795,
+          tpPrice: 3820,
+          floatingPnl: 45.5,
+          swap: -0.5,
+          commission: -0.3,
+        },
+      ],
+      positions: [],
+    }),
+  });
+  assert.equal(pushResp.status, 200);
+  const pushJson = await pushResp.json();
+  assert.equal(pushJson.openPositionsCount, 1);
+
+  const liveResp = await fetch(`${origin}/api/mt5/live-bridge/live`, {
+    headers: { 'X-Tredyn-Api-Key': apiKey },
+  });
+  assert.equal(liveResp.status, 200);
+  const liveJson = await liveResp.json();
+  assert.equal(liveJson.live.balance, 10200);
+  assert.equal(liveJson.live.equity, 10245.5);
+  assert.equal(liveJson.live.floatingPnl, 45.5);
+  assert.equal(liveJson.live.marginLevelPct, 4098.2);
+  assert.equal(liveJson.openPositions.length, 1);
+  assert.equal(liveJson.openPositions[0].ticket, '7701');
+});

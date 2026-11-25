@@ -18,6 +18,8 @@ import { GhrWorkspaceState, TradeRecord } from '../types/ghr';
 import { DESK_I18N, deskText, formatAccountDisplayName, maskWorkspaceEmail, type DeskLanguage } from '../utils/deskI18n';
 import { canFallbackToUsdWorkspace, formatPilotAmount } from '../utils/fundedNextPilot';
 import type { PilotTelemetryView } from '../utils/fundedNextPilot';
+import type { AnyLivePositionInput, LiveTelemetryPoint } from '../utils/liveTelemetryBuffer';
+import { LivePositionMonitorCard, type LiveMonitorControlState } from './LivePositionMonitorCard';
 import { PropAutopsyCard } from './PropAutopsyCard';
 import {
   buildMonthlyConsistencyCalendar,
@@ -102,6 +104,9 @@ interface AnalyticsSectionProps {
   ownerEmail?: string | null;
   lang?: DeskLanguage;
   pilotTelemetry?: PilotTelemetryView | null;
+  livePositions?: readonly AnyLivePositionInput[];
+  telemetrySeries?: readonly LiveTelemetryPoint[];
+  liveMonitor?: LiveMonitorControlState;
   posture?: {
     sessions: RealtimeAnalyticsSummary['sessions'];
     dailyBufferUsd?: number;
@@ -138,6 +143,9 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
   ownerEmail,
   lang = 'en',
   pilotTelemetry,
+  livePositions,
+  telemetrySeries,
+  liveMonitor,
   posture,
   onManageAccounts,
   onInspectDateInJournal,
@@ -613,6 +621,18 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
         {activeView === 'overview' && autopsyCard}
       </>) : <>
       {activeView === 'overview' && <>
+      {liveMonitor && (
+        <LivePositionMonitorCard
+          lang={lang}
+          accountName={accountName}
+          accountLogin={activeAccCfg.login}
+          livePositions={livePositions ?? []}
+          telemetrySeries={telemetrySeries ?? []}
+          liveMonitor={liveMonitor}
+          onOpenSyncModal={onOpenMt5SyncModal}
+        />
+      )}
+
       <div className="fx-kpi-row-4 desk-kpi-band analysis-overview-kpis" role="group" aria-label={text('Portfolio metrics', 'ตัวชี้วัดพอร์ต')}>
         <div className="fx-stat-card">
           <div className="fx-stat-label">{copy.balance}</div>

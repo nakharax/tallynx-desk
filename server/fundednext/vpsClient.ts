@@ -1,5 +1,5 @@
 import type { RawRow, TradeExecution } from './brokerTypes.js';
-import type { AccountSyncStatus, ConnectionStatus, PilotAccount, StoredSnapshot } from './store.js';
+import type { AccountSyncStatus, ConnectionStatus, LiveSnapshotStateResult, PilotAccount, StoredSnapshot } from './store.js';
 import { PilotStoreError } from './store.js';
 import { assertValidRpcSecret, signVpsRpcRequest } from './vpsRpc.js';
 
@@ -18,7 +18,10 @@ export interface RemoteVpsPilotServices {
   listDirectory(uid: string, connectionId?: string): Promise<{ accounts: PilotAccount[]; connectionStatus?: ConnectionStatus }>;
   setAccountTracked(uid: string, accountId: string, tracked: boolean): Promise<PilotAccount>;
   enqueueSync(uid: string, accountId: string): Promise<{ jobId: string; status: 'QUEUED' }>;
-  getSnapshotState(uid: string, accountId: string): Promise<{ snapshot: StoredSnapshot | null; syncStatus: AccountSyncStatus }>;
+  getSnapshotState(uid: string, accountId: string, options?: { live?: boolean }): Promise<{
+    snapshot: StoredSnapshot | null;
+    syncStatus: AccountSyncStatus;
+  } & Partial<LiveSnapshotStateResult>>;
   listExecutions(uid: string, accountId: string, cursor?: string, limit?: number): Promise<{ executions: TradeExecution[]; nextCursor: string | null }>;
   disconnect(uid: string, connectionId: string): Promise<{ status: string; generation: number }>;
   importJournalBatch(uid: string, importId: string, rows: RawRow[]): Promise<{ imported: number; unlinked: number }>;
@@ -100,8 +103,8 @@ export function createRemoteVpsPilotServices(options: RemoteVpsPilotClientOption
       (await callRpc<{ account: PilotAccount }>('/fundednext-rpc/accounts/tracking', uid, { accountId, tracked })).account,
     enqueueSync: (uid, accountId) =>
       callRpc('/fundednext-rpc/accounts/sync', uid, { accountId }),
-    getSnapshotState: (uid, accountId) =>
-      callRpc('/fundednext-rpc/accounts/snapshot', uid, { accountId }),
+    getSnapshotState: (uid, accountId, opts) =>
+      callRpc('/fundednext-rpc/accounts/snapshot', uid, { accountId, ...(opts?.live ? { live: true } : {}) }),
     listExecutions: (uid, accountId, cursor, limit) =>
       callRpc('/fundednext-rpc/accounts/executions', uid, {
         accountId,

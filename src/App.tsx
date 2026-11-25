@@ -74,13 +74,31 @@ import {
   formatPilotAmount,
   FUNDEDNEXT_POLL_MS,
   isPilotReconnect,
+  LIVE_TELEMETRY_POLL_MS,
   listPilotAccounts,
   loadCachedPilotSnapshot,
   planPilotPortAssignments,
+  readLiveBridgeTelemetry,
   readPilotAccount,
+  readPilotLiveSnapshot,
   saveCachedPilotSnapshot,
 } from './utils/fundedNextPilot';
-import type { PilotPortChange, PilotPortStats, PilotRead, PilotReadState, PilotTelemetryView } from './utils/fundedNextPilot';
+import type {
+  LiveBridgeTelemetryResponse,
+  PilotPortChange,
+  PilotPortStats,
+  PilotRead,
+  PilotReadState,
+  PilotTelemetryView,
+} from './utils/fundedNextPilot';
+import {
+  appendLiveTelemetryPoint,
+  computeLivePositionMetrics,
+  formatTelemetryTimeLabel,
+  type AnyLivePositionInput,
+  type LiveTelemetryPoint,
+} from './utils/liveTelemetryBuffer';
+import type { LiveMonitorControlState } from './components/LivePositionMonitorCard';
 import {
   clearOfflineQueue,
   deleteSnapshotFromIndexedDB,
@@ -433,6 +451,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', onGlobalKey);
   }, []);
   const [manualFloatingPnlUsd, setFloatingPnlUsd] = useState(0);
+  const [liveMonitorPaused, setLiveMonitorPaused] = useState(false);
+  const liveMonitorPausedRef = useRef(liveMonitorPaused);
+  liveMonitorPausedRef.current = liveMonitorPaused;
+  const [liveTabVisible, setLiveTabVisible] = useState(() =>
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible'
+  );
+  const [liveBridgeByPort, setLiveBridgeByPort] = useState<Record<string, LiveBridgeTelemetryResponse>>({});
+  const [liveTelemetrySeriesByPort, setLiveTelemetrySeriesByPort] = useState<Record<string, LiveTelemetryPoint[]>>({});
+  const [liveSyncMetaByPort, setLiveSyncMetaByPort] = useState<
+    Record<
+      string,
+      {
+        syncing: boolean;
+        lastSyncAt: string | null;
+        latencyMs: number | null;
+        nextPollAt: number | null;
+        error: string | null;
+      }
+    >
+  >({});
+  const triggerLive3sPollRef = useRef<(() => void) | null>(null);
+  const live3sHandlesActivePilotRef = useRef(false);
   const [pilotFeeds, setPilotFeeds] = useState<
     Record<string, PilotReadState & { uid: string; portId: string; accountId: string }>
   >({});
@@ -474,6 +514,7 @@ export default function App() {
       try {
         const parsed = JSON.parse(ev.data) as { event?: string; payload?: { login?: string; receivedPositions?: number } };
         if (parsed.event === 'bridge.push' && parsed.payload) {
+          triggerLive3sPollRef.current?.();
           addToast(
             `Live data received from MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} positions)`,
             `รับข้อมูลสดจาก MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} รายการ)`
@@ -2275,6 +2316,7 @@ export default function App() {
       const now = Date.now();
       const dueTargets = pilotPollTargets.filter(({ portId }) => {
         if (blockedReconnect.has(portId)) return false;
+        if (live3sHandlesActivePilotRef.current && portId === activePortRef.current) return false;
         if (forceActive && portId === activePortRef.current && (errorStreakByPort.get(portId) ?? 0) === 0) return true;
         return (nextPollAtByPort.get(portId) ?? 0) <= now;
       });
@@ -2358,6 +2400,269 @@ export default function App() {
   useEffect(() => {
     triggerActivePilotPollRef.current?.();
   }, [state.activePort]);
+
+  const activeBridgeKey = activePort?.syncProvider === 'LIVE_BRIDGE' ? (activePort.tredynApiKey || '').trim() : '';
+
+  useEffect(() => {
+    const portId = state.activePort;
+    const provider = activePort?.syncProvider;
+    const isPilotLive =
+      provider === 'FUNDEDNEXT_MCP' &&
+      Boolean(firebaseUid) &&
+      Boolean(activePilotAccountId) &&
+      pilotOAuthPort !== portId;
+    const isBridgeLive = provider === 'LIVE_BRIDGE' && Boolean(activeBridgeKey);
+    const canAutoPoll =
+      isOnline &&
+      !liveMonitorPaused &&
+      ((isPilotLive && activePilotAutoSync) || isBridgeLive);
+
+    live3sHandlesActivePilotRef.current = Boolean(canAutoPoll && isPilotLive);
+
+    if (!isPilotLive && !isBridgeLive) {
+      triggerLive3sPollRef.current = null;
+      return;
+    }
+
+    const controller = new AbortController();
+    let inFlight = false;
+
+    const appendSeriesPoint = (
+      balanceVal: number,
+      equityVal: number,
+      floatingVal: number,
+      openCount: number,
+      dailyLimitOverride: number | null,
+      dailyUsedOverride: number | null
+    ) => {
+      const curState = stateRef.current;
+      const targetPort = curState.accounts?.[portId];
+      const todayIso = getBangkokIsoDate();
+      const todayRealized = (curState.journal || [])
+        .filter((item) => item.port === portId && item.date === todayIso)
+        .reduce((sum, item) => sum + (Number(item.pnlUsd) || 0), 0);
+      const initialCap = Math.max(100, Number(targetPort?.initial || 10000));
+      const dailyLimit =
+        dailyLimitOverride != null && Number.isFinite(dailyLimitOverride) && dailyLimitOverride > 0
+          ? dailyLimitOverride
+          : +(initialCap * 0.05).toFixed(2);
+      const metricsForFloor = computeLivePositionMetrics(
+        [],
+        balanceVal,
+        equityVal,
+        dailyLimit,
+        0,
+        0,
+        40,
+        {
+          todayRealizedProfitUsd: todayRealized,
+          dailyLossUsedUsd: dailyUsedOverride,
+        }
+      );
+      const ts = Date.now();
+      setLiveTelemetrySeriesByPort((prev) => ({
+        ...prev,
+        [portId]: appendLiveTelemetryPoint(prev[portId] ?? [], {
+          ts,
+          timeLabel: formatTelemetryTimeLabel(ts, 'Asia/Bangkok'),
+          balance: balanceVal,
+          equity: equityVal,
+          floatingPnl: floatingVal,
+          dailyFloorBalance: metricsForFloor.summary.dailyFloorBalance,
+          openPositionsCount: openCount,
+        }),
+      }));
+    };
+
+    const pollLiveNow = async (force = false) => {
+      if (controller.signal.aborted || !isOnline || inFlight) return;
+      if (!force && (liveMonitorPausedRef.current || document.visibilityState !== 'visible')) return;
+      if (!force && isPilotLive && !activePilotAutoSync) return;
+
+      inFlight = true;
+      setLiveSyncMetaByPort((prev) => ({
+        ...prev,
+        [portId]: {
+          syncing: true,
+          lastSyncAt: prev[portId]?.lastSyncAt ?? null,
+          latencyMs: prev[portId]?.latencyMs ?? null,
+          nextPollAt: prev[portId]?.nextPollAt ?? null,
+          error: prev[portId]?.error ?? null,
+        },
+      }));
+
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      try {
+        if (isPilotLive && firebaseUid && activePilotAccountId) {
+          const currentFeed = pilotFeedsRef.current[portId];
+          const previousData =
+            currentFeed &&
+            currentFeed.uid === firebaseUid &&
+            currentFeed.portId === portId &&
+            currentFeed.accountId === activePilotAccountId
+              ? currentFeed.data
+              : null;
+          const data = await readPilotLiveSnapshot(getPilotIdToken, activePilotAccountId, controller.signal, {
+            previous: previousData,
+            requireVisible: !force,
+          });
+          if (!data || controller.signal.aborted || activeUidRef.current !== firebaseUid) return;
+          const elapsedMs = Math.max(
+            1,
+            Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)
+          );
+          const scope = { uid: firebaseUid, portId, accountId: activePilotAccountId };
+          if (data.snapshot) {
+            saveCachedPilotSnapshot(scope.uid, scope.portId, scope.accountId, data.snapshot);
+          }
+          setPilotFeeds((prev) => ({ ...prev, [portId]: { ...scope, data, error: null, reconnect: false } }));
+          void reconcilePilotExecutionsIntoWorkspace({ ...scope, data });
+
+          const live = data.liveTelemetry;
+          const snap = data.snapshot;
+          const rawBal = live?.balance ?? (snap?.balance != null ? Number(snap.balance) : null);
+          const rawEq = live?.equity ?? (snap?.equity != null ? Number(snap.equity) : rawBal);
+          const rawFloat = live?.floatingPnl ?? (snap?.floatingPnl != null ? Number(snap.floatingPnl) : null);
+          const openPos = live?.openPositions ?? snap?.openPositions ?? [];
+          if (rawBal != null && Number.isFinite(rawBal)) {
+            const safeEq = rawEq != null && Number.isFinite(rawEq) ? rawEq : rawBal;
+            const safeFloat = rawFloat != null && Number.isFinite(rawFloat) ? rawFloat : safeEq - rawBal;
+            appendSeriesPoint(
+              rawBal,
+              safeEq,
+              safeFloat,
+              openPos.length,
+              live?.dailyLossLimitUsd ?? null,
+              live?.dailyLossUsedUsd ?? null
+            );
+          }
+
+          const syncAt = snap?.lastCheckedAt || snap?.fetchedAt || new Date().toISOString();
+          const nextDelay = live?.rateFloorMs && live.rateFloorMs > LIVE_TELEMETRY_POLL_MS
+            ? live.rateFloorMs
+            : LIVE_TELEMETRY_POLL_MS;
+          setLiveSyncMetaByPort((prev) => ({
+            ...prev,
+            [portId]: {
+              syncing: false,
+              lastSyncAt: syncAt,
+              latencyMs: elapsedMs,
+              nextPollAt: canAutoPoll ? Date.now() + nextDelay : null,
+              error: snap?.blockedReason ?? null,
+            },
+          }));
+        } else if (isBridgeLive) {
+          const idToken = await getPilotIdToken();
+          const res = await readLiveBridgeTelemetry(
+            { tredynApiKey: activeBridgeKey, idToken, requireVisible: !force },
+            controller.signal
+          );
+          if (!res || controller.signal.aborted) return;
+          const elapsedMs = Math.max(
+            1,
+            Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)
+          );
+          setLiveBridgeByPort((prev) => ({ ...prev, [portId]: res }));
+          if (res.live.floatingPnl != null && Number.isFinite(res.live.floatingPnl)) {
+            setFloatingPnlUsd(Number(res.live.floatingPnl));
+          }
+          const fallbackBal = Number(stateRef.current.accounts?.[portId]?.initial || 0);
+          const rawBal = res.live.balance ?? fallbackBal;
+          const rawEq = res.live.equity ?? rawBal + Number(res.live.floatingPnl ?? 0);
+          const rawFloat = res.live.floatingPnl ?? rawEq - rawBal;
+          if (Number.isFinite(rawBal)) {
+            appendSeriesPoint(
+              rawBal,
+              Number.isFinite(rawEq) ? rawEq : rawBal,
+              Number.isFinite(rawFloat) ? rawFloat : 0,
+              res.live.openPositions?.length ?? res.openPositions?.length ?? 0,
+              res.live.dailyLossLimitUsd ?? null,
+              res.live.dailyLossUsedUsd ?? null
+            );
+          }
+          setLiveSyncMetaByPort((prev) => ({
+            ...prev,
+            [portId]: {
+              syncing: false,
+              lastSyncAt: res.syncedAt || new Date().toISOString(),
+              latencyMs: elapsedMs,
+              nextPollAt: canAutoPoll ? Date.now() + LIVE_TELEMETRY_POLL_MS : null,
+              error: null,
+            },
+          }));
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const msg = error instanceof Error ? error.message : 'Live telemetry sync error';
+        if (isPilotLive && isPilotReconnect(error) && firebaseUid && activePilotAccountId) {
+          setPilotFeeds((prev) => ({
+            ...prev,
+            [portId]: {
+              uid: firebaseUid,
+              portId,
+              accountId: activePilotAccountId,
+              data: prev[portId]?.data ?? null,
+              error: msg,
+              reconnect: true,
+            },
+          }));
+        }
+        setLiveSyncMetaByPort((prev) => ({
+          ...prev,
+          [portId]: {
+            syncing: false,
+            lastSyncAt: prev[portId]?.lastSyncAt ?? null,
+            latencyMs: prev[portId]?.latencyMs ?? null,
+            nextPollAt: canAutoPoll ? Date.now() + LIVE_TELEMETRY_POLL_MS : null,
+            error: msg,
+          },
+        }));
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const onVisible = () => {
+      const visible = document.visibilityState === 'visible';
+      setLiveTabVisible(visible);
+      if (visible && canAutoPoll) {
+        void pollLiveNow(false);
+      }
+    };
+
+    triggerLive3sPollRef.current = () => {
+      void pollLiveNow(true);
+    };
+
+    if (canAutoPoll && document.visibilityState === 'visible') {
+      void pollLiveNow(false);
+    }
+
+    const timer = canAutoPoll
+      ? window.setInterval(() => void pollLiveNow(false), LIVE_TELEMETRY_POLL_MS)
+      : null;
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      live3sHandlesActivePilotRef.current = false;
+      triggerLive3sPollRef.current = null;
+      controller.abort();
+      if (timer !== null) window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [
+    state.activePort,
+    activePort?.syncProvider,
+    activePilotAccountId,
+    activePilotAutoSync,
+    activeBridgeKey,
+    firebaseUid,
+    isOnline,
+    liveMonitorPaused,
+    pilotOAuthPort,
+    getPilotIdToken,
+    reconcilePilotExecutionsIntoWorkspace,
+  ]);
 
   const cachedPilotSnapshotsByPort = useMemo(() => {
     const out: Record<string, PilotTelemetryView> = {};
@@ -2705,6 +3010,176 @@ export default function App() {
       effectivePilotSnapshot?.currency,
     ]
   );
+
+  const activeLiveBridge = activePort?.syncProvider === 'LIVE_BRIDGE' ? liveBridgeByPort[state.activePort] : undefined;
+  const activeLivePositions = useMemo<AnyLivePositionInput[]>(() => {
+    if (activeIsPilot) {
+      return (
+        activePilotFeed?.data?.liveTelemetry?.openPositions ??
+        effectivePilotSnapshot?.openPositions ??
+        []
+      );
+    }
+    if (activePort?.syncProvider === 'LIVE_BRIDGE') {
+      return activeLiveBridge?.live?.openPositions ?? activeLiveBridge?.openPositions ?? [];
+    }
+    return [];
+  }, [
+    activeIsPilot,
+    activePilotFeed?.data?.liveTelemetry?.openPositions,
+    effectivePilotSnapshot?.openPositions,
+    activePort?.syncProvider,
+    activeLiveBridge,
+  ]);
+
+  const activeTelemetrySeries = useMemo<LiveTelemetryPoint[]>(
+    () => liveTelemetrySeriesByPort[state.activePort] ?? [],
+    [liveTelemetrySeriesByPort, state.activePort]
+  );
+
+  const liveMonitorState = useMemo<LiveMonitorControlState>(() => {
+    const meta = liveSyncMetaByPort[state.activePort];
+    const provider = activeIsPilot
+      ? 'FUNDEDNEXT_MCP'
+      : activePort?.syncProvider === 'LIVE_BRIDGE'
+        ? 'LIVE_BRIDGE'
+        : 'NONE';
+    const connected =
+      provider === 'FUNDEDNEXT_MCP'
+        ? Boolean(firebaseUid && activePort?.fundedNextConnectionId && activePilotAccountId && !pilotReconnect)
+        : provider === 'LIVE_BRIDGE'
+          ? Boolean(activeBridgeKey)
+          : false;
+    const todayRealizedProfitUsd = (state.journal || [])
+      .filter((t) => t.port === state.activePort && t.date === today)
+      .reduce((sum, t) => sum + (Number(t.pnlUsd) || 0), 0);
+
+    const pilotLive = activePilotFeed?.data?.liveTelemetry;
+    const pilotBal =
+      pilotLive?.balance ??
+      (effectivePilotSnapshot?.balance != null && Number.isFinite(Number(effectivePilotSnapshot.balance))
+        ? Number(effectivePilotSnapshot.balance)
+        : null);
+    const pilotEq =
+      pilotLive?.equity ??
+      (effectivePilotSnapshot?.equity != null && Number.isFinite(Number(effectivePilotSnapshot.equity))
+        ? Number(effectivePilotSnapshot.equity)
+        : pilotBal);
+    const pilotFloat =
+      pilotLive?.floatingPnl ??
+      (effectivePilotSnapshot?.floatingPnl != null && Number.isFinite(Number(effectivePilotSnapshot.floatingPnl))
+        ? Number(effectivePilotSnapshot.floatingPnl)
+        : null);
+
+    const bridgeLive = activeLiveBridge?.live;
+    const balance =
+      provider === 'FUNDEDNEXT_MCP'
+        ? pilotBal
+        : provider === 'LIVE_BRIDGE'
+          ? bridgeLive?.balance ?? acc.balance
+          : null;
+    const equity =
+      provider === 'FUNDEDNEXT_MCP'
+        ? pilotEq
+        : provider === 'LIVE_BRIDGE'
+          ? bridgeLive?.equity ?? (balance !== null ? balance + Number(bridgeLive?.floatingPnl ?? manualFloatingPnlUsd) : null)
+          : null;
+    const floatingPnl =
+      provider === 'FUNDEDNEXT_MCP'
+        ? pilotFloat
+        : provider === 'LIVE_BRIDGE'
+          ? bridgeLive?.floatingPnl ?? manualFloatingPnlUsd
+          : null;
+    const currency =
+      provider === 'FUNDEDNEXT_MCP'
+        ? effectivePilotSnapshot?.currency || 'USD'
+        : provider === 'LIVE_BRIDGE'
+          ? activeLiveBridge?.meta?.currency || 'USD'
+          : 'USD';
+    const dailyLossLimitUsd =
+      provider === 'FUNDEDNEXT_MCP'
+        ? pilotLive?.dailyLossLimitUsd ?? Math.max(100, Number(acc.initial || 10000) * 0.05)
+        : provider === 'LIVE_BRIDGE'
+          ? bridgeLive?.dailyLossLimitUsd ?? Math.max(100, Number(acc.initial || 10000) * 0.05)
+          : Math.max(100, Number(acc.initial || 10000) * 0.05);
+    const netRealizedProfit =
+      provider === 'FUNDEDNEXT_MCP' && effectivePilotSnapshot?.netProfit != null && Number.isFinite(Number(effectivePilotSnapshot.netProfit))
+        ? Number(effectivePilotSnapshot.netProfit)
+        : acc.profit;
+
+    return {
+      provider,
+      connected,
+      paused: liveMonitorPaused || (provider === 'FUNDEDNEXT_MCP' && !activePilotAutoSync),
+      tabVisible: liveTabVisible,
+      syncing: Boolean(meta?.syncing),
+      reconnectRequired: Boolean(pilotReconnect),
+      pollIntervalMs: LIVE_TELEMETRY_POLL_MS,
+      nextPollAt: meta?.nextPollAt ?? null,
+      lastSyncAt:
+        meta?.lastSyncAt ??
+        (provider === 'FUNDEDNEXT_MCP'
+          ? effectivePilotSnapshot?.lastCheckedAt ?? effectivePilotSnapshot?.fetchedAt ?? null
+          : activeLiveBridge?.syncedAt ?? null),
+      latencyMs: meta?.latencyMs ?? null,
+      error: meta?.error ?? activePilotFeed?.error ?? null,
+      currency,
+      balance,
+      equity,
+      floatingPnl,
+      marginUsedUsd: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.margin ?? null : bridgeLive?.margin ?? null,
+      freeMarginUsd: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.freeMargin ?? null : bridgeLive?.freeMargin ?? null,
+      marginLevelPct: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.marginLevelPct ?? null : bridgeLive?.marginLevelPct ?? null,
+      dailyLossUsedUsd: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.dailyLossUsedUsd ?? null : bridgeLive?.dailyLossUsedUsd ?? null,
+      dailyLossLimitUsd,
+      netRealizedProfit,
+      bestDayProfit: cycleRuleStatus.consistency.bestDay,
+      todayRealizedProfitUsd,
+      consistencyCapPct: cycleRuleStatus.consistency.capPct,
+      hasConsistencyCap: cycleRuleStatus.consistency.hasConsistencyCap,
+      privacyMasked: state.privacyMasked,
+      rateFloorMs: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.rateFloorMs ?? null : null,
+      nextSafeSyncAt: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.nextSafeSyncAt ?? null : null,
+      onTogglePause: () => {
+        if (provider === 'FUNDEDNEXT_MCP' && !activePilotAutoSync && firebaseUid) {
+          void updatePilotPorts(firebaseUid, { type: 'autoSync', portId: state.activePort, enabled: true });
+          setLiveMonitorPaused(false);
+          return;
+        }
+        setLiveMonitorPaused((prev) => !prev);
+      },
+      onForceRefresh: () => triggerLive3sPollRef.current?.(),
+      onOpenSyncModal: handleOpenMt5SyncModal,
+    };
+  }, [
+    liveSyncMetaByPort,
+    state.activePort,
+    state.journal,
+    state.privacyMasked,
+    activeIsPilot,
+    activePort?.syncProvider,
+    activePort?.fundedNextConnectionId,
+    firebaseUid,
+    activePilotAccountId,
+    pilotReconnect,
+    activeBridgeKey,
+    today,
+    activePilotFeed,
+    effectivePilotSnapshot,
+    activeLiveBridge,
+    acc.balance,
+    acc.initial,
+    acc.profit,
+    manualFloatingPnlUsd,
+    liveMonitorPaused,
+    activePilotAutoSync,
+    liveTabVisible,
+    cycleRuleStatus.consistency.bestDay,
+    cycleRuleStatus.consistency.capPct,
+    cycleRuleStatus.consistency.hasConsistencyCap,
+    handleOpenMt5SyncModal,
+    updatePilotPorts,
+  ]);
 
   const activePageSnapshot = useMemo<DeskPageSnapshot>(() => {
     const filteredCount = filteredJournal.length;
@@ -3678,6 +4153,9 @@ export default function App() {
                 ownerEmail={currentUser?.email || null}
                 lang={deskLang}
                 pilotTelemetry={activeIsPilot ? effectivePilotSnapshot ?? null : undefined}
+                livePositions={activeLivePositions}
+                telemetrySeries={activeTelemetrySeries}
+                liveMonitor={liveMonitorState}
                 onManageAccounts={openAccountsDrawer}
                 onOpenMt5SyncModal={handleOpenMt5SyncModal}
                 onOpenCalculator={handleOpenCalcPage}

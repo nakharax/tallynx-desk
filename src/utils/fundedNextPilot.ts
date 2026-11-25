@@ -1,8 +1,10 @@
-import type { TradeExecution } from '../../server/fundednext/brokerTypes';
+import type { OpenPosition, TradeExecution } from '../../server/fundednext/brokerTypes';
 import type { AccountSyncStatus, ConnectionStatus, PilotAccount, StoredSnapshot } from '../../server/fundednext/store';
 import type { AccountInfo, Mt5PositionRecord, Mt5TimeOffsetSetting, TradeRecord } from '../types/ghr';
 import { normalizeFundedNextTrades } from './fundedNextMcp';
 import { normalizeBridgePositionsToMt5Records, resolveAccountType } from './ghrRules';
+import { LIVE_TELEMETRY_POLL_MS } from './liveTelemetryBuffer';
+export { LIVE_TELEMETRY_POLL_MS };
 
 export const FUNDEDNEXT_PILOT_SOURCE = 'FundedNext Official MCP (Pilot Server-Managed)';
 export const FUNDEDNEXT_POLL_MS = 15_000;
@@ -11,11 +13,29 @@ const popupChannel = 'tallynx_fn_pilot_oauth';
 
 export type PilotTokenGetter = () => Promise<string | null>;
 export type PilotAccountChoice = Pick<PilotAccount, 'id' | 'accountId' | 'login' | 'connectionId' | 'tracked'>;
+export interface PilotLiveTelemetry {
+  balance: number | null;
+  equity: number | null;
+  floatingPnl: number | null;
+  margin: number | null;
+  freeMargin: number | null;
+  marginLevelPct: number | null;
+  dailyLossUsedUsd: number | null;
+  dailyLossLimitUsd: number | null;
+  consistencyLiveImpactPct: number | null;
+  openPositionsCount: number;
+  openPositions: OpenPosition[];
+  rateFloorMs: number;
+  nextSafeSyncAt: string | null;
+  syncTriggered: boolean;
+}
+
 export type PilotExecutions = { executions: TradeExecution[]; nextCursor: string | null };
 export type PilotRead = PilotExecutions & {
   snapshot: StoredSnapshot | null;
   syncStatus: AccountSyncStatus;
   hasMoreExecutions: boolean;
+  liveTelemetry?: PilotLiveTelemetry | null;
 };
 export type PilotReadState = { data: PilotRead | null; error: string | null; reconnect: boolean };
 export type PilotPortStats = { balance: number; profit?: number; currency?: string | null };
@@ -40,15 +60,131 @@ export const canFallbackToUsdWorkspace = (currency: string | null | undefined) =
 export type PilotTelemetryView = Partial<
   Pick<
     StoredSnapshot,
-    'balance' | 'equity' | 'floatingPnl' | 'netProfit' | 'initialBalance' | 'currency' | 'fetchedAt' | 'lastCheckedAt'
+    | 'balance'
+    | 'equity'
+    | 'floatingPnl'
+    | 'netProfit'
+    | 'initialBalance'
+    | 'currency'
+    | 'fetchedAt'
+    | 'lastCheckedAt'
+    | 'status'
+    | 'blockedReason'
+    | 'rawPayload'
   >
 > & {
   openPositions?: StoredSnapshot['openPositions'];
+  margin?: number | null;
+  freeMargin?: number | null;
+  marginLevelPct?: number | null;
+  dailyLossUsedUsd?: number | null;
+  dailyLossLimitUsd?: number | null;
+  consistencyLiveImpactPct?: number | null;
 };
 
 export interface ReadPilotAccountOptions {
   previous?: PilotRead | null;
   forceExecutions?: boolean;
+  live?: boolean;
+}
+
+export interface LiveBridgeTelemetryPosition {
+  ticket: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  lots: number;
+  openPrice: number;
+  currentPrice: number | null;
+  slPrice: number | null;
+  tpPrice: number | null;
+  floatingPnl: number;
+  swap: number;
+  commission: number;
+  openTime: string | number | null;
+  comment?: string;
+}
+
+export interface LiveBridgeTelemetryResponse {
+  ok: boolean;
+  provider: 'LIVE_BRIDGE';
+  syncedAt: string;
+  meta: {
+    holderName: string;
+    login: string;
+    broker: string;
+    server: string;
+    currency: string;
+    initialDeposit: number;
+    summaryNetProfit: number | null;
+  };
+  live: {
+    balance: number | null;
+    equity: number | null;
+    floatingPnl: number | null;
+    margin: number | null;
+    freeMargin: number | null;
+    marginLevelPct: number | null;
+    dailyLossUsedUsd: number | null;
+    dailyLossLimitUsd: number | null;
+    openPositions: LiveBridgeTelemetryPosition[];
+  };
+  openPositions: LiveBridgeTelemetryPosition[];
+  positionsCount: number;
+}
+
+export function isTelemetryTabVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible';
+}
+
+const inFlightTelemetryRequests = new Map<string, Promise<unknown>>();
+
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      err => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      }
+    );
+  });
+}
+
+/**
+ * Deduplicates concurrent in-flight requests under the same key so 3-second polling
+ * never queues overlapping HTTP fetches if an upstream response takes > 3s.
+ */
+export function runDeduplicatedTelemetryRequest<T>(
+  key: string,
+  work: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  let shared = inFlightTelemetryRequests.get(key) as Promise<T> | undefined;
+  if (!shared) {
+    shared = work().finally(() => {
+      if (inFlightTelemetryRequests.get(key) === shared) {
+        inFlightTelemetryRequests.delete(key);
+      }
+    });
+    inFlightTelemetryRequests.set(key, shared);
+  }
+  return awaitWithAbort(shared, signal);
+}
+
+/**
+ * Checks whether an account's 3-second live telemetry request is already in flight.
+ */
+export function hasInFlightTelemetryRequest(key: string): boolean {
+  return inFlightTelemetryRequests.has(key);
 }
 
 const PILOT_SNAP_CACHE_PREFIX = 'tallynx_pilot_snap_v1';
@@ -146,73 +282,139 @@ export async function readPilotAccount(
   signal: AbortSignal,
   options?: ReadPilotAccountOptions
 ): Promise<PilotRead> {
-  const token = await getToken();
-  if (!token) throw new Error('กรุณาเข้าสู่ระบบ Desk เพื่อใช้ FundedNext Pilot');
-  const path = `/accounts/${encodeURIComponent(id)}`;
-  const fetchSnapshot = async (): Promise<Pick<PilotRead, 'snapshot' | 'syncStatus'>> => {
-    try {
-      return await fetchPilot<Pick<PilotRead, 'snapshot' | 'syncStatus'>>(token, `${path}/snapshot`, { signal });
-    } catch (error) {
-      if (error instanceof FundedNextPilotError && error.httpStatus === 404 && error.syncStatus) {
-        return { snapshot: null, syncStatus: error.syncStatus };
-      }
-      throw error;
-    }
-  };
-  const fetchAllExecutions = async (): Promise<PilotExecutions> => {
-    const all: TradeExecution[] = [];
-    const seen = new Set<string>();
-    let cursor: string | undefined;
-    for (let pageIndex = 0; pageIndex < 25; pageIndex++) {
-      const qs = new URLSearchParams({ limit: '200' });
-      if (cursor) qs.set('cursor', cursor);
-      const page = await fetchPilot<PilotExecutions>(token, `${path}/executions?${qs.toString()}`, { signal });
-      for (const row of page.executions) {
-        if (!seen.has(row.id)) {
-          seen.add(row.id);
-          all.push(row);
+  const isLive = options?.live === true;
+  const dedupeKey = `fn-pilot:${id}:${isLive ? 'live' : 'std'}`;
+  return runDeduplicatedTelemetryRequest(
+    dedupeKey,
+    async () => {
+      const token = await getToken();
+      if (!token) throw new Error('กรุณาเข้าสู่ระบบ Desk เพื่อใช้ FundedNext Pilot');
+      const path = `/accounts/${encodeURIComponent(id)}`;
+      const snapshotQuery = isLive ? `${path}/snapshot?live=1` : `${path}/snapshot`;
+      const fetchSnapshot = async (): Promise<
+        Pick<PilotRead, 'snapshot' | 'syncStatus' | 'liveTelemetry'>
+      > => {
+        try {
+          return await fetchPilot<Pick<PilotRead, 'snapshot' | 'syncStatus' | 'liveTelemetry'>>(token, snapshotQuery, {
+            signal,
+          });
+        } catch (error) {
+          if (error instanceof FundedNextPilotError && error.httpStatus === 404 && error.syncStatus) {
+            return { snapshot: null, syncStatus: error.syncStatus, liveTelemetry: null };
+          }
+          throw error;
         }
-      }
-      if (!page.nextCursor || page.nextCursor === cursor) {
-        return { executions: all, nextCursor: page.nextCursor ?? null };
-      }
-      cursor = page.nextCursor;
-    }
-    return { executions: all, nextCursor: cursor ?? null };
-  };
-  const prev = options?.previous ?? null;
-  if (prev && !options?.forceExecutions && prev.executions.length > 0 && !prev.hasMoreExecutions) {
-    const evidence = await fetchSnapshot();
-    const snap = evidence.snapshot;
-    const prevSnap = prev.snapshot;
-    const snapshotChanged =
-      !snap ||
-      !prevSnap ||
-      snap.fetchedAt !== prevSnap.fetchedAt ||
-      snap.digest !== prevSnap.digest ||
-      snap.balance !== prevSnap.balance ||
-      snap.netProfit !== prevSnap.netProfit ||
-      snap.initialBalance !== prevSnap.initialBalance ||
-      snap.currency !== prevSnap.currency;
-    const activeSync = evidence.syncStatus === 'SYNCING' || evidence.syncStatus === 'PARTIAL';
-    if (!snapshotChanged && !activeSync) {
-      return {
-        ...evidence,
-        executions: prev.executions,
-        nextCursor: prev.nextCursor,
-        hasMoreExecutions: prev.hasMoreExecutions,
       };
-    }
-    const execs = await fetchAllExecutions();
-    return { ...evidence, ...execs, hasMoreExecutions: execs.nextCursor !== null };
+      const fetchAllExecutions = async (): Promise<PilotExecutions> => {
+        const all: TradeExecution[] = [];
+        const seen = new Set<string>();
+        let cursor: string | undefined;
+        for (let pageIndex = 0; pageIndex < 25; pageIndex++) {
+          const qs = new URLSearchParams({ limit: '200' });
+          if (cursor) qs.set('cursor', cursor);
+          const page = await fetchPilot<PilotExecutions>(token, `${path}/executions?${qs.toString()}`, { signal });
+          for (const row of page.executions) {
+            if (!seen.has(row.id)) {
+              seen.add(row.id);
+              all.push(row);
+            }
+          }
+          if (!page.nextCursor || page.nextCursor === cursor) {
+            return { executions: all, nextCursor: page.nextCursor ?? null };
+          }
+          cursor = page.nextCursor;
+        }
+        return { executions: all, nextCursor: cursor ?? null };
+      };
+      const prev = options?.previous ?? null;
+      if (prev && !options?.forceExecutions && prev.executions.length > 0 && !prev.hasMoreExecutions) {
+        const evidence = await fetchSnapshot();
+        const snap = evidence.snapshot;
+        const prevSnap = prev.snapshot;
+        const snapshotChanged =
+          !snap ||
+          !prevSnap ||
+          snap.fetchedAt !== prevSnap.fetchedAt ||
+          snap.digest !== prevSnap.digest ||
+          snap.balance !== prevSnap.balance ||
+          snap.netProfit !== prevSnap.netProfit ||
+          snap.initialBalance !== prevSnap.initialBalance ||
+          snap.currency !== prevSnap.currency;
+        const activeSync = evidence.syncStatus === 'SYNCING' || evidence.syncStatus === 'PARTIAL';
+        if (!snapshotChanged && !activeSync) {
+          return {
+            ...evidence,
+            executions: prev.executions,
+            nextCursor: prev.nextCursor,
+            hasMoreExecutions: prev.hasMoreExecutions,
+          };
+        }
+        const execs = await fetchAllExecutions();
+        return { ...evidence, ...execs, hasMoreExecutions: execs.nextCursor !== null };
+      }
+      const [snapshot, executions] = await Promise.allSettled([
+        fetchSnapshot(),
+        fetchAllExecutions(),
+      ]);
+      if (snapshot.status === 'rejected') throw snapshot.reason;
+      if (executions.status === 'rejected') throw executions.reason;
+      return { ...snapshot.value, ...executions.value, hasMoreExecutions: executions.value.nextCursor !== null };
+    },
+    signal
+  );
+}
+
+export async function readPilotLiveSnapshot(
+  getToken: PilotTokenGetter,
+  id: string,
+  signal: AbortSignal,
+  options?: { previous?: PilotRead | null; requireVisible?: boolean }
+): Promise<PilotRead | null> {
+  if (options?.requireVisible !== false && !isTelemetryTabVisible()) {
+    return null;
   }
-  const [snapshot, executions] = await Promise.allSettled([
-    fetchSnapshot(),
-    fetchAllExecutions(),
-  ]);
-  if (snapshot.status === 'rejected') throw snapshot.reason;
-  if (executions.status === 'rejected') throw executions.reason;
-  return { ...snapshot.value, ...executions.value, hasMoreExecutions: executions.value.nextCursor !== null };
+  return readPilotAccount(getToken, id, signal, {
+    previous: options?.previous,
+    live: true,
+  });
+}
+
+export async function readLiveBridgeTelemetry(
+  params: { tredynApiKey: string; idToken?: string | null; requireVisible?: boolean },
+  signal?: AbortSignal
+): Promise<LiveBridgeTelemetryResponse | null> {
+  if (params.requireVisible !== false && !isTelemetryTabVisible()) {
+    return null;
+  }
+  const apiKey = params.tredynApiKey.trim();
+  if (!apiKey) {
+    throw new Error('Missing tredyn-api-key for Live Bridge telemetry');
+  }
+  return runDeduplicatedTelemetryRequest(
+    `live-bridge:${apiKey}`,
+    async () => {
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        'X-Tredyn-Api-Key': apiKey,
+      };
+      if (params.idToken) {
+        headers.Authorization = `Bearer ${params.idToken}`;
+      }
+      const response = await fetch('/api/mt5/live-bridge/live', {
+        method: 'GET',
+        headers,
+        signal,
+      });
+      const body = (await response.json().catch(() => null)) as
+        | (LiveBridgeTelemetryResponse & { error?: string; code?: string })
+        | null;
+      if (!response.ok || !body?.ok) {
+        throw new Error(body?.error || `Live Bridge telemetry (HTTP ${response.status})`);
+      }
+      return body;
+    },
+    signal
+  );
 }
 
 export function convertPilotExecutionsToPositions(

@@ -40,6 +40,7 @@ export class FundedNextWorker {
   private readonly openClient: (tokens: FundedNextTokens) => ReadClient;
   private readonly refreshing = new Map<string, Promise<FundedNextTokens>>();
   private running = false;
+  private wakePending = false;
   private consecutivePollErrors = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: Promise<void>;
@@ -93,7 +94,11 @@ export class FundedNextWorker {
   }
 
   wake() {
-    if (!this.running || this.polling) return;
+    if (!this.running) return;
+    if (this.polling) {
+      this.wakePending = true;
+      return;
+    }
     clearTimeout(this.timer);
     this.schedule(0);
   }
@@ -117,7 +122,8 @@ export class FundedNextWorker {
   private async poll() {
     let delay = IDLE_POLL_MS;
     try {
-      if (await this.runOnce()) delay = 0;
+      this.wakePending = false;
+      if (await this.runOnce() || this.wakePending) delay = 0;
       this.consecutivePollErrors = 0;
     } catch (error) {
       this.metrics.pollErrors++;

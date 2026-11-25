@@ -567,3 +567,131 @@ test('connectFundedNextPilot falls back to a fresh connection when stale connect
     else Object.defineProperty(globalThis, 'navigator', { value: originalNavigator, configurable: true });
   }
 });
+
+test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden tabs cleanly', async t => {
+  const {
+    LIVE_TELEMETRY_POLL_MS,
+    hasInFlightTelemetryRequest,
+    readLiveBridgeTelemetry,
+    readPilotLiveSnapshot,
+  } = await import('./fundedNextPilot.js');
+
+  assert.equal(LIVE_TELEMETRY_POLL_MS, 3_000);
+
+  let snapshotCalls = 0;
+  let releaseSnapshot!: () => void;
+  const gate = new Promise<void>(resolve => {
+    releaseSnapshot = resolve;
+  });
+
+  t.mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
+    const path = new URL(String(url), 'https://desk.example');
+    if (path.pathname === '/api/fundednext/accounts/acc-live/snapshot') {
+      assert.equal(path.searchParams.get('live'), '1');
+      snapshotCalls++;
+      await gate;
+      return Response.json({
+        snapshot: {
+          accountId: '4613642',
+          balance: '6172.23',
+          equity: '6180.00',
+          floatingPnl: '7.77',
+          netProfit: '172.23',
+          initialBalance: '6000',
+          currency: 'USD',
+          openPositions: [],
+          marketQuietConfirmed: false,
+          fetchedAt: '2026-11-25T10:00:00.000Z',
+          lastCheckedAt: '2026-11-25T10:00:00.000Z',
+          status: 'CONNECTED',
+          blockedReason: null,
+          sourceTimestampRaw: null,
+          sourceTimestampUtc: null,
+          sourceTimezone: null,
+          missingFields: [],
+          unverifiedFields: [],
+          rawPayload: {},
+          digest: 'd1',
+        },
+        syncStatus: 'COMPLETE',
+        liveTelemetry: {
+          balance: 6172.23,
+          equity: 6180,
+          floatingPnl: 7.77,
+          margin: 120,
+          freeMargin: 6060,
+          marginLevelPct: 5150,
+          dailyLossUsedUsd: 0,
+          dailyLossLimitUsd: 300,
+          consistencyLiveImpactPct: null,
+          openPositionsCount: 0,
+          openPositions: [],
+          rateFloorMs: 3000,
+          nextSafeSyncAt: '2026-11-25T10:00:03.000Z',
+          syncTriggered: true,
+        },
+      });
+    }
+    if (path.pathname === '/api/fundednext/accounts/acc-live/executions') {
+      return Response.json({ executions: [], nextCursor: null });
+    }
+    if (path.pathname === '/api/mt5/live-bridge/live') {
+      assert.equal((init?.headers as Record<string, string>)['X-Tredyn-Api-Key'], 'trd_live_test_1234');
+      return Response.json({
+        ok: true,
+        provider: 'LIVE_BRIDGE',
+        syncedAt: '2026-11-25T10:00:00.000Z',
+        meta: {
+          holderName: 'Trader',
+          login: '12345',
+          broker: 'MT5',
+          server: 'Live',
+          currency: 'USD',
+          initialDeposit: 10000,
+          summaryNetProfit: 120,
+        },
+        live: {
+          balance: 10120,
+          equity: 10155,
+          floatingPnl: 35,
+          margin: 200,
+          freeMargin: 9955,
+          marginLevelPct: 5077.5,
+          dailyLossUsedUsd: 0,
+          dailyLossLimitUsd: 500,
+          openPositions: [],
+        },
+        openPositions: [],
+        positionsCount: 0,
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  const c1 = new AbortController();
+  const c2 = new AbortController();
+  const p1 = readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', c1.signal);
+  const p2 = readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', c2.signal);
+  assert.equal(hasInFlightTelemetryRequest('fn-pilot:acc-live:live'), true);
+  releaseSnapshot();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(snapshotCalls, 1);
+  assert.equal(r1?.liveTelemetry?.equity, 6180);
+  assert.equal(r2?.liveTelemetry?.marginLevelPct, 5150);
+  assert.equal(hasInFlightTelemetryRequest('fn-pilot:acc-live:live'), false);
+
+  const bridge = await readLiveBridgeTelemetry({ tredynApiKey: 'trd_live_test_1234' });
+  assert.equal(bridge?.live.equity, 10155);
+
+  const origDoc = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { visibilityState: 'hidden' };
+  try {
+    const skipped = await readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', new AbortController().signal);
+    assert.equal(skipped, null);
+    const skippedBridge = await readLiveBridgeTelemetry({ tredynApiKey: 'trd_live_test_1234' });
+    assert.equal(skippedBridge, null);
+  } finally {
+    if (origDoc === undefined) delete (globalThis as { document?: unknown }).document;
+    else (globalThis as { document?: unknown }).document = origDoc;
+  }
+});

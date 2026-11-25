@@ -13,6 +13,7 @@ import {
   requestFundedNext,
 } from '../utils/fundedNextPilot';
 import type { PilotAccountChoice, PilotExecutions, PilotPortChange, PilotReadState, PilotTokenGetter } from '../utils/fundedNextPilot';
+import { computeLivePositionMetrics } from '../utils/liveTelemetryBuffer';
 import { deskText } from '../utils/deskI18n';
 import type { DeskLanguage } from '../utils/deskI18n';
 
@@ -148,7 +149,7 @@ export function FundedNextPilotPanel({
     const controller = new AbortController();
     const refresh = async () => {
       try {
-        const data = await readPilotAccount(getToken, accountId, controller.signal);
+        const data = await readPilotAccount(getToken, accountId, controller.signal, { live: true });
         if (!controller.signal.aborted) setLocalRead({ accountId, data, error: null, reconnect: false });
       } catch (error) {
         if (!controller.signal.aborted) setLocalRead({
@@ -166,6 +167,26 @@ export function FundedNextPilotPanel({
   const trackedCount = directory?.accounts.filter(item => item.tracked).length ?? 0;
   const read = pilotPolling ? pilotFeed : localRead?.accountId === accountId ? localRead : null;
   const snapshot = read?.data?.snapshot;
+  const liveTelemetry = read?.data?.liveTelemetry;
+  const liveOpenPositions = liveTelemetry?.openPositions ?? snapshot?.openPositions ?? [];
+  const liveBalanceNum = liveTelemetry?.balance ?? (snapshot?.balance != null ? Number(snapshot.balance) : account.initial);
+  const liveEquityNum = liveTelemetry?.equity ?? (snapshot?.equity != null ? Number(snapshot.equity) : liveBalanceNum);
+  const liveDailyLimit = liveTelemetry?.dailyLossLimitUsd ?? Math.max(100, account.initial * 0.05);
+  const liveMetrics = computeLivePositionMetrics(
+    liveOpenPositions,
+    Number.isFinite(liveBalanceNum) ? liveBalanceNum : 0,
+    Number.isFinite(liveEquityNum) ? liveEquityNum : 0,
+    liveDailyLimit,
+    snapshot?.netProfit != null && Number.isFinite(Number(snapshot.netProfit)) ? Number(snapshot.netProfit) : 0,
+    0,
+    account.consistencyCapPct ?? 40,
+    {
+      marginUsedUsd: liveTelemetry?.margin ?? null,
+      freeMarginUsd: liveTelemetry?.freeMargin ?? null,
+      marginLevelPct: liveTelemetry?.marginLevelPct ?? null,
+      dailyLossUsedUsd: liveTelemetry?.dailyLossUsedUsd ?? null,
+    }
+  );
   const connectionStatus = directory?.connectionStatus;
   const connectionMissing = Boolean(connectionId && missingConnectionId === connectionId);
   const reconnect = reconnectId !== null || connectionMissing || read?.reconnect || isPilotReconnectStatus(connectionStatus) || connectionStatus === 'DISCONNECTED' ||
@@ -318,10 +339,59 @@ export function FundedNextPilotPanel({
         </div>
         <div className="fundednext-snapshot">
           <dl className="fundednext-readout">
-            <div><dt>{t("Balance", "ยอดคงเหลือ")}</dt><dd className="mono">{formatPilotAmount(snapshot?.balance, snapshot?.currency)}</dd></div>
-            <div><dt>{t("Floating PnL", "กำไร/ขาดทุนลอยตัว")}</dt><dd className="mono">{formatPilotAmount(snapshot?.floatingPnl, snapshot?.currency)}</dd></div>
-            <div><dt>{t("Open positions", "สถานะที่เปิดอยู่")}</dt><dd className="mono">{snapshot?.openPositions.length ?? '—'}</dd></div>
+            <div><dt>{t("Balance", "ยอดคงเหลือ")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.balance ?? snapshot?.balance, snapshot?.currency)}</dd></div>
+            <div><dt>{t("Equity", "Equity")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.equity ?? snapshot?.equity ?? snapshot?.balance, snapshot?.currency)}</dd></div>
+            <div><dt>{t("Floating PnL", "กำไร/ขาดทุนลอยตัว")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.floatingPnl ?? snapshot?.floatingPnl, snapshot?.currency, true)}</dd></div>
+            <div><dt>{t("Open positions", "สถานะที่เปิดอยู่")}</dt><dd className="mono">{liveOpenPositions.length}</dd></div>
+            <div><dt>{t("Daily DD Left", "DD รายวันคงเหลือ")}</dt><dd className="mono">{formatPilotAmount(liveMetrics.summary.dailyDdRemainingUsd, snapshot?.currency ?? 'USD')}</dd></div>
+            <div><dt>{t("Margin Level", "ระดับมาร์จิ้น")}</dt><dd className="mono">{liveMetrics.summary.marginLevelPct != null ? `${liveMetrics.summary.marginLevelPct.toFixed(1)}%` : '—'}</dd></div>
           </dl>
+          {pilotPolling && !reconnect && (
+            <div className="fundednext-live-summary">
+              <div className="fundednext-live-summary-head">
+                <span>
+                  {t('3s Live Guard · ', 'คุมความเสี่ยงสดทุก 3 วินาที · ')}
+                  <span className="mono">
+                    {liveMetrics.summary.netExposureLots > 0 ? '+' : ''}
+                    {liveMetrics.summary.netExposureLots.toFixed(2)}L {t('net', 'สุทธิ')}
+                  </span>
+                </span>
+                <span className="mono">
+                  {liveTelemetry?.rateFloorMs
+                    ? t(`${Math.round(liveTelemetry.rateFloorMs / 1000)}s server floor`, `รอบเซิร์ฟเวอร์ ${Math.round(liveTelemetry.rateFloorMs / 1000)}วิ`)
+                    : t('3s active', 'อัปเดตทุก 3วิ')}
+                  {liveTelemetry?.consistencyLiveImpactPct != null &&
+                    ` · ${t('Day share', 'สัดส่วนวันนี้')} ${liveTelemetry.consistencyLiveImpactPct.toFixed(1)}%`}
+                </span>
+              </div>
+              {liveMetrics.positions.length > 0 && (
+                <div className="fundednext-table-scroll" role="group" aria-label={t('Live open positions summary', 'สรุปออเดอร์ที่เปิดอยู่')} tabIndex={0}>
+                  <table className="mono">
+                    <thead>
+                      <tr>
+                        <th scope="col">{t('Symbol', 'สินทรัพย์')}</th>
+                        <th scope="col">{t('Side', 'ฝั่ง')}</th>
+                        <th scope="col">{t('Lots', 'ล็อต')}</th>
+                        <th scope="col">{t('SL Risk', 'เสี่ยง @ SL')}</th>
+                        <th scope="col">{t('Floating', 'ลอยตัว')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liveMetrics.positions.map((pos) => (
+                        <tr key={pos.ticket}>
+                          <td>{pos.symbol}</td>
+                          <td>{pos.side}</td>
+                          <td>{pos.lots.toFixed(2)}</td>
+                          <td>{pos.slRiskUsd != null ? formatPilotAmount(pos.slRiskUsd, snapshot?.currency ?? 'USD') : t('No SL', 'ไร้ SL')}</td>
+                          <td>{formatPilotAmount(pos.floatingPnl, snapshot?.currency ?? 'USD', true)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
           <div>{t("Source Time ", "เวลาต้นทาง ")}<span className="mono">{snapshot?.sourceTimestampRaw ?? '—'}</span>{snapshot?.sourceTimestampRaw && ` · ${snapshot.sourceTimezone ?? t('Timezone unverified', 'ยังไม่ยืนยันเขตเวลา')}`}</div>
           <div>{t("Last Checked ", "ตรวจล่าสุด ")}<span className="mono">{snapshot?.fetchedAt ? showTime(snapshot.fetchedAt, lang) : '—'}</span></div>
           {snapshot?.lastCheckedAt && <div>{t("Last worker check-in ", "ระบบรายงานสถานะล่าสุด ")}<span className="mono">{showTime(snapshot.lastCheckedAt, lang)}</span></div>}
