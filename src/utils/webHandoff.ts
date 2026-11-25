@@ -17,8 +17,12 @@ type DeskPage = keyof typeof DESK_SECTIONS;
 const sectionByAlias = new Map<string, DeskSectionId>([
   ...Object.entries(DESK_SECTIONS),
   ...Object.values(DESK_SECTIONS).map((id): [string, DeskSectionId] => [id, id]),
+  ['portfolio', 'sec-accounts'],
+  ['plan', 'sec-calc'],
   ['calculator-root', 'sec-calc'],
+  ['rules', 'sec-proprules'],
   ['sec-marketplace', 'sec-market'],
+  ['marketplace', 'sec-market'],
   ['community', 'sec-mall'],
 ]);
 
@@ -47,9 +51,13 @@ const TRANSIENT_PARAMS = [
   'source', 'connected_via', 'consistency_cap', 'day_share', 'step',
 ];
 
-export function resolveDeskSection(search: string, hash = ''): DeskSectionId | undefined {
-  return sectionByAlias.get(hash.replace(/^#\/?/, '').trim().toLowerCase())
-    ?? sectionByAlias.get(new URLSearchParams(search).get('page')?.trim().toLowerCase() ?? '');
+export function resolveDeskSection(search: string, hash = '', pathname = ''): DeskSectionId | undefined {
+  const hashKey = hash.replace(/^#\/?|\/+$/g, '').trim().toLowerCase();
+  const pageKey = new URLSearchParams(search).get('page')?.trim().toLowerCase() ?? '';
+  const pathKey = pathname.replace(/^\/+|\/+$/g, '').trim().toLowerCase();
+  return sectionByAlias.get(hashKey)
+    ?? sectionByAlias.get(pageKey)
+    ?? sectionByAlias.get(pathKey);
 }
 
 export function resolveDeskTheme(search: string): DeskTheme | undefined {
@@ -71,19 +79,16 @@ export function buildWebPortalUrl(baseUrl: string, lang: 'en' | 'th', theme: Des
 }
 
 export function updateDeskPageUrl(path: string, section: string): string {
-  const url = new URL(path, 'https://desk.invalid');
-  const resolved = sectionByAlias.get(section);
+  const safePath = path.startsWith('//') ? '/' + path.replace(/^\/+/, '') : path;
+  const url = new URL(safePath, 'https://desk.invalid');
+  const resolved = sectionByAlias.get(section.trim().toLowerCase());
   const page = (Object.keys(DESK_SECTIONS) as DeskPage[]).find((key) => DESK_SECTIONS[key] === resolved);
   if (!page) return path;
 
-  const wasLinkedByHash = Boolean(resolveDeskSection('', url.hash));
-  if (page === 'proprules') {
-    url.hash = 'proprules';
-  } else if (wasLinkedByHash) {
+  url.pathname = `/${page}`;
+  url.searchParams.delete('page');
+  if (resolveDeskSection('', url.hash)) {
     url.hash = '';
-  }
-  if (page === 'mall' || url.searchParams.has('page') || (wasLinkedByHash && page !== 'proprules')) {
-    if (url.searchParams.get('page') !== page) url.searchParams.set('page', page);
   }
   return url.pathname + url.search + url.hash;
 }
@@ -129,7 +134,8 @@ export function parseWebHandoff(search: string): WebSandboxPreset | undefined {
 }
 
 export function stripWebHandoffParams(path: string): string {
-  const url = new URL(path, 'https://desk.invalid');
+  const safePath = path.startsWith('//') ? '/' + path.replace(/^\/+/, '') : path;
+  const url = new URL(safePath, 'https://desk.invalid');
   if (!TRANSIENT_PARAMS.some((key) => url.searchParams.has(key))) return path;
   for (const key of TRANSIENT_PARAMS) url.searchParams.delete(key);
   return url.pathname + url.search + url.hash;

@@ -15,6 +15,9 @@
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api(?:/|$)|assets/|scripts/|manifest\\.webmanifest$|sw\\.js$|registerSW\\.js$|workbox-|favicon|icon\\.svg$|apple-touch-icon\\.png$|pwa-).*)",
+      "destination": "/index.html"
+    }
   ]
 }
