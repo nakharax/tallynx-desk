@@ -2535,6 +2535,10 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
     });
   });
 
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'API route not found' });
+  });
+
   return app;
 }
 
@@ -2570,7 +2574,12 @@ async function startServer() {
         },
       })
     );
-    app.get('*', (_req, res) => {
+    const STATIC_NON_SPA_RE = /^\/(?:api(?:\/|$)|assets\/|scripts\/|(?:manifest\.webmanifest|sw\.js|registerSW\.js|workbox-[^/]+\.js|favicon[^/]*|icon\.svg|apple-touch-icon\.png|pwa-[^/]+\.png)$)/i;
+    app.get('*', (req, res) => {
+      if (STATIC_NON_SPA_RE.test(req.path)) {
+        res.status(404).end();
+        return;
+      }
       res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });

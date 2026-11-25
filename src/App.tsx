@@ -359,12 +359,13 @@ CooldownBanner.displayName = 'CooldownBanner';
 
 export default function App() {
   const [initialHandoff] = useState(() => {
-    const { search, hash } = window.location;
+    const { pathname, search, hash } = window.location;
     const sandbox = parseWebHandoff(search);
     return {
       sandbox,
       theme: resolveDeskTheme(search),
-      section: resolveDeskSection(search, hash) ?? (sandbox ? 'sec-calc' : window.location.hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts'),
+      section: resolveDeskSection(search, hash, pathname)
+        ?? (sandbox ? 'sec-calc' : window.location.hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts'),
     };
   });
   const [webSandbox, setWebSandbox] = useState(initialHandoff.sandbox);
@@ -1108,15 +1109,12 @@ export default function App() {
     if (normalizedId !== 'sec-marketplace') setMarketListingId(undefined);
     if (normalizedId !== 'journal-root') setPrintRequested(false);
     try {
-      const { pathname, search, hash, hostname } = window.location;
+      const { pathname, search, hash } = window.location;
       const currentPath = pathname + search + hash;
-      const params = new URLSearchParams(search);
-      if (hostname === 'mall.tallynx.com' && !params.has('page')) {
-        params.set('page', 'mall');
+      const nextPath = updateDeskPageUrl(currentPath, normalizedId);
+      if (nextPath !== currentPath) {
+        window.history.pushState(window.history.state, '', nextPath);
       }
-      const routePath = hostname === 'mall.tallynx.com' ? pathname + '?' + params + hash : currentPath;
-      const nextPath = updateDeskPageUrl(routePath, normalizedId);
-      if (nextPath !== currentPath) window.history.replaceState(window.history.state, '', nextPath);
     } catch {
       // ignore history restrictions
     }
@@ -1137,8 +1135,16 @@ export default function App() {
     try {
       const { pathname, search, hash } = window.location;
       const currentPath = pathname + search + hash;
-      const cleanPath = stripWebHandoffParams(currentPath);
-      if (currentPath !== cleanPath) window.history.replaceState(window.history.state, '', cleanPath);
+      let nextPath = stripWebHandoffParams(currentPath);
+      const safeNextPath = nextPath.startsWith('//') ? '/' + nextPath.replace(/^\/+/, '') : nextPath;
+      const parsed = new URL(safeNextPath, 'https://desk.invalid');
+      const legacyRoute = resolveDeskSection(parsed.search, parsed.hash);
+      if (legacyRoute) {
+        nextPath = updateDeskPageUrl(nextPath, legacyRoute);
+      } else if (initialHandoff.sandbox && parsed.pathname === '/') {
+        nextPath = updateDeskPageUrl(nextPath, initialHandoff.section);
+      }
+      if (currentPath !== nextPath) window.history.replaceState(window.history.state, '', nextPath);
     } catch {
       // The calculator remains available when history replacement is restricted.
     }
@@ -1158,11 +1164,15 @@ export default function App() {
 
   useEffect(() => {
     const syncUrlPage = () => {
-      const { search, hash } = window.location;
-      const section = resolveDeskSection(search, hash);
+      const { pathname, search, hash, hostname } = window.location;
+      const section =
+        resolveDeskSection(search, hash, pathname) ??
+        (pathname === '/' ? (hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts') : undefined);
       if (section) {
         const pageId = toWorkspacePage(section);
         setActiveNavSection(pageId);
+        if (pageId === 'sec-mall') setShowRightDock(false);
+        if (pageId !== 'sec-marketplace') setMarketListingId(undefined);
         if (pageId !== 'journal-root') setPrintRequested(false);
         mainRef.current?.scrollTo({ top: 0, behavior: 'instant' });
       }

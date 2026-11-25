@@ -10,7 +10,7 @@ import {
   updateDeskPageUrl,
 } from './webHandoff.ts';
 
-test('resolves each Desk page from its query alias, hash alias or section ID', () => {
+test('resolves each Desk page from its clean path, query alias, hash alias or section ID', () => {
   const pages = {
     analysis: 'sec-accounts',
     chart: 'tv-chart-root',
@@ -20,25 +20,37 @@ test('resolves each Desk page from its query alias, hash alias or section ID', (
     market: 'sec-market',
     proprules: 'sec-proprules',
     mall: 'sec-mall',
+    settings: 'sec-settings',
   };
 
   for (const [page, id] of Object.entries(pages)) {
+    assert.equal(resolveDeskSection('', '', `/${page}`), id);
+    assert.equal(resolveDeskSection('', '', `/${page}/`), id);
     assert.equal(resolveDeskSection(`?page=${page}`), id);
     assert.equal(resolveDeskSection('', `#/${page}`), id);
     assert.equal(resolveDeskSection('', `#${id}`), id);
   }
+  assert.equal(resolveDeskSection('', '', '/portfolio'), 'sec-accounts');
+  assert.equal(resolveDeskSection('', '', '/plan'), 'sec-calc');
+  assert.equal(resolveDeskSection('', '', '/rules'), 'sec-proprules');
+  assert.equal(resolveDeskSection('', '', '/community'), 'sec-mall');
+  assert.equal(resolveDeskSection('', '', '/marketplace'), 'sec-market');
   assert.equal(resolveDeskSection('', '#calculator-root'), 'sec-calc');
   assert.equal(resolveDeskSection('', '#sec-marketplace'), 'sec-market');
   assert.equal(resolveDeskSection('?page=community'), 'sec-mall');
   assert.equal(resolveDeskSection('?page=sec-mall'), 'sec-mall');
-  assert.equal(updateDeskPageUrl('/?lang=th', 'sec-mall'), '/?lang=th&page=mall');
+  assert.equal(resolveDeskSection('', '', '/'), undefined);
+  assert.equal(resolveDeskSection('', '', '/unknown'), undefined);
+  assert.equal(resolveDeskSection('', '', '/api/health'), undefined);
+  assert.equal(updateDeskPageUrl('/?lang=th', 'sec-mall'), '/mall?lang=th');
 });
 
-test('uses a recognized hash before the query and ignores unknown routes', () => {
-  assert.equal(resolveDeskSection('?page=chart', '#JOURNAL'), 'journal-root');
-  assert.equal(resolveDeskSection('?page=chart', '#other-anchor'), 'tv-chart-root');
-  assert.equal(resolveDeskSection('?page=constructor', '#toString'), undefined);
-  assert.equal(resolveDeskSection('?page=broken', '#%E0%A4'), undefined);
+test('applies hash -> query -> pathname precedence and ignores unknown routes', () => {
+  assert.equal(resolveDeskSection('?page=chart', '#JOURNAL', '/proprules'), 'journal-root');
+  assert.equal(resolveDeskSection('?page=chart', '#other-anchor', '/proprules'), 'tv-chart-root');
+  assert.equal(resolveDeskSection('?lang=th', '#other-anchor', '/proprules'), 'sec-proprules');
+  assert.equal(resolveDeskSection('?page=constructor', '#toString', '/__proto__'), undefined);
+  assert.equal(resolveDeskSection('?page=broken', '#%E0%A4', '/missing'), undefined);
 });
 
 test('maps common and Desk-specific theme names to Desk preferences', () => {
@@ -82,18 +94,27 @@ test('removes all transient fields while preserving navigation, language, theme 
     stripWebHandoffParams('/?lang=th&page=gate&theme=dark&balance=50000&balance=70000&risk_pct=1&sl_pips=25&symbol=XAUUSD&mode=prop&daily_dd=4&source=sandbox_page&connected_via=xlsx&consistency_cap=40&day_share=28&step=3&utm_medium=web#gate'),
     '/?lang=th&page=gate&theme=dark&utm_medium=web#gate',
   );
+  assert.equal(
+    stripWebHandoffParams('/calc?lang=th&theme=dark&balance=50000&risk_pct=1'),
+    '/calc?lang=th&theme=dark',
+  );
   assert.equal(stripWebHandoffParams('/preview?balance=invalid#chart'), '/preview#chart');
   assert.equal(stripWebHandoffParams('/?lang=th&q=a%20b#proprules'), '/?lang=th&q=a%20b#proprules');
 });
 
-test('keeps navigation in sync after leaving a linked page', () => {
+test('serializes clean paths while stripping legacy page params and navigation hashes', () => {
   assert.equal(
     updateDeskPageUrl('/?lang=th&theme=dark&page=proprules#proprules', 'calculator-root'),
-    '/?lang=th&theme=dark&page=calc',
+    '/calc?lang=th&theme=dark',
   );
-  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'sec-proprules'), '/?lang=en#proprules');
-  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'journal-root'), '/?lang=en&page=journal');
-  assert.equal(updateDeskPageUrl('/?lang=en#unrelated', 'sec-marketplace'), '/?lang=en#unrelated');
+  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'sec-proprules'), '/proprules?lang=en');
+  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'journal-root'), '/journal?lang=en');
+  assert.equal(updateDeskPageUrl('/?lang=en#unrelated', 'sec-marketplace'), '/market?lang=en#unrelated');
+  assert.equal(updateDeskPageUrl('/calc?lang=th', 'sec-accounts'), '/analysis?lang=th');
+  assert.equal(updateDeskPageUrl('/portfolio', 'sec-settings'), '/settings');
+  assert.equal(updateDeskPageUrl('/rules', 'desk-cards-root'), '/gate');
+  assert.equal(updateDeskPageUrl('/mall', 'tv-chart-root'), '/chart');
+  assert.equal(updateDeskPageUrl('/?lang=en', 'unknown-page'), '/?lang=en');
 });
 
 test('serializes active language and theme onto the configured Web portal URL', () => {

@@ -49,7 +49,7 @@ export default defineConfig(() => {
           skipWaiting: true,
           clientsClaim: true,
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//],
+          navigateFallbackDenylist: [/^\/api\//, /^\/scripts\//, /^\/assets\//],
           // Precache only the core shell; lazy route/vendor chunks and optional media cache on demand.
           globPatterns: [
             'index.html',
