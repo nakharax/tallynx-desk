@@ -46,6 +46,14 @@ export function formatAccountDisplayName(name: string, lang: DeskLanguage): stri
   return LEGACY_ACCOUNT_NAMES.get(name) ?? name.replace(/^พอร์ต (\d+ · #[\w.-]+)$/, 'Port $1');
 }
 
+export function formatLiveMonitorAccountLabel(accountName: string, accountLogin?: string): string {
+  const cleanLogin = accountLogin?.trim().replace(/^#+\s*/, '') ?? '';
+  if (!cleanLogin || accountName.toLowerCase().includes(cleanLogin.toLowerCase())) {
+    return accountName;
+  }
+  return `${accountName} · #${cleanLogin}`;
+}
+
 const LEGACY_SESSION_TITLES = new Map([
   ['แชทวางแผนเทรดใหม่', 'New Trading Session'],
   ['AI Live Desk · Session หลัก', 'AI Live Desk · Primary Session'],

@@ -269,6 +269,7 @@ button.news-status-chip:hover,
 /* ========================================================================= */
 .live-cockpit {
   container-type: inline-size;
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
@@ -397,6 +398,10 @@ button.news-status-chip:hover,
   color: var(--text-muted);
 }
 
+.live-cockpit-account {
+  overflow-wrap: anywhere;
+}
+
 .live-cockpit-controls {
   display: flex;
   flex-wrap: wrap;
@@ -451,6 +456,7 @@ button.news-status-chip:hover,
   align-content: start;
   gap: 4px;
   min-width: 0;
+  overflow-wrap: anywhere;
   padding: 10px 12px;
   background: var(--bg-surface-solid);
 }

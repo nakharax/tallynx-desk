@@ -20,7 +20,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { deskText, type DeskLanguage } from '../utils/deskI18n';
+import { deskText, formatLiveMonitorAccountLabel, type DeskLanguage } from '../utils/deskI18n';
 import { formatPilotAmount } from '../utils/fundedNextPilot';
 import { fmtUSD } from '../utils/ghrRules';
 import {
@@ -373,7 +373,7 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
             </h2>
             <span className="live-cockpit-pill mono" data-tone="cobalt">{providerLabel}</span>
             <span className="live-cockpit-account mono">
-              {accountName}{accountLogin ? ` · #${accountLogin}` : ''}
+              {formatLiveMonitorAccountLabel(accountName, accountLogin)}
             </span>
           </div>
           <div className="live-cockpit-meta mono">

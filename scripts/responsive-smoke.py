@@ -34,6 +34,14 @@ JS_AUDIT = """() => {
     issues.push(`main.container horizontal overflow: +${mainEl.scrollWidth - mainEl.clientWidth}px`);
   }
 
+  for (const cockpit of document.querySelectorAll('.live-cockpit')) {
+    const { height } = cockpit.getBoundingClientRect();
+    if (height < 60) issues.push(`live-cockpit crushed: height=${Math.round(height)}px`);
+    if (cockpit.scrollHeight > cockpit.clientHeight + 2) {
+      issues.push(`live-cockpit vertical clipping: scrollHeight=${cockpit.scrollHeight}px, clientHeight=${cockpit.clientHeight}px`);
+    }
+  }
+
   const sidebar = document.querySelector('.fx-sidebar');
   const mobNav = document.querySelector('.fx-mobile-bottom-nav');
   const sidebarVis = sidebar && getComputedStyle(sidebar).display !== 'none';

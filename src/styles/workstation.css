@@ -5357,6 +5357,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 }
 .fx-workstation .analysis-subview > .fx-tab-panel-card { border-radius: var(--radius-sm); }
 .analysis-view[data-view="account"] > .fx-tabbed-container { flex: 0 0 auto; }
+.analysis-view[data-view="overview"] > * { flex: 0 0 auto; }
 .analysis-account-controls {
   display: flex;
   flex-wrap: wrap;

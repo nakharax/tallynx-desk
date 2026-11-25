@@ -4,6 +4,7 @@ import {
   DESK_I18N,
   formatAccountDisplayName,
   formatDeskPromptDisplay,
+  formatLiveMonitorAccountLabel,
   formatMt5SyncMessage,
   formatMt5TimeOffsetLabel,
   formatSessionTitleDisplay,
@@ -12,7 +13,7 @@ import {
   maskWorkspaceEmail,
   normalizeDeskLanguage,
   resolveInitialDeskLanguage,
-} from './deskI18n';
+} from './deskI18n.ts';
 
 test('deskI18n defaults to English and honors explicit language query parameters', () => {
   assert.equal(resolveInitialDeskLanguage(), 'en');
@@ -41,6 +42,14 @@ test('display helpers localize built-in names and preserve custom names', () => 
   assert.equal(formatSessionTitleDisplay('AI Live Desk · Session หลัก', 'en'), 'AI Live Desk · Primary Session');
   assert.equal(formatSessionTitleDisplay('แชทวางแผนเทรดใหม่', 'th'), 'แชทวางแผนเทรดใหม่');
   assert.equal(formatSessionTitleDisplay('แผนเทรดทอง', 'en'), 'แผนเทรดทอง');
+});
+
+test('live monitor appends a clean login only when the account name does not contain it', () => {
+  assert.equal(formatLiveMonitorAccountLabel('FundedNext #14405772', '14405772'), 'FundedNext #14405772');
+  assert.equal(formatLiveMonitorAccountLabel('Primary · #demo-6k', ' #DEMO-6K '), 'Primary · #demo-6k');
+  assert.equal(formatLiveMonitorAccountLabel('FundedNext', ' #14405772 '), 'FundedNext · #14405772');
+  assert.equal(formatLiveMonitorAccountLabel('FundedNext', ' # '), 'FundedNext');
+  assert.equal(formatLiveMonitorAccountLabel('FundedNext'), 'FundedNext');
 });
 
 test('every supported slash command has an English and Thai description', () => {
