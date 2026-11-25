@@ -8,6 +8,7 @@ export type WorkspacePillar = 'mall' | 'portfolio' | 'plan' | 'rules' | 'setting
 interface WorkspaceSidebarProps {
   lang: DeskLanguage;
   activePillar: WorkspacePillar;
+  onGoHome?: () => void;
   onOpenMall: () => void;
   onSwitchPage: (sectionId: string) => void;
   onOpenSettings: () => void;
@@ -16,6 +17,7 @@ interface WorkspaceSidebarProps {
 export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = React.memo(({
   lang,
   activePillar,
+  onGoHome,
   onOpenMall,
   onSwitchPage,
   onOpenSettings,
@@ -28,8 +30,8 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = React.memo(({
       <button
         type="button"
         className="fx-sidebar-logo"
-        title={`TallyNX · ${ui.pageTitles.community}`}
-        onClick={onOpenMall}
+        title={t('TallyNX Desk · Home', 'TallyNX Desk · หน้าแรก')}
+        onClick={onGoHome ?? (() => onSwitchPage('sec-accounts'))}
         style={{ color: 'var(--text-primary)' }}
       >
         <TallyNxLogo lang={lang} className="fx-logo-svg" />

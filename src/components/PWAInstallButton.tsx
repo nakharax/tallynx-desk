@@ -42,8 +42,8 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ lang = 'en' 
         type="button"
         onClick={handleInstallClick}
         className="topbar-icon-btn"
-        title={t("Install TallyNX Mall on this device", "ติดตั้งแอป TallyNX Mall ลงเครื่อง")}
-        aria-label={t("Install TallyNX Mall", "ติดตั้งแอป TallyNX Mall")}
+        title={t("Install TallyNX Desk on this device", "ติดตั้งแอป TallyNX Desk ลงเครื่อง")}
+        aria-label={t("Install TallyNX Desk", "ติดตั้งแอป TallyNX Desk")}
       >
         <svg className="ico" viewBox="0 0 24 24" style={{ width: 15, height: 15 }}>
           <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
@@ -54,7 +54,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ lang = 'en' 
 
       {showModal && (
         <DeskDialog
-          label={t("Install TallyNX Mall", "ติดตั้ง TallyNX Mall")}
+          label={t("Install TallyNX Desk", "ติดตั้ง TallyNX Desk")}
           onClose={() => setShowModal(false)}
           panelStyle={{ maxWidth: '440px', padding: 0 }}
         >
@@ -78,10 +78,10 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ lang = 'en' 
                     color: 'var(--text-primary)',
                   }}
                 >
-                  {t("Install TallyNX Mall", "ติดตั้ง TallyNX Mall บนคอมพิวเตอร์")}
+                  {t("Install TallyNX Desk", "ติดตั้ง TallyNX Desk บนคอมพิวเตอร์")}
                 </h3>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                  {t("Open Mall in a separate window without the browser address bar. Available offline.", "เปิด Mall ในหน้าต่างแยกโดยไม่มีแถบที่อยู่ ใช้งานออฟไลน์ได้")}
+                  {t("Open Desk in a separate window without the browser address bar. Available offline.", "เปิด Desk ในหน้าต่างแยกโดยไม่มีแถบที่อยู่ ใช้งานออฟไลน์ได้")}
                 </div>
               </div>
               <button
