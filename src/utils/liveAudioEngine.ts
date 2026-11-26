@@ -24,6 +24,7 @@ export interface LiveTranscriptEvent {
 export interface LiveConnectCallbacks {
   token: string;
   model: string;
+  apiVersion?: 'v1alpha' | 'v1beta';
   voice?: string;
   enableThinking?: boolean;
   onStateChange?: (state: LiveDeskConnectionState) => void;
@@ -81,7 +82,7 @@ export class GeminiLiveDeskClient {
 
       const ai = new GoogleGenAI({
         apiKey: opts.token,
-        httpOptions: { apiVersion: 'v1alpha' },
+        httpOptions: { apiVersion: opts.apiVersion ?? 'v1alpha' },
       });
 
       const liveConfig: Record<string, unknown> = {
@@ -553,7 +554,7 @@ export interface SpeechPlaybackHandle {
 
 export async function speakTextWithFallback(params: {
   text: string;
-  idToken?: string | null;
+  requestHeaders?: Record<string, string>;
   voice?: string;
   onStart?: () => void;
   onEnd?: () => void;
@@ -564,14 +565,12 @@ export async function speakTextWithFallback(params: {
     return { stop: () => {}, finished: Promise.resolve() };
   }
 
-  if (params.idToken) {
+  if (params.requestHeaders) {
     try {
       const resp = await fetch('/api/ai/tts', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${params.idToken}`,
-        },
+        headers: params.requestHeaders,
+        redirect: 'error',
         body: JSON.stringify({ text: cleanText, voice: params.voice || 'Aoede' }),
       });
       if (resp.ok) {
@@ -581,7 +580,15 @@ export async function speakTextWithFallback(params: {
           fallbackClientTts?: boolean;
         };
         if (data.audioBase64 && !data.fallbackClientTts) {
-          const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
+          let mimeType = data.mimeType || 'audio/wav';
+          let audioBase64 = data.audioBase64;
+          if (/^audio\/(?:l16|pcm)\b/i.test(mimeType)) {
+            const rate = Number(mimeType.match(/(?:^|;)\s*rate=(\d+)/i)?.[1] ?? 24_000);
+            const bytes = Uint8Array.from(atob(audioBase64), char => char.charCodeAt(0));
+            audioBase64 = encodePcm16ToWavBase64(new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2)), rate);
+            mimeType = 'audio/wav';
+          }
+          const audio = new Audio(`data:${mimeType};base64,${audioBase64}`);
           let resolveDone!: () => void;
           const finished = new Promise<void>((res) => {
             resolveDone = res;

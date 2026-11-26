@@ -1,8 +1,10 @@
 import React from 'react';
 import { DESK_I18N, deskText, type DeskLanguage } from '../utils/deskI18n';
+import { AiAndDataKeysCard } from './AiAndDataKeysCard';
 
 interface SettingsPageSectionProps {
   lang: DeskLanguage;
+  firebaseUid: string | null;
   deskTheme: 'obsidian' | 'alabaster';
   roomMode: 'clean' | 'night' | 'daylight';
   thbRate: number;
@@ -18,6 +20,7 @@ interface SettingsPageSectionProps {
 
 export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
   lang,
+  firebaseUid,
   deskTheme,
   roomMode,
   thbRate,
@@ -140,6 +143,8 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
           </div>
         </div>
       </div>
+
+      <AiAndDataKeysCard uid={firebaseUid} lang={lang} />
 
       <div className="settings-ports-block">{accountsContent}</div>
 

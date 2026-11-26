@@ -19,6 +19,9 @@ import {
   type RiskSupervisionFallbackReason,
 } from '../utils/riskSupervisionReport';
 import { formatChartPrice, LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES, useLiveChartFeed } from '../utils/useLiveChartFeed';
+import { AI_MODEL_CATALOG, normalizeAiModel } from '../utils/aiProviderConfig';
+import { getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
+import { AiAndDataKeysDialogButton } from './AiAndDataKeysCard';
 
 interface AiRiskSupervisionCardProps {
   lang: DeskLanguage;
@@ -201,10 +204,14 @@ function SupervisionChart({
 
 const FALLBACK_COPY: Record<RiskSupervisionFallbackReason, [string, string]> = {
   AUTH_REQUIRED: ['Sign in to run the Gemini review. The quant audit is available here.', 'เข้าสู่ระบบเพื่อใช้ Gemini ผลตรวจสอบเชิงปริมาณแสดงอยู่ด้านล่าง'],
+  BYOK_REQUIRED: ['Connect a valid provider key to run AI review. The deterministic audit is shown below.', 'เชื่อมต่อคีย์ผู้ให้บริการที่ใช้งานได้เพื่อใช้ AI ผลตรวจสอบตามสูตรแสดงด้านล่าง'],
   GEMINI_API_KEY_MISSING: ['Gemini review is unavailable for this Desk.', 'Desk นี้ยังไม่เปิดใช้การตรวจสอบด้วย Gemini'],
   GEMINI_UNAVAILABLE: ['Gemini review is temporarily unavailable.', 'Gemini ไม่พร้อมใช้งานชั่วคราว'],
   GEMINI_REPORT_INVALID: ['Gemini returned a report outside the analytical format.', 'รายงานจาก Gemini ไม่ตรงตามรูปแบบการวิเคราะห์'],
-  RATE_LIMITED: ['The Gemini review limit has been reached. Try again later.', 'ถึงขีดจำกัดการตรวจสอบด้วย Gemini ลองใหม่ภายหลัง'],
+  AI_PROVIDER_UNAVAILABLE: ['The AI provider is temporarily unavailable.', 'ผู้ให้บริการ AI ไม่พร้อมใช้งานชั่วคราว'],
+  AI_REPORT_INVALID: ['The provider returned a report outside the analytical format.', 'รายงานจากผู้ให้บริการไม่ตรงตามรูปแบบการวิเคราะห์'],
+  INVALID_AI_MODEL: ['Choose a valid model in API Keys / Codex OAuth.', 'เลือกโมเดลที่ถูกต้องในคีย์ API / Codex OAuth'],
+  RATE_LIMITED: ['The AI review limit has been reached. Try again later.', 'ถึงขีดจำกัดการตรวจสอบด้วย AI ลองใหม่ภายหลัง'],
   REQUEST_UNAVAILABLE: ['The audit request could not reach the service.', 'ไม่สามารถส่งคำขอตรวจสอบไปยังบริการได้'],
 };
 
@@ -213,18 +220,26 @@ function readObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 function SupervisionAudit({
-  feed, candles, snapshot, portfolio, lang,
+  feed, candles, snapshot, portfolio, lang, uid,
 }: {
   feed: LiveChartTelemetry;
   candles: MarketCandle[];
   snapshot: QuantSupervisionSnapshot;
   portfolio?: QuantPortfolioInput;
   lang: DeskLanguage;
+  uid: string | null;
 }) {
+  const byok = useByokCredentials(uid);
+  const connection = selectDeskAiCredential(byok);
+  const model = connection && connection.provider !== 'platform'
+    ? connection.model ?? AI_MODEL_CATALOG[connection.provider][0] : undefined;
   const [result, setResult] = useState<AiRiskSupervisionReport | null>(null);
   const [pending, setPending] = useState(false);
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const activeRequest = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setResult(previous => previous?.fallbackReason === 'BYOK_REQUIRED' ? null : previous);
+  }, [connection?.provider, connection?.model, connection?.key]);
   useEffect(() => () => {
     const request = activeRequest.current;
     activeRequest.current = null;
@@ -250,14 +265,18 @@ function SupervisionAudit({
     const deadline = window.setTimeout(() => {
       controller.abort();
       finish(requestFallback);
-    }, 22_000);
+    }, 48_000);
     let next: AiRiskSupervisionReport = requestFallback;
     try {
-      const token = await auth.currentUser?.getIdToken().catch(() => undefined);
+      const user = auth.currentUser;
+      if ((user?.uid ?? null) !== uid) return;
+      const headers = await getDeskAiRequestHeaders(user);
       controller.signal.throwIfAborted();
+      if ((auth.currentUser?.uid ?? null) !== uid) return;
       const response = await fetch('/api/ai/risk-supervise', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers,
+        redirect: 'error',
         body: JSON.stringify({
           symbol: snapshot.symbol, timeframe: snapshot.timeframe, candles, lang, portfolio, quantSnapshot: snapshot,
         }),
@@ -265,7 +284,7 @@ function SupervisionAudit({
       });
       const body: unknown = await response.json();
       const payload = readObject(body);
-      const serverReport = readObject(response.status === 401 ? payload?.deterministicReport : payload?.report);
+      const serverReport = readObject(payload?.deterministicReport ?? payload?.report);
       const generatedAt = typeof serverReport?.generatedAt === 'string' && Number.isFinite(Date.parse(serverReport.generatedAt))
         ? serverReport.generatedAt : baseline.generatedAt;
       const requestedReport = { ...baseline, generatedAt };
@@ -274,10 +293,12 @@ function SupervisionAudit({
         next = { ...requestedReport, fallbackReason: 'AUTH_REQUIRED' };
       } else if (payload?.fallbackUsed === true && reason) {
         next = { ...requestedReport, fallbackReason: reason };
-      } else if (response.ok && payload?.ok === true && serverReport?.source === 'gemini' &&
-          typeof serverReport.model === 'string' && /^gemini-[a-z0-9.-]{1,48}$/.test(serverReport.model)) {
-        next = sanitizeAiRiskSupervisionReport(serverReport, requestedReport, serverReport.model)
-          ?? { ...requestedReport, fallbackReason: 'GEMINI_REPORT_INVALID' };
+      } else if (response.ok && payload?.ok === true && serverReport &&
+          (serverReport.source === 'gemini' || serverReport.source === 'openrouter' || serverReport.source === 'codex_oauth')) {
+        const provider = serverReport.source === 'gemini' ? 'google' : serverReport.source;
+        const modelId = normalizeAiModel(provider, serverReport.model);
+        next = (modelId ? sanitizeAiRiskSupervisionReport(serverReport, requestedReport, modelId, serverReport.source) : null)
+          ?? { ...requestedReport, fallbackReason: 'AI_REPORT_INVALID' };
       }
     } catch {
       // The audit captured before the request stays available during network failures.
@@ -292,17 +313,21 @@ function SupervisionAudit({
       <header className="risk-sv-audit-head">
         <div className="risk-sv-provenance">
           <span className="risk-sv-badge" data-source={report.source}>
-            {report.source === 'gemini' ? t('Gemini AI Risk Supervision', 'การกำกับความเสี่ยงด้วย Gemini')
-              : t('Deterministic Quant Audit', 'การตรวจสอบเชิงปริมาณตามสูตร')}
+            {report.source === 'deterministic' ? t('Deterministic Quant Audit', 'การตรวจสอบเชิงปริมาณตามสูตร')
+              : t('AI Risk Supervision', 'การกำกับความเสี่ยงด้วย AI')}
           </span>
+          {!result && model && <span className="mono">{model}</span>}
           {result && <time dateTime={result.generatedAt} className="mono">
             {new Date(result.generatedAt).toLocaleString(lang, { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Bangkok' })} ICT
           </time>}
         </div>
-        <button type="button" className="btn primary" disabled={pending} onClick={() => void runAudit()}>
-          <ShieldCheck size={16} aria-hidden="true" />
-          {pending ? t('Running risk audit…', 'กำลังตรวจสอบความเสี่ยง…') : t('Run AI Risk Audit', 'ตรวจสอบความเสี่ยงด้วย AI')}
-        </button>
+        <div className="byok-actions">
+          <AiAndDataKeysDialogButton uid={uid} lang={lang} />
+          <button type="button" className="btn primary" disabled={pending} onClick={() => void runAudit()}>
+            <ShieldCheck size={16} aria-hidden="true" />
+            {pending ? t('Running risk audit…', 'กำลังตรวจสอบความเสี่ยง…') : t('Run AI Risk Audit', 'ตรวจสอบความเสี่ยงด้วย AI')}
+          </button>
+        </div>
       </header>
       <div role="status">
         {report.fallbackReason && <p className="risk-sv-status">{t(...FALLBACK_COPY[report.fallbackReason])}</p>}
@@ -348,6 +373,8 @@ function SupervisionAudit({
 }
 
 export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accountScope }: AiRiskSupervisionCardProps) {
+  const [uid, setUid] = useState<string | null>(() => auth.currentUser?.uid ?? null);
+  useEffect(() => auth.onAuthStateChanged(user => setUid(user?.uid ?? null)), []);
   const {
     chartSymbol, setChartSymbol, chartTimeframe, setChartTimeframe, liveTelemetry, chartError, chartLoading,
   } = useLiveChartFeed({ initialTimeframe, fetchStructureTf: false, pollIntervalMs: 30_000 });
@@ -422,8 +449,8 @@ export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accou
               </div>
             ))}
           </dl>
-          <SupervisionAudit key={JSON.stringify([marketKey, lang, accountScope, Boolean(safePortfolio)])}
-            feed={feed} candles={candles} snapshot={snapshot} portfolio={safePortfolio} lang={lang} />
+          <SupervisionAudit key={JSON.stringify([marketKey, lang, accountScope, Boolean(safePortfolio), uid])}
+            feed={feed} candles={candles} snapshot={snapshot} portfolio={safePortfolio} lang={lang} uid={uid} />
         </>
       )}
       <footer className="risk-sv-footer"><ShieldCheck size={14} aria-hidden="true" /> Analytical &amp; Risk Supervision Only · No Trade Signals</footer>

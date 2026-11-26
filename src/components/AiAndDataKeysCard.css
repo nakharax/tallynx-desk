@@ -1,0 +1,125 @@
+.byok-card {
+  padding: clamp(14px, 2vw, 24px);
+  display: grid;
+  gap: 18px;
+}
+
+.byok-heading,
+.byok-actions,
+.byok-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.byok-heading {
+  justify-content: space-between;
+  align-items: flex-start;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-color, #58637350);
+}
+
+.byok-heading p,
+.byok-databento p,
+.byok-feedback {
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.byok-access {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: var(--amber, #b37930);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.byok-access[data-eligible="true"] {
+  color: var(--emerald, #26826c);
+}
+
+.byok-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 18px;
+}
+
+.byok-provider,
+.byok-databento,
+.byok-field,
+.byok-field > label {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-width: 0;
+}
+
+.byok-provider {
+  gap: 14px;
+}
+
+.byok-databento {
+  padding: 14px;
+  border: 1px solid var(--border-color, #58637350);
+  border-radius: 8px;
+}
+
+.byok-databento h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.byok-databento p {
+  margin: 0 0 4px;
+}
+
+.byok-field label,
+label.byok-field,
+.byok-identity {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.byok-field .inp {
+  width: 100%;
+  min-width: 0;
+}
+
+.byok-field .byok-actions .inp {
+  flex: 1 1 150px;
+  width: auto;
+}
+
+.byok-dialog.fx-modal-dialog {
+  position: relative;
+  width: min(680px, 100%);
+}
+
+.byok-dialog .byok-card {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.byok-dialog .byok-heading {
+  padding-inline-end: 30px;
+}
+
+.byok-close {
+  position: absolute;
+  inset: 12px 12px auto auto;
+}
+
+@media (max-width: 620px) {
+  .byok-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+}

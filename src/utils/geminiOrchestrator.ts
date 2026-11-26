@@ -480,9 +480,10 @@ export async function executeWithModelFailover(
 
 export const executeWithFlashLiteFailover = executeWithModelFailover;
 
-export function createDecisionGenAIClient(apiKey?: string): GoogleGenAI {
+export function createDecisionGenAIClient(apiKey: string): GoogleGenAI {
   return new GoogleGenAI({
-    apiKey: apiKey ?? process.env.GEMINI_API_KEY,
+    apiKey,
+    vertexai: false,
     httpOptions: {
       apiVersion: 'v1beta',
       headers: {

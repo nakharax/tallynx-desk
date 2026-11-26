@@ -19,6 +19,9 @@ import {
   type DeskLanguage,
 } from '../utils/deskI18n';
 import { auth } from '../services/firebase';
+import { AI_MODEL_CATALOG } from '../utils/aiProviderConfig';
+import { canRequestDeskAi, getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
+import { AiAndDataKeysDialogButton } from './AiAndDataKeysCard';
 import {
   buildTradingCoachContext,
   DEFAULT_STATE,
@@ -92,9 +95,7 @@ interface TradingCoachChatProps {
   lang?: DeskLanguage;
   state: GhrWorkspaceState;
   isOnline: boolean;
-  hasProAccess?: boolean;
   currentUserUid?: string | null;
-  onOpenLicenseModal?: () => void;
   onUpdateMessages: (messages: ChatMessage[]) => void;
   onUpdateModel: (model: ChatModelId) => void;
   onResetChat: () => void;
@@ -719,9 +720,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   lang = 'en',
   state,
   isOnline,
-  hasProAccess = false,
   currentUserUid = null,
-  onOpenLicenseModal,
   onUpdateMessages,
   onUpdateModel,
   onResetChat,
@@ -740,6 +739,19 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   onQuickDeskAction,
 }) => {
   const t = useCallback((en: string, th: string) => deskText(lang, en, th), [lang]);
+  const byok = useByokCredentials(currentUserUid);
+  const canCloudChat = isOnline && canRequestDeskAi(byok, currentUserUid);
+  const canCloudVoice = isOnline && canRequestDeskAi(byok, currentUserUid, 'voice');
+  const voiceCredential = selectDeskAiCredential(byok, 'voice');
+  const voiceProvider = voiceCredential?.provider;
+  const voiceKey = voiceCredential?.key;
+  const byokRequiredCopy = t('Connect a valid provider key in API Keys / Codex OAuth.', 'เชื่อมต่อคีย์ที่ใช้งานได้ในคีย์ API / Codex OAuth');
+  const getActiveAiHeaders = useCallback(async (capability: 'text' | 'voice') => {
+    const currentUser = auth.currentUser;
+    if ((currentUser?.uid ?? null) !== currentUserUid) return null;
+    const headers = await getDeskAiRequestHeaders(currentUser, capability);
+    return (auth.currentUser?.uid ?? null) === currentUserUid ? headers : null;
+  }, [currentUserUid]);
   const activeQuickPrompts = useMemo(
     () => getQuickPromptsForPage(pageSnapshot?.activePageId),
     [pageSnapshot?.activePageId]
@@ -1060,15 +1072,18 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     return () => window.clearInterval(timer);
   }, [liveConnState]);
 
-  // Cleanup active voice/live resources on unmount
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
       ttsHandleRef.current?.stop();
       speechRecRef.current?.stop();
-      void liveClientRef.current?.disconnect();
     };
-  }, []);
+  }, [currentUserUid]);
+
+  useEffect(() => () => {
+    void liveClientRef.current?.disconnect();
+    liveClientRef.current = null;
+  }, [currentUserUid, voiceProvider, voiceKey]);
 
   const slashSuggestions = useMemo(() => filterSlashCommands(inputText), [inputText]);
 
@@ -1124,10 +1139,14 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       }
       ttsHandleRef.current?.stop();
       setSpeakingMsgId(msgId);
-      const token = auth.currentUser && hasProAccess ? await auth.currentUser.getIdToken().catch(() => null) : null;
+      const requestHeaders = canCloudVoice ? await getActiveAiHeaders('voice') : undefined;
+      if (requestHeaders === null) {
+        setSpeakingMsgId(null);
+        return;
+      }
       const handle = await speakTextWithFallback({
         text,
-        idToken: token,
+        requestHeaders,
         voice: selectedVoice,
         onEnd: () => {
           setSpeakingMsgId((prev) => (prev === msgId ? null : prev));
@@ -1135,7 +1154,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       });
       ttsHandleRef.current = handle;
     },
-    [hasProAccess, selectedVoice, speakingMsgId]
+    [canCloudVoice, getActiveAiHeaders, selectedVoice, speakingMsgId]
   );
 
   const handleInstantLocalPlan = useCallback(() => {
@@ -1248,13 +1267,9 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
         return;
       }
 
-      const currentUser = auth.currentUser;
-      if (!currentUser || !hasProAccess) {
-        const gateMsg = !currentUser
-          ? 'Cloud AI (Multi-Model Free Tier + Voice + Live) ต้องเข้าสู่ระบบ Google + เปิด License (ปุ่ม "อ่านหน้านี้", "กราฟสด" และ "สรุปแผน GHR ทันที" คำนวณในเครื่องได้ฟรีไม่จำกัด)'
-          : 'บัญชีของคุณยังเป็น Free Plan · กรุณาเปิดใช้ License Key (PRO / TRIAL) เพื่อเชื่อม Google Gemini Cloud';
-        setErrorBanner(lang === 'en' ? formatLocalCoachReply(gateMsg, lang) : gateMsg);
-        const localText = `${gateMsg}\n\nคำนวณแผนจากข้อมูลพอร์ตในเครื่อง:\n\n${generateLocalTacticalPlan(
+      if (!canCloudChat) {
+        setErrorBanner(byokRequiredCopy);
+        const localText = `${generateLocalTacticalPlan(
           state,
           pageSnapshot
         )}${buildChartSupplement()}`;
@@ -1278,17 +1293,16 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       setStreamingModelLabel('');
 
       try {
-        const idToken = await currentUser.getIdToken();
+        const headers = await getActiveAiHeaders('text');
+        if (!headers) return;
         const deskContext = `${t('Reply in English.', 'ตอบเป็นภาษาไทย')}\n\n${buildTradingCoachContext(state, pageSnapshot)}`;
         const firstImage = queuedSnap.find((a) => a.mimeType.startsWith('image/'));
 
         const response = await fetch('/api/chat', {
           method: 'POST',
           signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
+          headers,
+          redirect: 'error',
           body: JSON.stringify({
             message: raw,
             history: messages.map((m) => ({ role: m.role, text: m.text })),
@@ -1363,7 +1377,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                   finalSources = payload.sources as ChatMessageSource[];
                 }
               } else if (eventName === 'error') {
-                streamError = String(payload.error || t("An error interrupted the response stream.", 'เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ'));
+                streamError = payload.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+                  : String(payload.error || t("An error interrupted the response stream.", 'เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ'));
               }
             } catch {
               // ignore malformed SSE chunk
@@ -1414,7 +1429,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
         const data = await response.json();
         if (!response.ok) {
-          const errMsg = data?.error || t("The chat server is currently unavailable.", 'ไม่สามารถติดต่อเซิร์ฟเวอร์แชทได้ในขณะนี้');
+          const errMsg = data?.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+            : data?.error || t("The chat server is currently unavailable.", 'ไม่สามารถติดต่อเซิร์ฟเวอร์แชทได้ในขณะนี้');
           setErrorBanner(formatCoachError(errMsg, lang, t('The chat server is currently unavailable.', 'ไม่สามารถติดต่อเซิร์ฟเวอร์แชทได้ในขณะนี้')));
           const fallbackText = `${errMsg}\n\nคำนวณแผนจากข้อมูลพอร์ตในเครื่อง:\n\n${generateLocalTacticalPlan(
             state,
@@ -1499,11 +1515,13 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       activeLiveTelemetry,
       activeStructureTelemetry,
       attachments,
+      byokRequiredCopy,
+      canCloudChat,
       chatMode,
       commitActiveSessionMessages,
       forceWebSearch,
+      getActiveAiHeaders,
       handleCreateNewSession,
-      hasProAccess,
       inputText,
       isOnline,
       isSending,
@@ -1529,8 +1547,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     const promptText = `อ่านและวิเคราะห์หน้า "${pageSnapshot.activePageTitle}" ที่ฉันกำลังเปิดดูอยู่ตอนนี้ร่วมกับพอร์ต ${acc.name} และกราฟสด${
       activeLiveTelemetry ? ` (${activeLiveTelemetry.symbol} ${activeLiveTelemetry.timeframe})` : ''
     } ช่วยสรุปจุดสำคัญ สิ่งที่ต้องระวัง และแผนปฏิบัติการขั้นต่อไป`;
-    const currentUser = auth.currentUser;
-    if (isOnline && currentUser && hasProAccess) {
+    if (canCloudChat) {
       await handleSendMessage(promptText);
       return;
     }
@@ -1550,8 +1567,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       attachments.some((a) => a.mimeType.startsWith('image/')) ? ' รวมถึงวิเคราะห์ภาพกราฟที่แนบมาด้วย' : ''
     }`;
 
-    const currentUser = auth.currentUser;
-    if (isOnline && currentUser && hasProAccess) {
+    if (canCloudChat) {
       await handleSendMessage(promptText);
       return;
     }
@@ -1599,23 +1615,22 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
             setErrorBanner(t("Recording is too short. Record again.", 'เสียงที่บันทึกสั้นเกินไป ลองบันทึกใหม่'));
             return;
           }
-          const currentUser = auth.currentUser;
-          if (!currentUser || !hasProAccess) {
-            setErrorBanner(t("Cloud transcription requires sign-in and PRO access.", 'Cloud Voice Transcribe ต้องเข้าสู่ระบบ + PRO'));
+          if (!canCloudVoice) {
+            setErrorBanner(t('Connect a Google Gemini key for cloud transcription.', 'เชื่อมต่อคีย์ Google Gemini เพื่อถอดเสียงบนคลาวด์'));
             return;
           }
-          const idToken = await currentUser.getIdToken();
+          const headers = await getActiveAiHeaders('voice');
+          if (!headers) return;
           const resp = await fetch('/api/ai/transcribe', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
+            headers,
+            redirect: 'error',
             body: JSON.stringify({ audioBase64: wavBase64, mimeType }),
           });
-          const data = (await resp.json()) as { text?: string; error?: string };
+          const data = (await resp.json()) as { text?: string; error?: string; code?: string };
           if (!resp.ok || !data.text?.trim()) {
-            setErrorBanner(formatCoachError(data.error, lang, t('Transcription failed. Please try speaking again.', 'ถอดความไม่สำเร็จ กรุณาลองพูดใหม่อีกครั้ง')));
+            setErrorBanner(data.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+              : formatCoachError(data.error, lang, t('Transcription failed. Please try speaking again.', 'ถอดความไม่สำเร็จ กรุณาลองพูดใหม่อีกครั้ง')));
             return;
           }
           const spokenText = data.text.trim();
@@ -1632,9 +1647,6 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       }
       return;
     }
-
-    const currentUser = auth.currentUser;
-    const canCloudVoice = isOnline && Boolean(currentUser) && hasProAccess;
 
     if (canCloudVoice) {
       try {
@@ -1700,9 +1712,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const startLiveSession = async () => {
     setErrorBanner(null);
     setLiveNotice(null);
-    const currentUser = auth.currentUser;
-    if (!isOnline || !currentUser || !hasProAccess) {
-      setErrorBanner(t("Gemini 3.8 Live requires sign-in and an active PRO or TRIAL license.", 'Gemini 3.8 Live ต้องเข้าสู่ระบบและมีสิทธิ์ PRO หรือ TRIAL ที่ใช้งานได้'));
+    if (!canCloudVoice) {
+      setErrorBanner(t('Connect a Google Gemini key for Live voice.', 'เชื่อมต่อคีย์ Google Gemini เพื่อใช้เสียง Live'));
       return;
     }
 
@@ -1713,7 +1724,11 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     setLiveConnState('CONNECTING');
 
     try {
-      const idToken = await currentUser.getIdToken();
+      const headers = await getActiveAiHeaders('voice');
+      if (!headers) {
+        setLiveConnState('IDLE');
+        return;
+      }
       const deskContext = buildTradingCoachContext(state, pageSnapshot);
       const liveChartContext = activeLiveTelemetry
         ? formatDualLiveChartTelemetryForPrompt(activeLiveTelemetry, activeStructureTelemetry)
@@ -1721,10 +1736,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
       const resp = await fetch('/api/ai/live-token', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
+        headers,
+        redirect: 'error',
         body: JSON.stringify({
           mode: liveModelTier,
           voice: selectedVoice,
@@ -1735,11 +1748,18 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       const data = (await resp.json()) as {
         token?: string;
         model?: string;
+        apiVersion?: 'v1alpha' | 'v1beta';
         error?: string;
+        code?: string;
       };
+      if ((auth.currentUser?.uid ?? null) !== currentUserUid) {
+        setLiveConnState('IDLE');
+        return;
+      }
       if (!resp.ok || !data.token || !data.model) {
         setLiveConnState('ERROR');
-        setErrorBanner(formatCoachError(data.error, lang, t('Unable to create a temporary token for Live mode.', 'ไม่สามารถสร้างโทเค็นชั่วคราวสำหรับโหมด Live ได้')));
+        setErrorBanner(data.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+          : formatCoachError(data.error, lang, t('Unable to create a temporary token for Live mode.', 'ไม่สามารถสร้างโทเค็นชั่วคราวสำหรับโหมด Live ได้')));
         return;
       }
 
@@ -1749,6 +1769,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       await client.connect({
         token: data.token,
         model: data.model,
+        apiVersion: data.apiVersion === 'v1beta' ? 'v1beta' : 'v1alpha',
         voice: selectedVoice,
         enableThinking: data.model === GEMINI_38_LIVE_THINKING,
         onStateChange: (nextState) => {
@@ -1943,7 +1964,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     );
 
   const renderLiveConsole = () => {
-    const canCloudLive = isOnline && Boolean(auth.currentUser) && hasProAccess;
+    const canCloudLive = canCloudVoice;
     const activeModelLabel =
       liveModelTier === 'thinking' ? GEMINI_38_LIVE_THINKING : GEMINI_38_LIVE;
     const isConnected = liveConnState !== 'IDLE' && liveConnState !== 'ERROR';
@@ -1979,13 +2000,9 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
               <strong>{t('Live Mode (two-way voice)', 'โหมดคุยเสียงสดสองทาง')}</strong>{' '}
               {t('uses an ephemeral token to connect over WebSocket to', 'ใช้โทเค็นชั่วคราวเพื่อเชื่อมต่อ WebSocket กับ')}{' '}
               <code>gemini-3.8-live</code>{' '}
-              {t('Requires Google sign-in and an active PRO or TRIAL license.', 'ต้องเข้าสู่ระบบ Google และเปิดใช้งานสิทธิ์ PRO หรือ TRIAL')}
+              {t('Connect your Google Gemini key to use Live voice.', 'เชื่อมต่อคีย์ Google Gemini ของคุณเพื่อใช้เสียง Live')}
             </div>
-            {onOpenLicenseModal && (
-              <button type="button" className="btn xs primary" onClick={onOpenLicenseModal}>
-                {t("Sign in / Activate PRO", "เข้าสู่ระบบ / เปิดสิทธิ์ PRO")}
-              </button>
-            )}
+            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
           </div>
         ) : (
           <>
@@ -2216,11 +2233,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           }}
         >
           <span>{formatCoachError(errorBanner, lang, 'The Coach could not complete the last request.')}</span>
-          {onOpenLicenseModal && (
-            <button type="button" className="btn xs primary" onClick={onOpenLicenseModal}>
-              {t("Activate PRO / Sign in", "เปิดสิทธิ์ PRO / เข้าสู่ระบบ")}
-            </button>
-          )}
+          <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
         </div>
       )}
 
@@ -2502,7 +2515,9 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           )}
 
           <div className="coach-input-actions">
-            <select
+            {byok.provider ? (
+              <span className="mono">{byok.models[byok.provider] ?? AI_MODEL_CATALOG[byok.provider][0]}</span>
+            ) : <select
               aria-label={t("Choose a free-tier Google API model", "เลือกโมเดล Google API Free Tier")}
               className="coach-model-select"
               value={selectedModel}
@@ -2515,7 +2530,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                   {m.label}
                 </option>
               ))}
-            </select>
+            </select>}
+            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
 
             {chatMode !== 'live' && (
               <>
