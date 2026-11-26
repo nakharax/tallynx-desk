@@ -4,8 +4,7 @@
   gap: 16px;
 }
 
-.review-diagnostics,
-.desk-guard-summary {
+.review-diagnostics {
   padding: var(--workspace-card-padding);
 }
 
@@ -17,8 +16,7 @@
   gap: 8px 16px;
 }
 .review-diagnostics-heading { justify-content: space-between; }
-.review-diagnostics-heading p,
-.desk-guard-summary p {
+.review-diagnostics-heading p {
   margin: 4px 0 0;
   color: var(--text-secondary);
   font-size: 12px;
@@ -41,14 +39,13 @@
   overflow-wrap: anywhere;
 }
 
-.desk-guard-summary {
+.desk-risk-footer {
   display: flex;
   flex-flow: row wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px 16px;
+  gap: 10px 16px;
 }
-.desk-guard-summary > div { min-width: 0; }
 .desk-guard-actions { gap: 8px; }
 
 @media (max-width: 640px) {

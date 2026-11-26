@@ -20,7 +20,6 @@ import { canFallbackToUsdWorkspace, formatPilotAmount } from '../utils/fundedNex
 import type { PilotTelemetryView } from '../utils/fundedNextPilot';
 import type { AnyLivePositionInput, LiveTelemetryPoint } from '../utils/liveTelemetryBuffer';
 import { LivePositionMonitorCard, type LiveMonitorControlState } from './LivePositionMonitorCard';
-import { NewsBlackoutRadar } from './NewsBlackoutRadar';
 import {
   buildMonthlyConsistencyCalendar,
   buildSevenDayConsistencyCalendar,
@@ -107,8 +106,6 @@ interface AnalyticsSectionProps {
   livePositions?: readonly AnyLivePositionInput[];
   telemetrySeries?: readonly LiveTelemetryPoint[];
   liveMonitor?: LiveMonitorControlState;
-  propFirmId?: string;
-  dailyDrawdownHeadroom: string;
   onOpenRules: () => void;
   onOpenAutopsy: () => void;
   posture?: {
@@ -150,8 +147,6 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
   livePositions,
   telemetrySeries,
   liveMonitor,
-  propFirmId,
-  dailyDrawdownHeadroom,
   onOpenRules,
   onOpenAutopsy,
   posture,
@@ -602,14 +597,7 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
   const circumference = Math.PI * radius; // ~138.23
   const winArcLength =
     totalTrades > 0 ? (winCount / totalTrades) * circumference : 0;
-  const guardSummary = (
-    <NewsBlackoutRadar
-      lang={lang}
-      firmId={propFirmId}
-      onOpenRules={onOpenRules}
-      summary={{ headroom: dailyDrawdownHeadroom, onOpenAutopsy }}
-    />
-  );
+  const liveConnected = Boolean(liveMonitor?.connected);
 
   return (
     <section id="sec-accounts" className="fx-analysis-root fx-workstation" aria-labelledby="analysis-overview-title">
@@ -624,7 +612,6 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
             {text('Manage accounts', 'จัดการบัญชี')}
           </button>
         </div>
-        {activeView === 'overview' && guardSummary}
       </>) : <>
       {activeView === 'overview' && <>
       {liveMonitor && (
@@ -640,19 +627,14 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
       )}
 
       <div className="fx-kpi-row-4 desk-kpi-band analysis-overview-kpis" role="group" aria-label={text('Portfolio metrics', 'ตัวชี้วัดพอร์ต')}>
-        <div className="fx-stat-card">
-          <div className="fx-stat-label">{copy.balance}</div>
-          <div className="fx-stat-val mono sensitive-val">
-            {isPilot ? pilotBalanceText : bridge?.balance != null ? formatPilotAmount(bridge.balance, bridge.currency) : fmtUSD(acc.balance)}
+        {!liveConnected && (
+          <div className="fx-stat-card">
+            <div className="fx-stat-label">{copy.balance}</div>
+            <div className="fx-stat-val mono sensitive-val">
+              {isPilot ? pilotBalanceText : fmtUSD(acc.balance)}
+            </div>
           </div>
-        </div>
-
-        <div className="fx-stat-card">
-          <div className="fx-stat-label">{copy.equity}</div>
-          <div className="fx-stat-val mono sensitive-val">
-            {isPilot ? pilotEquityText : bridge?.equity != null ? formatPilotAmount(bridge.equity, bridge.currency) : fmtUSD(posture?.equityUsd ?? acc.balance)}
-          </div>
-        </div>
+        )}
 
         <div className="fx-stat-card">
           <div className="fx-stat-label">{copy.growth}</div>
@@ -662,7 +644,7 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
         </div>
 
         <div className="fx-stat-card">
-          <div className="fx-stat-label">{copy.profit}</div>
+          <div className="fx-stat-label">{liveConnected ? text('Realized P&L', 'กำไรปิดดีลแล้ว') : copy.profit}</div>
           <div
             className="fx-stat-val mono sensitive-val"
             data-negative={(displayProfit ?? 0) < 0}
@@ -671,9 +653,30 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
             {isPilot ? pilotProfitText : fmtUSD(acc.profit, true)}
           </div>
         </div>
+
+        <div className="fx-stat-card">
+          <div className="fx-stat-label">{text('Win rate', 'อัตราชนะ')}</div>
+          <div className="fx-stat-val mono">
+            {totalTrades > 0 ? `${winRatio.toFixed(1)}%` : '—'}
+          </div>
+          <div className="fx-stat-sub mono">
+            {totalTrades > 0 ? `${winCount}W / ${lossCount}L · ${tradeCountLabel(totalTrades)}` : text('No closed trades', 'ยังไม่มีรายการปิด')}
+          </div>
+        </div>
+
+        {liveConnected && (
+          <div className="fx-stat-card">
+            <div className="fx-stat-label">{text('Profit factor', 'อัตราส่วนกำไร (PF)')}</div>
+            <div className="fx-stat-val mono" data-positive={profitFactor >= 1.2} data-negative={totalTrades > 0 && profitFactor < 1}>
+              {totalTrades > 0 ? profitFactor.toFixed(2) : '—'}
+            </div>
+            <div className="fx-stat-sub mono">
+              {posture?.avgRMultiple != null ? `${text('Avg.', 'เฉลี่ย')} ${posture.avgRMultiple}R` : text('Closed ledger', 'จากสมุดเทรด')}
+            </div>
+          </div>
+        )}
       </div>
 
-      {guardSummary}
       <div className="analysis-overview-grid">
         <section className="card analysis-overview-main" aria-label={text('Portfolio overview insight', 'มุมมองหลักของพอร์ต')}>
           {portTrades.length > 0 ? (
@@ -808,13 +811,9 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
             </header>
             <div className="posture-grid">
               <div className="posture-cell">
-                <small>{text('Daily loss buffer', 'วงเงินขาดทุนรายวันที่เหลือ')}</small>
-                <strong className="mono sensitive-val" data-negative={posture.dailyBufferUsd != null && posture.dailyBufferUsd <= 0}>
-                  {posture.dailyBufferUsd == null ? '—' : fmtUSD(posture.dailyBufferUsd)}
-                </strong>
-                {posture.dailyLossUsedPct != null && (
-                  <small>{text('Limit used', 'ใช้วงเงินแล้ว')} <span className="mono">{posture.dailyLossUsedPct}%</span></small>
-                )}
+                <small>{text('12-Gate readiness', 'ความพร้อม 12-Gate')}</small>
+                <strong className="mono">{twelveGateInfo.passedCount} / 12</strong>
+                <small>{twelveGateInfo.isAllPassed ? text('All gates passed', 'ผ่านครบทุกด่าน') : text('Pending review', 'รอตรวจให้ครบ')}</small>
               </div>
               <div className="posture-cell">
                 <small>{text('Consistency cap', 'เพดานกำไรรายวัน')}</small>
@@ -831,24 +830,32 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
                 ))}</div>
               </div>
             </div>
-            <dl className="analysis-risk-readings">
-              <div>
-                <dt>{text('Floating P&L', 'กำไร/ขาดทุนลอยตัว')}</dt>
-                <dd className="mono sensitive-val" data-negative={Number(floatingPnl) < 0}>{floatingPnlText}</dd>
-              </div>
-              <div>
-                <dt>{text('Avg. R', 'R เฉลี่ย')}</dt>
-                <dd className="mono" data-negative={(posture.avgRMultiple ?? 0) < 0}>
-                  {posture.avgRMultiple == null ? '—' : posture.avgRMultiple + 'R'}
-                </dd>
-              </div>
-              {isPilot && (
+            <div className="desk-risk-footer">
+              <dl className="analysis-risk-readings">
                 <div>
-                  <dt>{text('Open positions', 'สถานะที่เปิดอยู่')}</dt>
-                  <dd className="mono">{pilotTelemetry?.openPositions?.length ?? '—'}</dd>
+                  <dt>{text('Avg. R', 'R เฉลี่ย')}</dt>
+                  <dd className="mono" data-negative={(posture.avgRMultiple ?? 0) < 0}>
+                    {posture.avgRMultiple == null ? '—' : posture.avgRMultiple + 'R'}
+                  </dd>
                 </div>
-              )}
-            </dl>
+                {!liveConnected && (
+                  <div>
+                    <dt>{text('Profit factor', 'อัตราส่วนกำไร')}</dt>
+                    <dd className="mono">{totalTrades > 0 ? profitFactor.toFixed(2) : '—'}</dd>
+                  </div>
+                )}
+                {isPilot && (
+                  <div>
+                    <dt>{text('Open positions', 'สถานะที่เปิดอยู่')}</dt>
+                    <dd className="mono">{pilotTelemetry?.openPositions?.length ?? '—'}</dd>
+                  </div>
+                )}
+              </dl>
+              <div className="desk-guard-actions">
+                <button type="button" className="btn xs" onClick={onOpenRules}>{text('Rules', 'กฎกองทุน')}</button>
+                <button type="button" className="btn xs" onClick={onOpenAutopsy}>{text('Autopsy', 'วิเคราะห์ย้อนหลัง')}</button>
+              </div>
+            </div>
           </section>
         )}
       </div>
