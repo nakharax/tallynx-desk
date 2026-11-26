@@ -4220,8 +4220,6 @@ export default function App() {
                 livePositions={activeLivePositions}
                 telemetrySeries={activeTelemetrySeries}
                 liveMonitor={liveMonitorState}
-                propFirmId={activeFirmId}
-                dailyDrawdownHeadroom={state.privacyMasked && shieldHeadroom !== '—' ? '••••' : shieldHeadroom}
                 onOpenRules={handleOpenPropRulesPage}
                 onOpenAutopsy={() => handleSwitchPage('sec-review-autopsy')}
                 onManageAccounts={openAccountsDrawer}
