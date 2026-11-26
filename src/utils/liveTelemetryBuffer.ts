@@ -5,6 +5,13 @@ import { CALCULATOR_CONTRACTS } from './ghrRules';
 export const LIVE_TELEMETRY_POLL_MS = 3_000;
 export const LIVE_TELEMETRY_MAX_SAMPLES = 120; // 6 minutes @ 3s interval
 
+export function resolveNextLivePollAt(now: number, rateFloorMs?: number | null, nextSafeSyncAt?: string | null): number {
+  const serverDeadline = nextSafeSyncAt ? Date.parse(nextSafeSyncAt) : NaN;
+  const serverDelay = Number.isFinite(serverDeadline) ? serverDeadline - now
+    : rateFloorMs != null && Number.isFinite(rateFloorMs) ? rateFloorMs : 0;
+  return now + Math.max(LIVE_TELEMETRY_POLL_MS, serverDelay);
+}
+
 export type LiveTelemetryWindow = 'ALL' | '2M' | '6M';
 
 export interface LiveTelemetryPoint {

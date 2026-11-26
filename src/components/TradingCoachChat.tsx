@@ -19,7 +19,9 @@ import {
   type DeskLanguage,
 } from '../utils/deskI18n';
 import { auth } from '../services/firebase';
-import { AI_MODEL_CATALOG } from '../utils/aiProviderConfig';
+import { AI_MODEL_CATALOG, asRecord } from '../utils/aiProviderConfig';
+import { CoachStreamError, readCoachReplyStream } from '../utils/coachReplyStream';
+import { isEventStream } from '../utils/serverSentEvents';
 import { canRequestDeskAi, getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
 import { AiAndDataKeysDialogButton } from './AiAndDataKeysCard';
 import {
@@ -741,6 +743,12 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const t = useCallback((en: string, th: string) => deskText(lang, en, th), [lang]);
   const byok = useByokCredentials(currentUserUid);
   const canCloudChat = isOnline && canRequestDeskAi(byok, currentUserUid);
+  const textCredential = selectDeskAiCredential(byok);
+  const personalTextModel = textCredential && textCredential.provider !== 'platform'
+    ? textCredential.model ?? AI_MODEL_CATALOG[textCredential.provider][0] : undefined;
+  const providerLabel = textCredential?.provider === 'google' ? 'Google Gemini'
+    : textCredential?.provider === 'openrouter' ? 'OpenRouter'
+      : textCredential?.provider === 'codex_oauth' ? (byok.openAiKey ? 'OpenAI API' : 'Codex OAuth') : undefined;
   const canCloudVoice = isOnline && canRequestDeskAi(byok, currentUserUid, 'voice');
   const voiceCredential = selectDeskAiCredential(byok, 'voice');
   const voiceProvider = voiceCredential?.provider;
@@ -930,8 +938,13 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     [activeSession, persistSessionUpdate, sessions, state.activePort]
   );
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const liveTokenRequestRef = useRef<AbortController | null>(null);
+  const liveClientRef = useRef<GeminiLiveDeskClient | null>(null);
+
   const handleCreateNewSession = useCallback(
     (mode?: 'text' | 'voice' | 'live') => {
+      if (abortControllerRef.current || liveTokenRequestRef.current || liveClientRef.current) return;
       const welcome: ChatMessage = {
         id: 'W-' + Date.now(),
         role: 'model',
@@ -952,6 +965,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
+      if (abortControllerRef.current || liveTokenRequestRef.current || liveClientRef.current) return;
       const found = sessions.find((s) => s.id === sessionId);
       if (!found) return;
       setActiveSessionId(found.id);
@@ -993,7 +1007,6 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const threadContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Voice Mode State
   const [selectedVoice, setSelectedVoice] = useState<string>('Aoede');
@@ -1005,8 +1018,10 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const [recordingSec, setRecordingSec] = useState(0);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
   const wavRecorderRef = useRef<VoiceWavRecorder | null>(null);
-  const speechRecRef = useRef<{ stop: () => void } | null>(null);
+  const speechRecRef = useRef<{ stop: () => void; abort?: () => void } | null>(null);
   const ttsHandleRef = useRef<SpeechPlaybackHandle | null>(null);
+  const ttsRequestRef = useRef<AbortController | null>(null);
+  const transcribeRequestRef = useRef<AbortController | null>(null);
 
   // Live Mode State (Gemini 3.8 Live + Ephemeral Token WebSocket)
   const [liveModelTier, setLiveModelTier] = useState<'standard' | 'thinking'>('standard');
@@ -1018,7 +1033,6 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const [liveInterimModel, setLiveInterimModel] = useState('');
   const [liveTextInput, setLiveTextInput] = useState('');
   const [liveNotice, setLiveNotice] = useState<[string, string] | null>(null);
-  const liveClientRef = useRef<GeminiLiveDeskClient | null>(null);
 
   const acc = useMemo(
     () => getAccountComputed(state.accounts, state.journal, state.activePort),
@@ -1073,17 +1087,45 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   }, [liveConnState]);
 
   useEffect(() => {
+    setIsSending(false);
+    setStreamingText('');
+    setStreamingModelLabel('');
     return () => {
-      abortControllerRef.current?.abort();
-      ttsHandleRef.current?.stop();
-      speechRecRef.current?.stop();
+      const request = abortControllerRef.current;
+      abortControllerRef.current = null;
+      request?.abort();
     };
   }, [currentUserUid]);
 
-  useEffect(() => () => {
-    void liveClientRef.current?.disconnect();
-    liveClientRef.current = null;
-  }, [currentUserUid, voiceProvider, voiceKey]);
+  useEffect(() => {
+    setLiveConnState('IDLE');
+    setLiveLevel(0);
+    setLiveInterimUser('');
+    setLiveInterimModel('');
+    setIsRecordingVoice(false);
+    setIsTranscribing(false);
+    setVoiceLevel(0);
+    setSpeakingMsgId(null);
+    return () => {
+      liveTokenRequestRef.current?.abort();
+      liveTokenRequestRef.current = null;
+      transcribeRequestRef.current?.abort();
+      transcribeRequestRef.current = null;
+      ttsRequestRef.current?.abort();
+      ttsRequestRef.current = null;
+      ttsHandleRef.current?.stop();
+      ttsHandleRef.current = null;
+      const recognition = speechRecRef.current;
+      speechRecRef.current = null;
+      recognition?.abort?.();
+      const recorder = wavRecorderRef.current;
+      wavRecorderRef.current = null;
+      void recorder?.stop().catch(() => undefined);
+      const liveClient = liveClientRef.current;
+      liveClientRef.current = null;
+      void liveClient?.disconnect();
+    };
+  }, [currentUserUid, voiceProvider, voiceKey, chatMode]);
 
   const slashSuggestions = useMemo(() => filterSlashCommands(inputText), [inputText]);
 
@@ -1131,33 +1173,41 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
   const speakMessage = useCallback(
     async (msgId: string, text: string) => {
+      ttsRequestRef.current?.abort();
+      ttsRequestRef.current = null;
+      ttsHandleRef.current?.stop();
+      ttsHandleRef.current = null;
       if (speakingMsgId === msgId) {
-        ttsHandleRef.current?.stop();
+        setSpeakingMsgId(null);
+        return;
+      }
+      const controller = new AbortController();
+      ttsRequestRef.current = controller;
+      setSpeakingMsgId(msgId);
+      function finished() {
+        if (ttsRequestRef.current !== controller) return;
+        ttsRequestRef.current = null;
         ttsHandleRef.current = null;
         setSpeakingMsgId(null);
-        return;
       }
-      ttsHandleRef.current?.stop();
-      setSpeakingMsgId(msgId);
-      const requestHeaders = canCloudVoice ? await getActiveAiHeaders('voice') : undefined;
-      if (requestHeaders === null) {
-        setSpeakingMsgId(null);
-        return;
+      try {
+        const requestHeaders = canCloudVoice ? await getActiveAiHeaders('voice') : undefined;
+        if (requestHeaders === null) return finished();
+        controller.signal.throwIfAborted();
+        const handle = await speakTextWithFallback({
+          text, requestHeaders, signal: controller.signal, lang, voice: selectedVoice, onEnd: finished,
+        });
+        if (controller.signal.aborted) handle.stop();
+        else if (ttsRequestRef.current === controller) ttsHandleRef.current = handle;
+      } catch {
+        finished();
       }
-      const handle = await speakTextWithFallback({
-        text,
-        requestHeaders,
-        voice: selectedVoice,
-        onEnd: () => {
-          setSpeakingMsgId((prev) => (prev === msgId ? null : prev));
-        },
-      });
-      ttsHandleRef.current = handle;
     },
-    [canCloudVoice, getActiveAiHeaders, selectedVoice, speakingMsgId]
+    [canCloudVoice, getActiveAiHeaders, lang, selectedVoice, speakingMsgId]
   );
 
   const handleInstantLocalPlan = useCallback(() => {
+    if (abortControllerRef.current || liveTokenRequestRef.current || liveClientRef.current) return;
     setErrorBanner(null);
     const nowTime = getBangkokTimeHHMM();
     const userMsg: ChatMessage = {
@@ -1207,7 +1257,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       }
 
       const queuedSnap = [...attachments];
-      if ((!rawInput && queuedSnap.length === 0) || isSending) return;
+      if ((!rawInput && queuedSnap.length === 0) || isSending || abortControllerRef.current) return;
 
       const raw = parsedSlash
         ? parsedSlash.effectivePrompt
@@ -1292,15 +1342,19 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       setStreamingText('');
       setStreamingModelLabel('');
 
+      let partialText = '';
+      let finalModelLabel = personalTextModel ?? selectedModel;
+      const stillCurrent = () => abortControllerRef.current === controller &&
+        (auth.currentUser?.uid ?? null) === currentUserUid;
       try {
         const headers = await getActiveAiHeaders('text');
-        if (!headers) return;
+        if (!headers || !stillCurrent()) return;
+        controller.signal.throwIfAborted();
         const deskContext = `${t('Reply in English.', 'ตอบเป็นภาษาไทย')}\n\n${buildTradingCoachContext(state, pageSnapshot)}`;
-        const firstImage = queuedSnap.find((a) => a.mimeType.startsWith('image/'));
 
         const response = await fetch('/api/chat', {
           method: 'POST',
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(70_000)]),
           headers,
           redirect: 'error',
           body: JSON.stringify({
@@ -1311,8 +1365,6 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
             liveChartContext: activeLiveTelemetry
               ? formatDualLiveChartTelemetryForPrompt(activeLiveTelemetry, activeStructureTelemetry)
               : undefined,
-            chartImageBase64: firstImage?.base64,
-            chartImageMimeType: firstImage?.mimeType,
             attachments: queuedSnap.map((a) => ({
               name: a.name,
               mimeType: a.mimeType,
@@ -1323,85 +1375,41 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           }),
         });
 
-        const contentType = response.headers.get('content-type') || '';
-        if (response.ok && contentType.includes('text/event-stream') && response.body) {
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          let fullText = '';
-          let finalModelLabel = String(selectedModel);
+        if (!stillCurrent()) return;
+        controller.signal.throwIfAborted();
+        if (response.ok && isEventStream(response)) {
+          if (!response.body) throw new CoachStreamError('AI_STREAM_INCOMPLETE');
+          let route: Record<string, unknown> | undefined;
           let finalSources: ChatMessageSource[] = [];
-          let finalRoutedBy: ChatMessage['routedBy'] = 'decision-1';
-          let finalTier: string | undefined;
-          let streamError: string | null = null;
-
-          const processEventBlock = (block: string) => {
-            const lines = block.split('\n');
-            let eventName = 'message';
-            const dataLines: string[] = [];
-            for (const line of lines) {
-              if (line.startsWith('event:')) eventName = line.slice(6).trim();
-              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
-            }
-            if (dataLines.length === 0) return;
-            try {
-              const payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
-              if (eventName === 'route') {
-                const routerObj = payload.router as Record<string, unknown> | undefined;
-                const routedPrefix = routerObj?.routedBy === 'decision-1' ? 'decision-1 → ' : '';
-                const modelName = String(payload.model || selectedModel);
-                finalModelLabel = `${routedPrefix}${modelName}${payload.failoverUsed ? ' (failover)' : ''}${
-                  payload.webSearchUsed ? ' · Web' : ''
-                }`;
-                finalRoutedBy =
-                  routerObj?.routedBy === 'decision-1' || routerObj?.routedBy === 'heuristic' || routerObj?.routedBy === 'manual'
-                    ? routerObj.routedBy
-                    : 'decision-1';
-                finalTier = routerObj?.routeTier ? String(routerObj.routeTier) : undefined;
-                setStreamingModelLabel(finalModelLabel);
-              } else if (eventName === 'delta') {
-                const piece = String(payload.text || '');
-                if (piece) {
-                  fullText += piece;
-                  setStreamingText(fullText);
-                }
-              } else if (eventName === 'sources') {
-                if (Array.isArray(payload.sources)) {
-                  finalSources = payload.sources as ChatMessageSource[];
-                }
-              } else if (eventName === 'done') {
-                if (typeof payload.reply === 'string' && payload.reply.trim()) {
-                  fullText = payload.reply;
-                }
-                if (Array.isArray(payload.sources)) {
-                  finalSources = payload.sources as ChatMessageSource[];
-                }
-              } else if (eventName === 'error') {
-                streamError = payload.code === 'BYOK_REQUIRED' ? byokRequiredCopy
-                  : String(payload.error || t("An error interrupted the response stream.", 'เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ'));
-              }
-            } catch {
-              // ignore malformed SSE chunk
-            }
+          const modelLabel = (payload: Record<string, unknown>) => {
+            const router = asRecord(payload.router);
+            const model = typeof payload.model === 'string' ? payload.model : personalTextModel ?? selectedModel;
+            return `${router?.routedBy === 'decision-1' ? 'decision-1 → ' : ''}${model}${payload.failoverUsed ? ' (failover)' : ''}${payload.webSearchUsed ? ' · Web' : ''}`;
           };
-
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const blocks = buffer.split('\n\n');
-            buffer = blocks.pop() || '';
-            for (const block of blocks) {
-              if (block.trim()) processEventBlock(block);
+          const done = await readCoachReplyStream(response.body, (name, payload) => {
+            if (!stillCurrent() || controller.signal.aborted) return;
+            if (name === 'route') {
+              route = payload;
+              finalModelLabel = modelLabel(payload);
+              setStreamingModelLabel(finalModelLabel);
+            } else if (name === 'delta' && typeof payload.text === 'string') {
+              partialText += payload.text;
+              setStreamingText(partialText);
+            } else if (name === 'sources' && Array.isArray(payload.sources)) {
+              finalSources = payload.sources as ChatMessageSource[];
             }
-          }
-          if (buffer.trim()) processEventBlock(buffer);
+          });
+          if (!stillCurrent()) return;
+          controller.signal.throwIfAborted();
 
-          if (streamError && !fullText.trim()) {
-            throw new Error(streamError);
-          }
-
-          const finalReplyText = fullText.trim() || t("A response could not be generated.", 'ไม่สามารถสร้างคำตอบได้ในขณะนี้');
+          finalModelLabel = modelLabel({ ...route, ...done });
+          const router = asRecord(done.router ?? route?.router);
+          const routedBy = router?.routedBy;
+          const finalRoutedBy = routedBy === 'decision-1' || routedBy === 'heuristic' || routedBy === 'manual'
+            ? routedBy : undefined;
+          const finalTier = typeof router?.routeTier === 'string' ? router.routeTier : undefined;
+          if (Array.isArray(done.sources)) finalSources = done.sources as ChatMessageSource[];
+          const finalReplyText = done.reply.trim();
           const modelReply: ChatMessage = {
             id: 'M-' + (Date.now() + 1),
             role: 'model',
@@ -1427,7 +1435,9 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           return;
         }
 
-        const data = await response.json();
+        const data = await response.json().catch(() => null);
+        if (!stillCurrent()) return;
+        controller.signal.throwIfAborted();
         if (!response.ok) {
           const errMsg = data?.code === 'BYOK_REQUIRED' ? byokRequiredCopy
             : data?.error || t("The chat server is currently unavailable.", 'ไม่สามารถติดต่อเซิร์ฟเวอร์แชทได้ในขณะนี้');
@@ -1447,6 +1457,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           };
           commitActiveSessionMessages([...nextHistory, fallbackReply], { lastModel: fallbackReply.model });
         } else {
+          if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new CoachStreamError('AI_STREAM_INCOMPLETE');
           const routedModelLabel = data.model
             ? `${data.router?.routedBy === 'decision-1' ? 'decision-1 → ' : ''}${data.model}${
                 data.failoverUsed ? ' (failover)' : ''
@@ -1476,19 +1487,22 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           }
         }
       } catch (err) {
-        if ((err as { name?: string })?.name === 'AbortError') {
-          if (streamingText.trim()) {
+        if (!stillCurrent()) return;
+        if (controller.signal.aborted) {
+          if (partialText.trim()) {
             const partialReply: ChatMessage = {
               id: 'M-' + (Date.now() + 1),
               role: 'model',
-              text: `${streamingText.trim()}\n\n*(หยุดการสร้างคำตอบโดยผู้ใช้)*`,
+              text: `${partialText.trim()}\n\n*${t('Stopped by you', 'หยุดการสร้างคำตอบโดยผู้ใช้')}*`,
               timestamp: getBangkokTimeHHMM(),
-              model: streamingModelLabel || 'Stopped',
+              model: finalModelLabel,
             };
             commitActiveSessionMessages([...nextHistory, partialReply]);
           }
         } else {
-          const msg = err instanceof Error ? err.message : t("Connection interrupted.", 'การเชื่อมต่อขัดข้อง');
+          const msg = err instanceof CoachStreamError && err.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+            : err instanceof CoachStreamError && err.code === 'AI_STREAM_INCOMPLETE' ? t('The response stream was interrupted.', 'การเชื่อมต่อคำตอบขัดข้อง')
+              : formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Connection interrupted.', 'การเชื่อมต่อขัดข้อง'));
           setErrorBanner(t(`${/\p{Script=Thai}/u.test(msg) ? 'Connection interrupted.' : msg} Using workspace data.`, `${msg} ใช้ข้อมูลพอร์ตในเครื่อง`));
           const fallbackText = `${generateLocalTacticalPlan(state, pageSnapshot)}${buildChartSupplement()}`;
           const fallbackReply: ChatMessage = {
@@ -1503,10 +1517,12 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           commitActiveSessionMessages([...nextHistory, fallbackReply], { lastModel: fallbackReply.model });
         }
       } finally {
-        setIsSending(false);
-        setStreamingText('');
-        setStreamingModelLabel('');
-        abortControllerRef.current = null;
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+          setIsSending(false);
+          setStreamingText('');
+          setStreamingModelLabel('');
+        }
       }
     },
     [
@@ -1531,14 +1547,15 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       selectedModel,
       speakMessage,
       state,
-      streamingModelLabel,
-      streamingText,
+      currentUserUid,
+      personalTextModel,
       t,
       voiceAutoTts,
     ]
   );
 
   const handleAnalyzeActivePage = async () => {
+    if (abortControllerRef.current || liveTokenRequestRef.current || liveClientRef.current) return;
     if (isSending) return;
     if (!pageSnapshot) {
       handleInstantLocalPlan();
@@ -1597,20 +1614,24 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
   // Voice Mode: Mic Dictation (Cloud gemini-3.5-transcribe when PRO, Web Speech API fallback when Guest/Offline)
   const toggleVoiceRecording = async () => {
+    if (transcribeRequestRef.current || ((wavRecorderRef.current || speechRecRef.current) && !isRecordingVoice)) return;
     setErrorBanner(null);
     if (isRecordingVoice) {
       setIsRecordingVoice(false);
       setVoiceLevel(0);
       if (speechRecRef.current) {
         speechRecRef.current.stop();
-        speechRecRef.current = null;
         return;
       }
       if (wavRecorderRef.current) {
+        const recorder = wavRecorderRef.current;
+        wavRecorderRef.current = null;
+        const controller = new AbortController();
+        transcribeRequestRef.current = controller;
         setIsTranscribing(true);
         try {
-          const { wavBase64, mimeType, durationMs } = await wavRecorderRef.current.stop();
-          wavRecorderRef.current = null;
+          const { wavBase64, mimeType, durationMs } = await recorder.stop();
+          controller.signal.throwIfAborted();
           if (durationMs < 350) {
             setErrorBanner(t("Recording is too short. Record again.", 'เสียงที่บันทึกสั้นเกินไป ลองบันทึกใหม่'));
             return;
@@ -1621,16 +1642,19 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           }
           const headers = await getActiveAiHeaders('voice');
           if (!headers) return;
+          controller.signal.throwIfAborted();
           const resp = await fetch('/api/ai/transcribe', {
             method: 'POST',
             headers,
             redirect: 'error',
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(40_000)]),
             body: JSON.stringify({ audioBase64: wavBase64, mimeType }),
           });
-          const data = (await resp.json()) as { text?: string; error?: string; code?: string };
-          if (!resp.ok || !data.text?.trim()) {
-            setErrorBanner(data.code === 'BYOK_REQUIRED' ? byokRequiredCopy
-              : formatCoachError(data.error, lang, t('Transcription failed. Please try speaking again.', 'ถอดความไม่สำเร็จ กรุณาลองพูดใหม่อีกครั้ง')));
+          const data = asRecord(await resp.json().catch(() => null));
+          controller.signal.throwIfAborted();
+          if (!resp.ok || typeof data?.text !== 'string' || !data.text.trim()) {
+            setErrorBanner(data?.code === 'BYOK_REQUIRED' ? byokRequiredCopy
+              : formatCoachError(typeof data?.error === 'string' ? data.error : undefined, lang, t('Transcription failed. Please try speaking again.', 'ถอดความไม่สำเร็จ กรุณาลองพูดใหม่อีกครั้ง')));
             return;
           }
           const spokenText = data.text.trim();
@@ -1640,22 +1664,27 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
             setInputText((prev) => (prev ? `${prev} ${spokenText}` : spokenText));
           }
         } catch (err) {
-          setErrorBanner(formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Transcription is currently unavailable.', 'ไม่สามารถถอดเสียงได้ในขณะนี้')));
+          if (!controller.signal.aborted) setErrorBanner(formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Transcription is currently unavailable.', 'ไม่สามารถถอดเสียงได้ในขณะนี้')));
         } finally {
-          setIsTranscribing(false);
+          if (transcribeRequestRef.current === controller) {
+            transcribeRequestRef.current = null;
+            setIsTranscribing(false);
+          }
         }
       }
       return;
     }
 
     if (canCloudVoice) {
+      const rec = new VoiceWavRecorder();
+      wavRecorderRef.current = rec;
       try {
-        const rec = new VoiceWavRecorder();
-        wavRecorderRef.current = rec;
         await rec.start((lvl) => setVoiceLevel(lvl));
-        setIsRecordingVoice(true);
+        if (wavRecorderRef.current === rec) setIsRecordingVoice(true);
         return;
       } catch (err) {
+        await rec.stop().catch(() => undefined);
+        if (wavRecorderRef.current !== rec) return;
         wavRecorderRef.current = null;
         setErrorBanner(formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Unable to access the microphone.', 'ไม่สามารถเปิดไมโครโฟนได้')));
         return;
@@ -1680,11 +1709,13 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       onend: () => void;
       start: () => void;
       stop: () => void;
+      abort: () => void;
     };
     recognition.lang = lang === 'th' ? 'th-TH' : 'en-US';
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
     recognition.onresult = (ev) => {
+      if (speechRecRef.current !== recognition) return;
       const text = ev.results?.[0]?.[0]?.transcript?.trim();
       if (text) {
         if (voiceAutoSend) {
@@ -1694,22 +1725,27 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
         }
       }
     };
-    recognition.onerror = () => {
+    function finishRecognition() {
+      if (speechRecRef.current !== recognition) return;
       setIsRecordingVoice(false);
       speechRecRef.current = null;
-    };
-    recognition.onend = () => {
-      setIsRecordingVoice(false);
-      speechRecRef.current = null;
-    };
+    }
+    recognition.onerror = finishRecognition;
+    recognition.onend = finishRecognition;
     speechRecRef.current = recognition;
-    setIsRecordingVoice(true);
-    recognition.start();
+    try {
+      recognition.start();
+      setIsRecordingVoice(true);
+    } catch {
+      finishRecognition();
+      setErrorBanner(t('Unable to access the microphone.', 'ไม่สามารถเปิดไมโครโฟนได้'));
+    }
   };
 
   // Live Mode: Gemini 3.8 Live WebSocket Session via Ephemeral Token
   const liveTranscriptMessagesRef = useRef<ChatMessage[]>([]);
   const startLiveSession = async () => {
+    if (liveTokenRequestRef.current || liveClientRef.current) return;
     setErrorBanner(null);
     setLiveNotice(null);
     if (!canCloudVoice) {
@@ -1722,6 +1758,8 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     setLiveInterimModel('');
     setLiveMuted(false);
     setLiveConnState('CONNECTING');
+    const controller = new AbortController();
+    liveTokenRequestRef.current = controller;
 
     try {
       const headers = await getActiveAiHeaders('voice');
@@ -1729,6 +1767,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
         setLiveConnState('IDLE');
         return;
       }
+      controller.signal.throwIfAborted();
       const deskContext = buildTradingCoachContext(state, pageSnapshot);
       const liveChartContext = activeLiveTelemetry
         ? formatDualLiveChartTelemetryForPrompt(activeLiveTelemetry, activeStructureTelemetry)
@@ -1736,6 +1775,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
       const resp = await fetch('/api/ai/live-token', {
         method: 'POST',
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]),
         headers,
         redirect: 'error',
         body: JSON.stringify({
@@ -1752,10 +1792,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
         error?: string;
         code?: string;
       };
-      if ((auth.currentUser?.uid ?? null) !== currentUserUid) {
-        setLiveConnState('IDLE');
-        return;
-      }
+      if (controller.signal.aborted || (auth.currentUser?.uid ?? null) !== currentUserUid) return;
       if (!resp.ok || !data.token || !data.model) {
         setLiveConnState('ERROR');
         setErrorBanner(data.code === 'BYOK_REQUIRED' ? byokRequiredCopy
@@ -1769,11 +1806,14 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
       await client.connect({
         token: data.token,
         model: data.model,
-        apiVersion: data.apiVersion === 'v1beta' ? 'v1beta' : 'v1alpha',
-        voice: selectedVoice,
-        enableThinking: data.model === GEMINI_38_LIVE_THINKING,
+        apiVersion: data.apiVersion === 'v1alpha' ? 'v1alpha' : 'v1beta',
         onStateChange: (nextState) => {
+          if (liveClientRef.current !== client) return;
           setLiveConnState(nextState);
+          if (nextState === 'IDLE' || nextState === 'ERROR') {
+            liveClientRef.current = null;
+            liveTokenRequestRef.current = null;
+          }
         },
         onLevel: (lvl) => setLiveLevel(lvl),
         onGoAway: (timeLeft) => {
@@ -1813,14 +1853,21 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
         },
       });
     } catch (err) {
-      setLiveConnState('ERROR');
-      setErrorBanner(formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Could not connect to Gemini Live.', 'เชื่อมต่อ Gemini Live ล้มเหลว')));
+      if (!controller.signal.aborted && (auth.currentUser?.uid ?? null) === currentUserUid) {
+        setLiveConnState('ERROR');
+        setErrorBanner(formatCoachError(err instanceof Error ? err.message : undefined, lang, t('Could not connect to Gemini Live.', 'เชื่อมต่อ Gemini Live ล้มเหลว')));
+      }
+    } finally {
+      if (liveTokenRequestRef.current === controller) liveTokenRequestRef.current = null;
     }
   };
 
   const stopLiveSession = async () => {
-    await liveClientRef.current?.disconnect();
+    liveTokenRequestRef.current?.abort();
+    liveTokenRequestRef.current = null;
+    const client = liveClientRef.current;
     liveClientRef.current = null;
+    void client?.disconnect();
     setLiveConnState('IDLE');
     setLiveMuted(false);
     setLiveLevel(0);
@@ -1828,6 +1875,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
     setLiveInterimModel('');
   };
 
+  const sessionBusy = isSending || (liveConnState !== 'IDLE' && liveConnState !== 'ERROR');
   const renderSessionsDrawer = () =>
     showSessionsDrawer && (
       <div className="coach-sessions-drawer" role="dialog" aria-label={t("Recent chats", "ประวัติแชทล่าสุด")}>
@@ -1837,6 +1885,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
             <button
               type="button"
               className="btn xs primary"
+              disabled={sessionBusy}
               onClick={() => handleCreateNewSession(chatMode)}
             >
               {t("+ New Chat", "+ แชทใหม่")}
@@ -1878,6 +1927,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                     <form
                       onSubmit={(e) => {
                         e.preventDefault();
+                        if (abortControllerRef.current || liveTokenRequestRef.current || liveClientRef.current) return;
                         persistSessionUpdate(renameSession(sessions, sess.id, renameDraft), activeSession?.id);
                         setRenamingSessionId(null);
                       }}
@@ -1890,7 +1940,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                         style={{ flex: 1, fontSize: '11px', padding: '2px 6px' }}
                         autoFocus
                       />
-                      <button type="submit" className="btn xs primary">
+                      <button type="submit" className="btn xs primary" disabled={sessionBusy}>
                         {t('Save', 'บันทึก')}
                       </button>
                     </form>
@@ -1899,6 +1949,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                       <button
                         type="button"
                         className="coach-session-select"
+                        disabled={sessionBusy}
                         onClick={() => handleSelectSession(sess.id)}
                       >
                         <div className="coach-session-title">
@@ -1915,6 +1966,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                         <button
                           type="button"
                           className="btn xs"
+                          disabled={sessionBusy}
                           title={sess.pinned ? t('Unpin chat', 'ถอนปักหมุด') : t('Pin chat', 'ปักหมุด')}
                           onClick={() =>
                             persistSessionUpdate(togglePinSession(sessions, sess.id), activeSession?.id)
@@ -1925,6 +1977,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                         <button
                           type="button"
                           className="btn xs"
+                          disabled={sessionBusy}
                           title={t("Rename chat", "เปลี่ยนชื่อ")}
                           onClick={() => {
                             setRenamingSessionId(sess.id);
@@ -1936,6 +1989,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                         <button
                           type="button"
                           className="btn xs rose"
+                          disabled={sessionBusy}
                           title={t("Delete chat", "ลบแชท")}
                           onClick={() => {
                             const remaining = deleteSessionById(sessions, sess.id);
@@ -2375,7 +2429,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
               <div className="coach-bubble-meta">
                 <span className="coach-bubble-author">AI Live Desk</span>
                 <span>
-                  {' · '}{streamingModelLabel || t('Decision-1 is choosing a model…', 'Decision-1 กำลังเลือกโมเดล…')}
+                  {' · '}{streamingModelLabel || personalTextModel || t('Decision-1 is choosing a model…', 'Decision-1 กำลังเลือกโมเดล…')}
                 </span>
               </div>
               <div className="coach-md-body" style={{ fontSize: compactDock ? '12px' : '13px', lineHeight: 1.5 }}>
@@ -2516,7 +2570,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
           <div className="coach-input-actions">
             {byok.provider ? (
-              <span className="mono">{byok.models[byok.provider] ?? AI_MODEL_CATALOG[byok.provider][0]}</span>
+              <span className="coach-provider-label mono">{providerLabel ?? 'Platform Gemini'} · {byok.models[byok.provider] ?? personalTextModel ?? selectedModel}</span>
             ) : <select
               aria-label={t("Choose a free-tier Google API model", "เลือกโมเดล Google API Free Tier")}
               className="coach-model-select"
@@ -2717,6 +2771,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
             <button
               type="button"
               className="coach-ghost-button"
+              disabled={sessionBusy}
               onClick={() => {
                 onResetChat();
                 commitActiveSessionMessages([

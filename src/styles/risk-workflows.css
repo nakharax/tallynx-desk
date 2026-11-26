@@ -4,7 +4,7 @@
   min-width: 0;
   max-width: 100%;
   gap: 14px;
-  border-block-start: 3px solid var(--accent);
+  border: 1px solid var(--border-color);
   padding: clamp(12px, 2vw, 18px);
 }
 
@@ -182,7 +182,7 @@
 .preflight-metric span { flex: none; color: var(--text-primary); font-weight: 650; }
 .news-radar {
   gap: 6px;
-  border-inline-start: 3px solid var(--accent);
+  border: 1px solid var(--border-color);
   padding: 11px 14px;
 }
 
@@ -276,7 +276,7 @@ button.news-status-chip:hover,
   min-width: 0;
   max-width: 100%;
   padding: clamp(12px, 2vw, 18px);
-  border-block-start: 3px solid #0752E8;
+  border: 1px solid var(--border-color);
   background: var(--bg-surface-solid);
 }
 
@@ -1137,6 +1137,7 @@ html[data-theme="obsidian"] #tv-chart-root > .comex-bridge {
   --risk-sv-up: var(--emerald-ink);
   --risk-sv-down: var(--rose-ink);
   flex: 0 0 auto;
+  min-height: auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   container-type: inline-size;
@@ -1144,7 +1145,7 @@ html[data-theme="obsidian"] #tv-chart-root > .comex-bridge {
   min-width: 0;
   max-width: 100%;
   padding: clamp(10px, 2vw, 18px);
-  border-block-start: 3px solid var(--accent);
+  border: 1px solid var(--border-color);
   background: var(--bg-surface-solid);
 }
 
@@ -1414,7 +1415,6 @@ html[data-theme="obsidian"] #tv-chart-root > .comex-bridge {
 
 .risk-sv-report-grid .risk-sv-brief {
   grid-column: 1 / -1;
-  border-inline-start: 2px solid var(--accent);
 }
 
 .risk-sv-report-grid h3,

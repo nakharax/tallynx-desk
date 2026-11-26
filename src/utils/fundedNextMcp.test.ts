@@ -571,7 +571,6 @@ test('connectFundedNextPilot falls back to a fresh connection when stale connect
 test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden tabs cleanly', async t => {
   const {
     LIVE_TELEMETRY_POLL_MS,
-    hasInFlightTelemetryRequest,
     readLiveBridgeTelemetry,
     readPilotLiveSnapshot,
   } = await import('./fundedNextPilot.js');
@@ -672,13 +671,11 @@ test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden
   const c2 = new AbortController();
   const p1 = readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', c1.signal);
   const p2 = readPilotLiveSnapshot(async () => 'tok-1', 'acc-live', c2.signal);
-  assert.equal(hasInFlightTelemetryRequest('fn-pilot:acc-live:live'), true);
   releaseSnapshot();
   const [r1, r2] = await Promise.all([p1, p2]);
   assert.equal(snapshotCalls, 1);
   assert.equal(r1?.liveTelemetry?.equity, 6180);
   assert.equal(r2?.liveTelemetry?.marginLevelPct, 5150);
-  assert.equal(hasInFlightTelemetryRequest('fn-pilot:acc-live:live'), false);
 
   const bridge = await readLiveBridgeTelemetry({ tredynApiKey: 'test-mock-key-1234' });
   assert.equal(bridge?.live.equity, 10155);
@@ -694,4 +691,31 @@ test('readPilotLiveSnapshot deduplicates concurrent 3s requests and skips hidden
     if (origDoc === undefined) delete (globalThis as { document?: unknown }).document;
     else (globalThis as { document?: unknown }).document = origDoc;
   }
+});
+
+test('live account reads isolate identities and keep a shared request for remaining subscribers', async t => {
+  const snapshots: string[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
+    const token = new Headers(init?.headers).get('authorization') ?? '';
+    if (url.includes('/executions')) return Response.json({ executions: [], nextCursor: null });
+    snapshots.push(token);
+    await pending;
+    init?.signal?.throwIfAborted();
+    return Response.json({ snapshot: { balance: token === 'Bearer first' ? '100' : '200' } });
+  });
+  const cancelled = new AbortController();
+  const survivor = new AbortController();
+  const first = readPilotAccount(async () => 'first', 'shared-id', cancelled.signal, { live: true });
+  const second = readPilotAccount(async () => 'first', 'shared-id', survivor.signal, { live: true });
+  const third = readPilotAccount(async () => 'second', 'shared-id', survivor.signal, { live: true });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  cancelled.abort();
+  const rejected = assert.rejects(first, { name: 'AbortError' });
+  release();
+  const [remaining, other] = await Promise.all([second, third, rejected]);
+  assert.equal(remaining.snapshot?.balance, '100');
+  assert.equal(other.snapshot?.balance, '200');
+  assert.deepEqual(snapshots.sort(), ['Bearer first', 'Bearer second']);
 });

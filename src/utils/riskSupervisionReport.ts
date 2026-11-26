@@ -292,3 +292,24 @@ export function sanitizeAiRiskSupervisionReport(
   }
   return clean;
 }
+import { normalizeAiModel } from './aiProviderConfig.js';
+
+export function readRiskSupervisionResponse(status: number, input: unknown, baseline: AiRiskSupervisionReport): AiRiskSupervisionReport {
+  const payload = asRecord(input);
+  const report = asRecord(payload?.deterministicReport ?? payload?.report);
+  const fallback = (fallbackReason: RiskSupervisionFallbackReason): AiRiskSupervisionReport => ({ ...baseline, fallbackReason });
+  if (status === 401) return fallback('AUTH_REQUIRED');
+  if (status === 403 && payload?.code === 'BYOK_REQUIRED') return fallback('BYOK_REQUIRED');
+  const reason = RISK_SUPERVISION_FALLBACK_REASONS.find(value => value === payload?.fallbackReason);
+  if (payload?.fallbackUsed === true && reason) return fallback(reason);
+  if (status !== 200 || payload?.ok !== true || payload?.fallbackUsed !== false) return fallback('REQUEST_UNAVAILABLE');
+  if (!report || report.symbol !== baseline.symbol || report.timeframe !== baseline.timeframe || report.lang !== baseline.lang) {
+    return fallback('AI_REPORT_INVALID');
+  }
+  const source = report.source;
+  if (source !== 'gemini' && source !== 'openrouter' && source !== 'codex_oauth') return fallback('AI_REPORT_INVALID');
+  const model = normalizeAiModel(source === 'gemini' ? 'google' : source, report.model);
+  const generatedAt = typeof report.generatedAt === 'string' && Number.isFinite(Date.parse(report.generatedAt))
+    ? report.generatedAt : baseline.generatedAt;
+  return (model && sanitizeAiRiskSupervisionReport(report, { ...baseline, generatedAt }, model, source)) || fallback('AI_REPORT_INVALID');
+}

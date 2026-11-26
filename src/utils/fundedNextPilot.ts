@@ -136,7 +136,7 @@ export function isTelemetryTabVisible(): boolean {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
 }
 
-const inFlightTelemetryRequests = new Map<string, Promise<unknown>>();
+const inFlightTelemetryRequests = new Map<string, { controller: AbortController; promise: Promise<unknown>; subscribers: number }>();
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
@@ -165,26 +165,29 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
  */
 export function runDeduplicatedTelemetryRequest<T>(
   key: string,
-  work: () => Promise<T>,
-  signal?: AbortSignal
+  work: (signal: AbortSignal) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  let shared = inFlightTelemetryRequests.get(key) as Promise<T> | undefined;
-  if (!shared) {
-    shared = work().finally(() => {
-      if (inFlightTelemetryRequests.get(key) === shared) {
-        inFlightTelemetryRequests.delete(key);
-      }
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  let flight = inFlightTelemetryRequests.get(key);
+  if (!flight) {
+    const controller = new AbortController();
+    const requestSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]);
+    const promise = Promise.resolve().then(() => work(requestSignal)).finally(() => {
+      if (inFlightTelemetryRequests.get(key)?.controller === controller) inFlightTelemetryRequests.delete(key);
     });
-    inFlightTelemetryRequests.set(key, shared);
+    flight = { controller, promise, subscribers: 0 };
+    inFlightTelemetryRequests.set(key, flight);
   }
-  return awaitWithAbort(shared, signal);
-}
-
-/**
- * Checks whether an account's 3-second live telemetry request is already in flight.
- */
-export function hasInFlightTelemetryRequest(key: string): boolean {
-  return inFlightTelemetryRequests.has(key);
+  const active = flight;
+  active.subscribers++;
+  return awaitWithAbort(active.promise as Promise<T>, signal).finally(() => {
+    active.subscribers--;
+    if (active.subscribers === 0 && inFlightTelemetryRequests.get(key) === active) {
+      inFlightTelemetryRequests.delete(key);
+      active.controller.abort();
+    }
+  });
 }
 
 const PILOT_SNAP_CACHE_PREFIX = 'tallynx_pilot_snap_v1';
@@ -242,8 +245,9 @@ export function saveCachedPilotSnapshot(
 }
 
 export function formatPilotAmount(value: string | number | null | undefined, currency: string | null | undefined, plus = false) {
-  if (value == null) return '—';
+  if (value == null || (typeof value === 'number' && !Number.isFinite(value))) return '—';
   const trimmed = typeof value === 'number' ? `${plus && value > 0 ? '+' : ''}${value.toFixed(2)}` : value.trim();
+  if (!trimmed || /^(?:NaN|[+-]?Infinity)$/i.test(trimmed)) return '—';
   const match = trimmed.match(/^([+-]?\d+)(\.\d+)?$/);
   const formatted = match
     ? `${match[1].replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${match[2] ?? ''}`
@@ -283,12 +287,13 @@ export async function readPilotAccount(
   options?: ReadPilotAccountOptions
 ): Promise<PilotRead> {
   const isLive = options?.live === true;
-  const dedupeKey = `fn-pilot:${id}:${isLive ? 'live' : 'std'}`;
+  signal.throwIfAborted();
+  const token = await awaitWithAbort(getToken(), signal);
+  if (!token) throw new Error('กรุณาเข้าสู่ระบบ Desk เพื่อใช้ FundedNext Pilot');
+  const dedupeKey = JSON.stringify(['fn-pilot', token, id, isLive, options?.forceExecutions === true]);
   return runDeduplicatedTelemetryRequest(
     dedupeKey,
-    async () => {
-      const token = await getToken();
-      if (!token) throw new Error('กรุณาเข้าสู่ระบบ Desk เพื่อใช้ FundedNext Pilot');
+    async requestSignal => {
       const path = `/accounts/${encodeURIComponent(id)}`;
       const snapshotQuery = isLive ? `${path}/snapshot?live=1` : `${path}/snapshot`;
       const fetchSnapshot = async (): Promise<
@@ -296,7 +301,7 @@ export async function readPilotAccount(
       > => {
         try {
           return await fetchPilot<Pick<PilotRead, 'snapshot' | 'syncStatus' | 'liveTelemetry'>>(token, snapshotQuery, {
-            signal,
+            signal: requestSignal,
           });
         } catch (error) {
           if (error instanceof FundedNextPilotError && error.httpStatus === 404 && error.syncStatus) {
@@ -312,7 +317,7 @@ export async function readPilotAccount(
         for (let pageIndex = 0; pageIndex < 25; pageIndex++) {
           const qs = new URLSearchParams({ limit: '200' });
           if (cursor) qs.set('cursor', cursor);
-          const page = await fetchPilot<PilotExecutions>(token, `${path}/executions?${qs.toString()}`, { signal });
+          const page = await fetchPilot<PilotExecutions>(token, `${path}/executions?${qs.toString()}`, { signal: requestSignal });
           for (const row of page.executions) {
             if (!seen.has(row.id)) {
               seen.add(row.id);
@@ -327,7 +332,7 @@ export async function readPilotAccount(
         return { executions: all, nextCursor: cursor ?? null };
       };
       const prev = options?.previous ?? null;
-      if (prev && !options?.forceExecutions && prev.executions.length > 0 && !prev.hasMoreExecutions) {
+      if (prev && !options?.forceExecutions && !prev.hasMoreExecutions) {
         const evidence = await fetchSnapshot();
         const snap = evidence.snapshot;
         const prevSnap = prev.snapshot;
@@ -391,8 +396,8 @@ export async function readLiveBridgeTelemetry(
     throw new Error('Missing tredyn-api-key for Live Bridge telemetry');
   }
   return runDeduplicatedTelemetryRequest(
-    `live-bridge:${apiKey}`,
-    async () => {
+    JSON.stringify(['live-bridge', apiKey, params.idToken ?? null]),
+    async requestSignal => {
       const headers: Record<string, string> = {
         Accept: 'application/json',
         'X-Tredyn-Api-Key': apiKey,
@@ -403,7 +408,7 @@ export async function readLiveBridgeTelemetry(
       const response = await fetch('/api/mt5/live-bridge/live', {
         method: 'GET',
         headers,
-        signal,
+        signal: requestSignal,
       });
       const body = (await response.json().catch(() => null)) as
         | (LiveBridgeTelemetryResponse & { error?: string; code?: string })

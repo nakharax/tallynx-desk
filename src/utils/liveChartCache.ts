@@ -47,7 +47,7 @@ export class LiveChartResponseCache {
       };
     }
 
-    const existingFlight = !options.forceRefresh ? this.inFlight.get(cacheKey) : undefined;
+    const existingFlight = this.inFlight.get(cacheKey);
     if (existingFlight) {
       try {
         const telemetry = await existingFlight;
@@ -68,8 +68,9 @@ export class LiveChartResponseCache {
       }
     }
 
-    const flightPromise = fetcher()
+    const flightPromise = Promise.resolve().then(fetcher)
       .then((telemetry) => {
+        if (this.inFlight.get(cacheKey) !== flightPromise) return telemetry;
         if (this.store.size >= this.maxEntries && !this.store.has(cacheKey)) {
           const oldestKey = this.store.keys().next().value;
           if (oldestKey) this.store.delete(oldestKey);

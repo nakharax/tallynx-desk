@@ -5,7 +5,7 @@ import express from 'express';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { type GenerateContentResponse, Modality } from '@google/genai';
+import { type GenerateContentResponse, Modality, ThinkingLevel } from '@google/genai';
 import {
   normalizeBridgePositionsToMt5Records,
   normalizeMt5TimeOffsetSetting,
@@ -17,9 +17,9 @@ import { createMallRouter, type MallSnapshotSource } from './server/mall/mallRou
 import { createRiskSuperviseRouter } from './server/ai/riskSupervise.js';
 import { createByokRouter } from './server/ai/byokRouter.js';
 import { createComexBridgeRouter } from './server/market/comexBridge.js';
-import { resolvePlatformAiPrivilege, type PrivilegeDependencies, type VerifiedAiCaller } from './server/ai/platformPrivilege.js';
+import { readFirebaseLookupCaller, resolvePlatformAiPrivilege, type PrivilegeDependencies, type VerifiedAiCaller } from './server/ai/platformPrivilege.js';
 import {
-  BYOK_REQUIRED_MESSAGE, aiUpstreamStatus, createDeskAiAccessResolver, createGoogleAiClient,
+  AiUpstreamError, BYOK_REQUIRED_MESSAGE, aiUpstreamStatus, assertCompleteGoogleReply, createDeskAiAccessResolver, createGoogleAiClient,
   isAiCredentialError, streamOrGenerateCoachReply,
 } from './server/ai/byokProvider.js';
 import {
@@ -124,19 +124,7 @@ async function verifyFirebaseBearerToken(authHeader: string | undefined, require
       signal: AbortSignal.timeout(4_000),
     });
     if (!resp.ok) return null;
-    const data = (await resp.json()) as {
-      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean; disabled?: boolean; customAttributes?: string }>;
-    };
-    const user = data.users && data.users[0];
-    if (!user || !user.localId || user.disabled || (requireVerifiedEmail && user.emailVerified !== true)) {
-      return null;
-    }
-    return {
-      uid: user.localId,
-      email: user.email || '',
-      emailVerified: user.emailVerified === true,
-      customAttributes: user.customAttributes,
-    };
+    return readFirebaseLookupCaller(await resp.json(), requireVerifiedEmail);
   } catch {
     return null;
   }
@@ -1918,6 +1906,10 @@ export function createApp() {
   }
 
   app.post('/api/chat', async (req, res) => {
+    const disconnected = new AbortController();
+    const onClose = () => disconnected.abort();
+    res.once('close', onClose);
+    const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(55_000)]);
     let isSseStarted = false;
     let usingPersonalKey = false;
     res.set('Cache-Control', 'no-store');
@@ -1945,6 +1937,7 @@ export function createApp() {
 
       const rate = await checkDistributedRateLimit(`chat:${access.rateSubject}`, 35);
       if (!rate.allowed) {
+        res.set('Retry-After', String(rate.retryAfterSec));
         res.status(429).json({
           error: `ใช้งาน AI โค้ชครบโควตาชั่วคราว (35 ครั้ง / 15 นาที) กรุณารอ ${rate.retryAfterSec} วินาที หรือใช้ปุ่มสรุปแผนจากเครื่อง`,
           code: 'RATE_LIMITED',
@@ -2054,41 +2047,36 @@ export function createApp() {
           res.status(400).json({ code: 'TEXT_ONLY_PROVIDER', error: 'Use Google Gemini for images and PDFs, or remove the attachment.' });
           return;
         }
-        const disconnected = new AbortController();
-        const onClose = () => disconnected.abort();
-        res.once('close', onClose);
         const search = connection.provider === 'google' && Boolean(enableWebSearch);
         const route = { model: connection.model, failoverUsed: false, webSearchUsed: search, router: { routedBy: 'manual' } };
-        try {
-          const reply = await streamOrGenerateCoachReply(connection, {
-            system: baseSystemInstruction + SAFE_HARBOR_REMINDER,
-            history: formattedHistory.map(item => ({
-              role: item.role === 'model' ? 'assistant' : 'user', content: item.parts[0].text,
-            })),
-            prompt: userPromptText,
-            attachments: binaryParts,
-            webSearch: search,
-          }, {
-            signal: AbortSignal.any([disconnected.signal, AbortSignal.timeout(50_000)]),
-            ...(stream === true ? { stream: { onText: (delta: string) => {
-              if (!isSseStarted) emitSse('route', route);
-              emitSse('delta', { text: delta });
-            } } } : {}),
-          });
-          if (res.destroyed) return;
-          const payload = { ...route, ...reply, timestamp: new Date().toISOString() };
-          if (stream === true) {
-            emitSse('done', payload);
-            res.end();
-          } else {
-            res.json(payload);
-          }
-        } finally {
-          res.off('close', onClose);
+        signal.throwIfAborted();
+        const reply = await streamOrGenerateCoachReply(connection, {
+          system: baseSystemInstruction + SAFE_HARBOR_REMINDER,
+          history: formattedHistory.map(item => ({
+            role: item.role === 'model' ? 'assistant' : 'user', content: item.parts[0].text,
+          })),
+          prompt: userPromptText,
+          attachments: binaryParts,
+          webSearch: search,
+        }, {
+          signal,
+          ...(stream === true ? { stream: { onText: (delta: string) => {
+            if (!isSseStarted) emitSse('route', route);
+            emitSse('delta', { text: delta });
+          } } } : {}),
+        });
+        if (res.destroyed) return;
+        const payload = { ...route, ...reply, timestamp: new Date().toISOString() };
+        if (stream === true) {
+          emitSse('done', payload);
+          res.end();
+        } else {
+          res.json(payload);
         }
         return;
       }
 
+      signal.throwIfAborted();
       const routePlan = await planModelRoute({
         prompt: message.trim(),
         hasRichContext: Boolean(safeContext || safeChartContext || attachedDocsText),
@@ -2099,6 +2087,7 @@ export function createApp() {
         decisionClient: createDecisionGenAIClient(connection.key),
       });
 
+      signal.throwIfAborted();
       const buildContentsForModel = (candidateModel: (typeof routePlan.candidateModels)[number], suffix: string) => {
         const allowPdf = modelSupportsPdf(candidateModel);
         const filteredBinary = binaryParts.filter((b) => allowPdf || b.mimeType !== 'application/pdf');
@@ -2156,12 +2145,14 @@ export function createApp() {
               model: candidateModel,
               contents,
               config: {
+                abortSignal: signal,
                 ...(systemInstruction ? { systemInstruction } : {}),
                 ...(shouldSearch ? { tools: [{ googleSearch: {} }] } : {}),
               },
             });
 
             for await (const chunk of responseStream) {
+              assertCompleteGoogleReply(chunk.candidates?.[0]?.finishReason);
               const deltaText = chunk.text || '';
               if (deltaText && !routeEmitted) {
                 routeEmitted = true;
@@ -2181,6 +2172,7 @@ export function createApp() {
               }
               if (deltaText) {
                 accumulated += deltaText;
+                if (accumulated.length > 256_000) throw new AiUpstreamError(502);
                 emitSse('delta', { text: deltaText });
               }
               for (const src of extractGroundingSources(chunk)) {
@@ -2191,31 +2183,12 @@ export function createApp() {
               }
             }
 
-            if (!routeEmitted) {
-              emitSse('route', {
-                model: candidateModel,
-                failoverUsed: i > 0,
-                webSearchUsed: shouldSearch,
-                router: {
-                  decisionModel: routePlan.decisionModel,
-                  routedBy: routePlan.routedBy,
-                  routeTier: routePlan.routeTier,
-                  confidence: routePlan.decisionConfidence,
-                  safeHarborTriggered: routePlan.asksForTradeSignal,
-                  needsWebSearch: useWebSearch,
-                },
-              });
-            }
-
-            const finalReply =
-              accumulated.trim().length > 0
-                ? accumulated
-                : 'ไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง';
+            if (!accumulated.trim()) throw new AiUpstreamError(502);
             if (collectedSources.length > 0) {
               emitSse('sources', { sources: collectedSources });
             }
             emitSse('done', {
-              reply: finalReply,
+              reply: accumulated,
               model: candidateModel,
               failoverUsed: i > 0,
               sources: collectedSources,
@@ -2234,7 +2207,7 @@ export function createApp() {
           } catch (err) {
             lastErr = err;
             const canRetry =
-              accumulated.length === 0 &&
+              !signal.aborted && accumulated.length === 0 &&
               i < routePlan.candidateModels.length - 1 &&
               isRetryableQuotaOrTransientError(err);
             if (!canRetry) {
@@ -2252,20 +2225,26 @@ export function createApp() {
 
       let finalSources: Array<{ title: string; uri: string }> = [];
       const orchestrated = await executeWithModelFailover(routePlan, async (candidateModel, suffix) => {
+        signal.throwIfAborted();
         const shouldSearch = useWebSearch && modelSupportsGoogleSearch(candidateModel);
         const { systemInstruction, contents } = buildContentsForModel(candidateModel, suffix);
         const response: GenerateContentResponse = await ai.models.generateContent({
           model: candidateModel,
           contents,
           config: {
+            abortSignal: signal,
             ...(systemInstruction ? { systemInstruction } : {}),
             ...(shouldSearch ? { tools: [{ googleSearch: {} }] } : {}),
           },
         });
+        assertCompleteGoogleReply(response.candidates?.[0]?.finishReason);
+        const reply = response.text?.trim();
+        if (!reply || reply.length > 256_000) throw new AiUpstreamError(502);
         finalSources = extractGroundingSources(response);
-        return response.text ?? 'ไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง';
+        return reply;
       });
 
+      if (res.destroyed) return;
       res.json({
         reply: orchestrated.reply,
         model: orchestrated.model,
@@ -2296,23 +2275,30 @@ export function createApp() {
         return;
       }
       res.status(byokRequired ? 403 : quota ? 429 : 502).json({ code, error: errorMsg });
+    } finally {
+      res.off('close', onClose);
     }
   });
 
   async function authorizeDeskVoice(req: express.Request, res: express.Response, bucket: 'voice' | 'live') {
     res.set('Cache-Control', 'no-store');
-    const access = await resolveDeskAiAccess(req, 'voice');
-    if (!access.ok) {
-      res.status(access.status).json({ error: access.error, code: access.code });
+    try {
+      const access = await resolveDeskAiAccess(req, 'voice');
+      if (!access.ok) {
+        res.status(access.status).json({ error: access.error, code: access.code });
+        return null;
+      }
+      const rate = await checkDistributedRateLimit(`${bucket}:${access.rateSubject}`, bucket === 'live' ? 15 : 50);
+      if (!rate.allowed) {
+        res.set('Retry-After', String(rate.retryAfterSec));
+        res.status(429).json({ error: 'The voice request limit has been reached. Try again later.', code: 'RATE_LIMITED' });
+        return null;
+      }
+      return res.destroyed ? null : access.connection;
+    } catch {
+      if (!res.destroyed) res.status(502).json({ error: 'Voice authorization is temporarily unavailable.', code: 'AI_PROVIDER_UNAVAILABLE' });
       return null;
     }
-    const rate = await checkDistributedRateLimit(`${bucket}:${access.rateSubject}`, bucket === 'live' ? 15 : 50);
-    if (!rate.allowed) {
-      res.set('Retry-After', String(rate.retryAfterSec));
-      res.status(429).json({ error: 'The voice request limit has been reached. Try again later.', code: 'RATE_LIMITED' });
-      return null;
-    }
-    return access.connection;
   }
 
   function sendVoiceCredentialError(res: express.Response, error: unknown, personal: boolean): boolean {
@@ -2321,9 +2307,16 @@ export function createApp() {
     return true;
   }
 
+  function voiceRequestSignal(res: express.Response): AbortSignal {
+    const disconnected = new AbortController();
+    res.once('close', () => disconnected.abort());
+    return AbortSignal.any([disconnected.signal, AbortSignal.timeout(28_000)]);
+  }
+
   app.post('/api/ai/transcribe', async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, 'voice');
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
 
       const { audioBase64, mimeType } = asRecord(req.body) ?? {};
@@ -2378,7 +2371,7 @@ export function createApp() {
                 ],
               },
             },
-          });
+          }, { signal });
           const transcript = (interaction.output_text || '').trim();
           if (transcript) {
             res.json({ text: transcript, model: GEMINI_35_TRANSCRIBE, failoverUsed: false });
@@ -2396,6 +2389,7 @@ export function createApp() {
         : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
       let lastErr: unknown;
       for (const fallbackModel of fallbackCandidates) {
+        signal.throwIfAborted();
         try {
           const resp = await ai.models.generateContent({
             model: fallbackModel,
@@ -2415,10 +2409,14 @@ export function createApp() {
                 ],
               },
             ],
+            config: { abortSignal: signal },
           });
+          assertCompleteGoogleReply(resp.candidates?.[0]?.finishReason);
           const text = (resp.text || '').trim();
-          res.json({ text, model: fallbackModel, failoverUsed: true });
-          return;
+          if (text) {
+            res.json({ text, model: fallbackModel, failoverUsed: true });
+            return;
+          }
         } catch (err) {
           lastErr = err;
           if (!isRetryableQuotaOrTransientError(err) && ![400, 404].includes(aiUpstreamStatus(err) ?? 0)) throw err;
@@ -2426,6 +2424,7 @@ export function createApp() {
       }
       throw lastErr instanceof Error ? lastErr : new Error('Transcription failed');
     } catch (err: unknown) {
+      if (res.destroyed) return;
       if (!sendVoiceCredentialError(res, err, connection.provider === 'google')) {
         res.status(502).json({ error: 'The provider could not transcribe this audio.', code: 'TRANSCRIBE_FAILED' });
       }
@@ -2435,8 +2434,9 @@ export function createApp() {
   app.post('/api/ai/tts', async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, 'voice');
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
-      const { text, voice } = asRecord(req.body) ?? {};
+      const { text, voice, lang } = asRecord(req.body) ?? {};
       const cleanText = stripMarkdownForSpeech(typeof text === 'string' ? text : '').slice(0, 1800);
       if (!cleanText) {
         res.status(400).json({ error: 'ไม่มีข้อความสำหรับสังเคราะห์เสียง' });
@@ -2448,6 +2448,7 @@ export function createApp() {
       const ttsModels = [GEMINI_38_FLASH_LITE_TTS, GEMINI_38_FLASH_TTS];
 
       for (let i = 0; i < ttsModels.length; i++) {
+        signal.throwIfAborted();
         const ttsModel = ttsModels[i];
         try {
           const interaction = await ai.interactions.create({
@@ -2456,9 +2457,9 @@ export function createApp() {
             input: cleanText,
             response_modalities: ['audio'],
             generation_config: {
-              speech_config: [{ voice: safeVoice, language: 'th' }],
+              speech_config: [{ voice: safeVoice, language: lang === 'en' ? 'en' : 'th' }],
             },
-          });
+          }, { signal });
           const audioData = interaction.output_audio?.data;
           const audioMime = interaction.output_audio?.mime_type || 'audio/wav';
           if (audioData) {
@@ -2479,13 +2480,14 @@ export function createApp() {
 
       res.json({ ok: true, fallbackClientTts: true });
     } catch {
-      res.json({ ok: true, fallbackClientTts: true });
+      if (!res.destroyed) res.json({ ok: true, fallbackClientTts: true });
     }
   });
 
   app.post('/api/ai/live-token', async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, 'live');
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
       const { mode, voice, deskContext, liveChartContext } = asRecord(req.body) ?? {};
       const liveMode = mode === 'thinking' ? 'thinking' : 'standard';
@@ -2505,7 +2507,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
       const now = Date.now();
       const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
       const newSessionExpireTime = new Date(now + 90 * 1000).toISOString();
-      const apiVersion = connection.provider === 'google' ? 'v1beta' : 'v1alpha';
+      const apiVersion = 'v1beta';
       const tokenClient = createGoogleAiClient(connection.key, apiVersion);
 
       const candidateLiveModels =
@@ -2513,9 +2515,11 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
 
       let lastErr: unknown;
       for (const candidateModel of candidateLiveModels) {
+        signal.throwIfAborted();
         try {
           const authToken = await tokenClient.authTokens.create({
             config: {
+              abortSignal: signal,
               uses: 1,
               expireTime,
               newSessionExpireTime,
@@ -2532,7 +2536,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
                   contextWindowCompression: { slidingWindow: {} },
                   sessionResumption: {},
                   ...(candidateModel === GEMINI_38_LIVE_THINKING
-                    ? { thinkingConfig: { thinkingLevel: 'low' as unknown as never } }
+                    ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
                     : {}),
                 },
               },
@@ -2553,12 +2557,14 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
             return;
           }
         } catch (err) {
+          signal.throwIfAborted();
           if (isAiCredentialError(err)) throw err;
           lastErr = err;
           // Retry with minimal locked constraints if optional live constraint fails validation
           try {
             const minimalToken = await tokenClient.authTokens.create({
               config: {
+                abortSignal: signal,
                 uses: 1,
                 expireTime,
                 newSessionExpireTime,
@@ -2567,6 +2573,9 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
                   config: {
                     responseModalities: [Modality.AUDIO],
                     systemInstruction: { parts: [{ text: liveInstruction }] },
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: safeVoice } } },
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {},
                   },
                 },
               },
@@ -2594,6 +2603,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
 
       throw lastErr instanceof Error ? lastErr : new Error('Failed to mint ephemeral Live token');
     } catch (err: unknown) {
+      if (res.destroyed) return;
       if (!sendVoiceCredentialError(res, err, connection.provider === 'google')) {
         res.status(502).json({ error: 'The provider could not create a temporary Live token.', code: 'LIVE_TOKEN_FAILED' });
       }

@@ -101,3 +101,17 @@ test('LiveChartResponseCache serves STALE_FALLBACK when upstream fails within gr
   assert.equal(fallback.telemetry.currentPrice, 3865.5);
   assert.equal(fallback.ageMs, 5000);
 });
+
+test('forced refresh joins live work and a cleared flight cannot restore cleared data', async () => {
+  const cache = new LiveChartResponseCache();
+  let resolveFirst!: (sample: LiveChartTelemetry) => void;
+  const pending = new Promise<LiveChartTelemetry>(resolve => { resolveFirst = resolve; });
+  const first = cache.getOrFetch('XAUUSD:15m', () => pending);
+  const second = cache.getOrFetch('XAUUSD:15m', async () => sampleTelemetry(111), { forceRefresh: true });
+  cache.clear();
+  await cache.getOrFetch('XAUUSD:15m', async () => sampleTelemetry(222));
+  resolveFirst(sampleTelemetry(100));
+  assert.equal((await second).telemetry.currentPrice, 100);
+  await first;
+  assert.equal((await cache.getOrFetch('XAUUSD:15m', async () => sampleTelemetry(333))).telemetry.currentPrice, 222);
+});

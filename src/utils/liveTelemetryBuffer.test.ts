@@ -7,9 +7,18 @@ import {
   computeLivePositionMetrics,
   downsampleLiveTelemetry,
   formatTelemetryTimeLabel,
+  resolveNextLivePollAt,
   sliceLiveTelemetryWindow,
   type LiveTelemetryPoint,
 } from './liveTelemetryBuffer';
+
+test('schedules the next poll using the server deadline and a finite 3s client floor', () => {
+  const now = Date.parse('2026-11-26T08:00:00Z');
+  assert.equal(resolveNextLivePollAt(now, 12_000, '2026-11-26T08:00:06Z'), now + 6000);
+  assert.equal(resolveNextLivePollAt(now, 12_000, '2026-11-26T07:59:59Z'), now + 3000);
+  assert.equal(resolveNextLivePollAt(now, 12_000, 'invalid'), now + 12_000);
+  assert.equal(resolveNextLivePollAt(now, Infinity, 'invalid'), now + 3000);
+});
 
 test('LIVE_TELEMETRY_POLL_MS is 3 seconds and buffer caps at 120 samples immutably', () => {
   assert.equal(LIVE_TELEMETRY_POLL_MS, 3_000);

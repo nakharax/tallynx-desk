@@ -6,6 +6,7 @@ import {
   buildDeterministicSupervisionReport,
   buildRiskSupervisionResponseSchema,
   parseRiskSuperviseRequest,
+  readRiskSupervisionResponse,
   RISK_SUPERVISE_FORBIDDEN_FIELDS,
   sanitizeAiRiskSupervisionReport,
 } from './riskSupervisionReport.ts';
@@ -25,6 +26,21 @@ function candles(prices: number[], volumes: number[] = []): MarketCandle[] {
 function near(actual: number | null, expected: number) {
   assert.ok(actual !== null && Math.abs(actual - expected) < 1e-8, `Expected ${expected}, got ${actual}`);
 }
+
+test('risk review response keeps deterministic provenance for auth and availability failures', () => {
+  const baseline = buildDeterministicSupervisionReport(computeQuantSupervisionSnapshot('XAUUSD', '5m', candles([10, 20])), 'en', '2026-11-26T08:00:00Z');
+  assert.equal(readRiskSupervisionResponse(401, null, baseline).fallbackReason, 'AUTH_REQUIRED');
+  assert.equal(readRiskSupervisionResponse(403, { code: 'BYOK_REQUIRED' }, baseline).fallbackReason, 'BYOK_REQUIRED');
+  const fallback = readRiskSupervisionResponse(200, { ok: true, fallbackUsed: true, fallbackReason: 'AI_PROVIDER_UNAVAILABLE' }, baseline);
+  assert.equal(fallback.source, 'deterministic');
+  assert.equal(fallback.fallbackReason, 'AI_PROVIDER_UNAVAILABLE');
+  const report = { ...baseline, source: 'openrouter', model: 'openai/gpt-4.1' };
+  const live = readRiskSupervisionResponse(200, { ok: true, fallbackUsed: false, report }, baseline);
+  assert.equal(live.source, 'openrouter');
+  assert.equal(live.model, 'openai/gpt-4.1');
+  const wrong = readRiskSupervisionResponse(200, { ok: true, fallbackUsed: false, report: { ...report, timeframe: '1d' } }, baseline);
+  assert.equal(wrong.fallbackReason, 'AI_REPORT_INVALID');
+});
 
 test('VWAP weights typical price by volume and skips bars without volume', () => {
   const series = candles([10, 20, 30, 40], [0, 2, 0, 1]);

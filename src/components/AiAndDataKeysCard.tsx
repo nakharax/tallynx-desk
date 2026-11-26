@@ -31,7 +31,9 @@ type OAuthAttempt = { verifier: string; state: string; redirectUri: string; expi
 
 async function verifyKey(headers: Record<string, string>): Promise<boolean> {
   if (!headers[AI_HEADERS.key] && !headers[AI_HEADERS.databento]) return false;
-  const response = await fetch('/api/ai/byok/verify', { method: 'POST', headers, redirect: 'error', cache: 'no-store' });
+  const response = await fetch('/api/ai/byok/verify', {
+    method: 'POST', headers, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(12_000),
+  });
   return response.ok;
 }
 
@@ -65,7 +67,7 @@ function KeyField({ label, saved, hint, t, onSave, onClear, onVerify }: {
     <div className="byok-field">
       <label htmlFor={id}>{label}</label>
       <input id={id} className="inp mono" type="password" value={value} autoComplete="off" spellCheck={false}
-        placeholder={maskCredential(saved) || hint} maxLength={8_000}
+        placeholder={maskCredential(saved) || hint} maxLength={8_000} disabled={checking}
         onChange={event => { setValue(event.target.value); setFeedback(''); }} />
       <div className="byok-actions">
         <button type="button" className="btn sm primary" disabled={!key || checking} onClick={() => {
@@ -134,39 +136,51 @@ function CodexConnection({ uid, credentials, t, update }: {
   const [input, setInput] = useState('');
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState(false);
-  const mounted = useRef(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const activeRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => activeRequest.current?.abort(), []);
   const saved = credentials.openAiKey ?? credentials.codex?.accessToken;
   async function start() {
+    if (activeRequest.current) return;
     const popup = window.open('about:blank', '_blank');
     if (popup) popup.opener = null;
+    if (!popup) {
+      setFeedback(t('Allow popups to start Codex sign-in.', 'อนุญาตป๊อปอัปเพื่อเริ่มเข้าสู่ระบบ Codex'));
+      return;
+    }
+    const request = new AbortController();
+    activeRequest.current = request;
     setBusy(true);
     setFeedback('');
     try {
-      const response = await fetch('/api/ai/codex-oauth/start', { method: 'POST', redirect: 'error', cache: 'no-store' });
+      const response = await fetch('/api/ai/codex-oauth/start', {
+        method: 'POST', redirect: 'error', cache: 'no-store', signal: AbortSignal.any([request.signal, AbortSignal.timeout(12_000)]),
+      });
       const data = asRecord(await response.json());
+      request.signal.throwIfAborted();
       if (!response.ok || typeof data?.authorizationUrl !== 'string' || typeof data.verifier !== 'string' ||
-          typeof data.state !== 'string' || typeof data.redirectUri !== 'string' || typeof data.expiresAt !== 'number' ||
-          !mounted.current) throw new Error();
+          typeof data.state !== 'string' || typeof data.redirectUri !== 'string' || typeof data.expiresAt !== 'number') throw new Error();
       const authorize = new URL(data.authorizationUrl);
       if (authorize.origin !== 'https://auth.openai.com' || authorize.pathname !== '/oauth/authorize') throw new Error();
-      if (!popup) throw new Error();
       popup.location.replace(authorize.href);
       setAttempt({ verifier: data.verifier, state: data.state, redirectUri: data.redirectUri, expiresAt: data.expiresAt });
       setFeedback(t('After authorizing, copy the callback URL from the new tab and paste it here.', 'หลังอนุญาตแล้ว ให้คัดลอก URL callback จากแท็บใหม่มาวางที่นี่'));
     } catch {
-      popup?.close();
-      setFeedback(t('Could not start sign-in. Allow popups and try again.', 'เริ่มเข้าสู่ระบบไม่สำเร็จ โปรดอนุญาตป๊อปอัปแล้วลองอีกครั้ง'));
+      popup.close();
+      if (!request.signal.aborted) setFeedback(t('Could not start Codex sign-in. Try again.', 'เริ่มเข้าสู่ระบบ Codex ไม่สำเร็จ โปรดลองอีกครั้ง'));
     } finally {
+      if (activeRequest.current === request) activeRequest.current = null;
       setBusy(false);
     }
   }
   async function connect() {
+    if (activeRequest.current) return;
     const parsed = parseCodexCallbackInput(input, attempt?.redirectUri);
     if (!parsed) {
       setFeedback(t('Enter a callback URL, authorization code, Codex auth.json, or OpenAI API key.', 'กรอก URL callback, รหัสอนุญาต, Codex auth.json หรือคีย์ OpenAI API'));
       return;
     }
+    const request = new AbortController();
+    activeRequest.current = request;
     setBusy(true);
     try {
       let patch: Partial<ByokCredentials>;
@@ -177,6 +191,7 @@ function CodexConnection({ uid, credentials, t, update }: {
         }
         const response = await fetch('/api/ai/codex-oauth/exchange', {
           method: 'POST', redirect: 'error', cache: 'no-store',
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(16_000)]),
           headers: {
             [AI_HEADERS.oauthCode]: parsed.code,
             [AI_HEADERS.oauthVerifier]: attempt.verifier,
@@ -192,7 +207,7 @@ function CodexConnection({ uid, credentials, t, update }: {
       } else {
         patch = { openAiKey: parsed.key, codex: undefined };
       }
-      if (!mounted.current) return;
+      if (request.signal.aborted) return;
       if (!update(patch)) {
         setFeedback(t('Could not save credentials in browser storage.', 'บันทึกข้อมูลรับรองในเบราว์เซอร์ไม่สำเร็จ'));
         return;
@@ -201,8 +216,9 @@ function CodexConnection({ uid, credentials, t, update }: {
       setInput('');
       setFeedback(t('Credential saved on this browser.', 'บันทึกข้อมูลรับรองในเบราว์เซอร์นี้แล้ว'));
     } catch {
-      setFeedback(t('Codex could not connect. Start a new sign-in or check the credential.', 'เชื่อมต่อ Codex ไม่สำเร็จ โปรดเริ่มเข้าสู่ระบบใหม่หรือตรวจสอบข้อมูลรับรอง'));
+      if (!request.signal.aborted) setFeedback(t('Codex could not connect. Start a new sign-in or check the credential.', 'เชื่อมต่อ Codex ไม่สำเร็จ โปรดเริ่มเข้าสู่ระบบใหม่หรือตรวจสอบข้อมูลรับรอง'));
     } finally {
+      if (activeRequest.current === request) activeRequest.current = null;
       setBusy(false);
     }
   }
@@ -230,7 +246,7 @@ function CodexConnection({ uid, credentials, t, update }: {
       </div>}
       <label>
         {t('Callback URL, code, auth.json, or OpenAI API key', 'URL callback, รหัส, auth.json หรือคีย์ OpenAI API')}
-        <input className="inp mono" type="password" value={input} maxLength={64_000} autoComplete="off" spellCheck={false}
+        <input className="inp mono" type="password" value={input} maxLength={64_000} autoComplete="off" spellCheck={false} disabled={busy}
           onChange={event => setInput(event.target.value)}
           onPaste={event => {
             event.preventDefault();
@@ -264,13 +280,17 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
   const [statusFailed, setStatusFailed] = useState(false);
   const [storageError, setStorageError] = useState(false);
   useEffect(() => {
-    const controller = new AbortController();
+    let activeRequest: AbortController | undefined;
     async function loadStatus() {
+      activeRequest?.abort();
+      const controller = new AbortController();
+      activeRequest = controller;
       try {
         const user = auth.currentUser;
         const token = user && user.uid === uid ? await user.getIdToken().catch(() => undefined) : undefined;
         const response = await fetch('/api/ai/provider-status', {
-          headers: buildDeskAiRequestHeaders(undefined, token), signal: controller.signal, redirect: 'error', cache: 'no-store',
+          headers: buildDeskAiRequestHeaders(undefined, token),
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]), redirect: 'error', cache: 'no-store',
         });
         const data = asRecord(await response.json());
         if (!response.ok || typeof data?.platformEligible !== 'boolean') throw new Error();
@@ -288,7 +308,7 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
     }
     void loadStatus();
     window.addEventListener('focus', loadStatus);
-    return () => { controller.abort(); window.removeEventListener('focus', loadStatus); };
+    return () => { activeRequest?.abort(); window.removeEventListener('focus', loadStatus); };
   }, [uid]);
 
   function update(patch: Partial<ByokCredentials>) {

@@ -12,14 +12,13 @@ import {
 } from '../utils/quantSupervisionEngine';
 import {
   buildDeterministicSupervisionReport,
-  RISK_SUPERVISION_FALLBACK_REASONS,
+  readRiskSupervisionResponse,
   riskSupervisionRegimeLabel,
-  sanitizeAiRiskSupervisionReport,
   type AiRiskSupervisionReport,
   type RiskSupervisionFallbackReason,
 } from '../utils/riskSupervisionReport';
 import { formatChartPrice, LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES, useLiveChartFeed } from '../utils/useLiveChartFeed';
-import { AI_MODEL_CATALOG, normalizeAiModel } from '../utils/aiProviderConfig';
+import { AI_MODEL_CATALOG } from '../utils/aiProviderConfig';
 import { getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
 import { AiAndDataKeysDialogButton } from './AiAndDataKeysCard';
 
@@ -65,11 +64,12 @@ function SupervisionChart({
   const [visibility, setVisibility] = useState<Record<Overlay, boolean>>({
     vwap: true, ema: true, sma: false, bollinger: false, zones: true,
   });
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [activeTime, setActiveTime] = useState<number | null>(null);
   const t = (en: string, th: string) => deskText(lang, en, th);
   const price = (value: number) => formatChartPrice(value, snapshot.symbol);
   const bars = candles.length;
-  const active = activeIndex === null ? null : Math.min(activeIndex, bars - 1);
+  const activeIndex = activeTime === null ? -1 : candles.findIndex(candle => candle.ts === activeTime);
+  const active = activeIndex === -1 ? null : activeIndex;
   const selected = candles[active ?? bars - 1];
   const activity = candles.map(bar => snapshot.hasVolumeData ? (bar.volume ?? 0) : bar.high - bar.low);
   const maxActivity = Math.max(...activity) || 1;
@@ -108,7 +108,10 @@ function SupervisionChart({
 
   const trackPointer = (event: PointerEvent<SVGSVGElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
-    if (box.width > 0) setActiveIndex(Math.min(bars - 1, Math.max(0, Math.floor((event.clientX - box.left) * bars / box.width))));
+    if (box.width > 0) {
+      const index = Math.min(bars - 1, Math.max(0, Math.floor((event.clientX - box.left) * bars / box.width)));
+      setActiveTime(candles[index].ts);
+    }
   };
   return (
     <div className="risk-sv-chart">
@@ -144,13 +147,14 @@ function SupervisionChart({
         role="group"
         tabIndex={0}
         aria-label={t('Candlestick chart. Use the left and right arrow keys to inspect candles.', 'กราฟแท่งเทียน ใช้ปุ่มลูกศรซ้ายและขวาเพื่อดูแต่ละแท่ง')}
-        onBlur={() => setActiveIndex(null)}
+        onBlur={() => setActiveTime(null)}
         onKeyDown={event => {
-          if (event.key === 'Escape') setActiveIndex(null);
+          if (event.key === 'Escape') setActiveTime(null);
           if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
           event.preventDefault();
           const offset = event.key === 'ArrowRight' ? 1 : -1;
-          setActiveIndex(Math.max(0, Math.min(bars - 1, (active ?? bars - 1) + offset)));
+          const index = Math.max(0, Math.min(bars - 1, (active ?? bars - 1) + offset));
+          setActiveTime(candles[index].ts);
         }}
       >
         <svg
@@ -160,7 +164,8 @@ function SupervisionChart({
           aria-hidden="true"
           onPointerMove={trackPointer}
           onPointerDown={trackPointer}
-          onPointerLeave={() => setActiveIndex(null)}
+          onPointerLeave={() => setActiveTime(null)}
+          onPointerCancel={() => setActiveTime(null)}
         >
           {ticks.map(tick => <line className="risk-sv-gridline" key={tick} x1="0" x2={PLOT_WIDTH} y1={tick * PRICE_HEIGHT} y2={tick * PRICE_HEIGHT} />)}
           {zones.map(zone => (
@@ -187,7 +192,8 @@ function SupervisionChart({
           aria-hidden="true"
           onPointerMove={trackPointer}
           onPointerDown={trackPointer}
-          onPointerLeave={() => setActiveIndex(null)}
+          onPointerLeave={() => setActiveTime(null)}
+          onPointerCancel={() => setActiveTime(null)}
         >
           {activity.map((value, index) => {
             const height = value / maxActivity * (ACTIVITY_HEIGHT - 3);
@@ -215,10 +221,6 @@ const FALLBACK_COPY: Record<RiskSupervisionFallbackReason, [string, string]> = {
   REQUEST_UNAVAILABLE: ['The audit request could not reach the service.', 'ไม่สามารถส่งคำขอตรวจสอบไปยังบริการได้'],
 };
 
-function readObject(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
 function SupervisionAudit({
   feed, candles, snapshot, portfolio, lang, uid,
 }: {
@@ -240,11 +242,16 @@ function SupervisionAudit({
   useEffect(() => {
     setResult(previous => previous?.fallbackReason === 'BYOK_REQUIRED' ? null : previous);
   }, [connection?.provider, connection?.model, connection?.key]);
-  useEffect(() => () => {
-    const request = activeRequest.current;
-    activeRequest.current = null;
-    request?.abort();
-  }, []);
+  useEffect(() => {
+    setResult(null);
+    setChecked({});
+    setPending(false);
+    return () => {
+      const request = activeRequest.current;
+      activeRequest.current = null;
+      request?.abort();
+    };
+  }, [connection?.provider, connection?.model]);
   const t = (en: string, th: string) => deskText(lang, en, th);
   const baseline = useMemo(() => buildDeterministicSupervisionReport(snapshot, lang, feed.fetchedAt), [snapshot, lang, feed.fetchedAt]);
   const report = result ?? baseline;
@@ -266,6 +273,7 @@ function SupervisionAudit({
       controller.abort();
       finish(requestFallback);
     }, 48_000);
+    controller.signal.addEventListener('abort', () => window.clearTimeout(deadline), { once: true });
     let next: AiRiskSupervisionReport = requestFallback;
     try {
       const user = auth.currentUser;
@@ -278,28 +286,12 @@ function SupervisionAudit({
         headers,
         redirect: 'error',
         body: JSON.stringify({
-          symbol: snapshot.symbol, timeframe: snapshot.timeframe, candles, lang, portfolio, quantSnapshot: snapshot,
+          symbol: snapshot.symbol, timeframe: snapshot.timeframe, candles, lang, portfolio,
         }),
         signal: controller.signal,
       });
-      const body: unknown = await response.json();
-      const payload = readObject(body);
-      const serverReport = readObject(payload?.deterministicReport ?? payload?.report);
-      const generatedAt = typeof serverReport?.generatedAt === 'string' && Number.isFinite(Date.parse(serverReport.generatedAt))
-        ? serverReport.generatedAt : baseline.generatedAt;
-      const requestedReport = { ...baseline, generatedAt };
-      const reason = RISK_SUPERVISION_FALLBACK_REASONS.find(value => value === payload?.fallbackReason);
-      if (response.status === 401 && payload?.code === 'AUTH_REQUIRED') {
-        next = { ...requestedReport, fallbackReason: 'AUTH_REQUIRED' };
-      } else if (payload?.fallbackUsed === true && reason) {
-        next = { ...requestedReport, fallbackReason: reason };
-      } else if (response.ok && payload?.ok === true && serverReport &&
-          (serverReport.source === 'gemini' || serverReport.source === 'openrouter' || serverReport.source === 'codex_oauth')) {
-        const provider = serverReport.source === 'gemini' ? 'google' : serverReport.source;
-        const modelId = normalizeAiModel(provider, serverReport.model);
-        next = (modelId ? sanitizeAiRiskSupervisionReport(serverReport, requestedReport, modelId, serverReport.source) : null)
-          ?? { ...requestedReport, fallbackReason: 'AI_REPORT_INVALID' };
-      }
+      const body: unknown = await response.json().catch(() => null);
+      next = readRiskSupervisionResponse(response.status, body, baseline);
     } catch {
       // The audit captured before the request stays available during network failures.
     } finally {
@@ -316,7 +308,7 @@ function SupervisionAudit({
             {report.source === 'deterministic' ? t('Deterministic Quant Audit', 'การตรวจสอบเชิงปริมาณตามสูตร')
               : t('AI Risk Supervision', 'การกำกับความเสี่ยงด้วย AI')}
           </span>
-          {!result && model && <span className="mono">{model}</span>}
+          {(result?.model ?? (!result && model)) && <span className="mono">{result?.model ?? model}</span>}
           {result && <time dateTime={result.generatedAt} className="mono">
             {new Date(result.generatedAt).toLocaleString(lang, { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Bangkok' })} ICT
           </time>}
@@ -378,9 +370,10 @@ export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accou
   const {
     chartSymbol, setChartSymbol, chartTimeframe, setChartTimeframe, liveTelemetry, chartError, chartLoading,
   } = useLiveChartFeed({ initialTimeframe, fetchStructureTf: false, pollIntervalMs: 30_000 });
+  useEffect(() => { setChartTimeframe(initialTimeframe); }, [initialTimeframe, setChartTimeframe]);
   const t = (en: string, th: string) => deskText(lang, en, th);
   const feed = liveTelemetry?.symbol === chartSymbol && liveTelemetry.timeframe === chartTimeframe ? liveTelemetry : null;
-  const candles = useMemo(() => normalizeSupervisionCandles(feed?.candles ?? []), [feed]);
+  const candles = useMemo(() => normalizeSupervisionCandles(feed?.candles ?? []).slice(-512), [feed]);
   const safePortfolio = useMemo(() => sanitizeQuantPortfolioInput(portfolio), [portfolio]);
   const snapshot = useMemo(() => candles.length
     ? computeQuantSupervisionSnapshot(chartSymbol, chartTimeframe, candles, safePortfolio) : null,
@@ -434,7 +427,7 @@ export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accou
       ) : (
         <>
           <p className="risk-sv-feed mono">
-            {feed.source} · {snapshot.candleCount} {t('candles', 'แท่ง')} · {chartError
+            {feed.source} · {snapshot.candleCount} {t('candles', 'แท่ง')} · {chartError || feed.staleCache
               ? t('Showing the last available feed', 'แสดงข้อมูลล่าสุดที่มี')
               : t('Feed updated', 'อัปเดตเมื่อ')}{' '}
             <time dateTime={feed.fetchedAt}>{new Date(feed.fetchedAt).toLocaleTimeString(lang, { timeZone: 'Asia/Bangkok', hour12: false })} ICT</time>

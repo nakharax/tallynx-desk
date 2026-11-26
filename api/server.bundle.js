@@ -6,7 +6,7 @@ import express4 from "express";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { Modality } from "@google/genai";
+import { Modality, ThinkingLevel } from "@google/genai";
 
 // src/utils/geminiOrchestrator.ts
 import { GoogleGenAI } from "@google/genai";
@@ -169,6 +169,10 @@ function heuristicRouteTier(prompt, hasRichContext, hasVisualOrPdf = false) {
   return "quick_reply";
 }
 function isRetryableQuotaOrTransientError(error) {
+  if (error instanceof Error && "status" in error && typeof error.status === "number") {
+    if ([401, 403].includes(error.status)) return false;
+    if ([404, 429, 500, 502, 503, 504].includes(error.status)) return true;
+  }
   const msg = error instanceof Error ? error.message : String(error ?? "");
   if (!msg) return true;
   if (/API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|\b401\b|\b403\b/i.test(msg)) {
@@ -327,6 +331,7 @@ function createDecisionGenAIClient(apiKey) {
     vertexai: false,
     httpOptions: {
       apiVersion: "v1beta",
+      timeout: 7e3,
       headers: {
         "User-Agent": "aistudio-build"
       }
@@ -2399,6 +2404,121 @@ function deskText(lang, english, thai) {
   return lang === "th" ? thai : english;
 }
 
+// src/utils/aiProviderConfig.ts
+var AI_HEADERS = {
+  provider: "X-TallyNX-AI-Provider",
+  model: "X-TallyNX-AI-Model",
+  key: "X-TallyNX-AI-Key",
+  account: "X-TallyNX-Codex-Account-Id",
+  databento: "X-TallyNX-Databento-Key",
+  oauthCode: "X-TallyNX-Codex-Code",
+  oauthVerifier: "X-TallyNX-Codex-Verifier",
+  oauthState: "X-TallyNX-Codex-State"
+};
+var AI_MODEL_CATALOG = {
+  platform: ["auto", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-3.1-flash-lite"],
+  google: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-4-hydrogen", "gemini-3.5-flash-lite"],
+  openrouter: ["anthropic/claude-sonnet-4", "openai/gpt-4.1", "openai/o3", "google/gemini-2.5-pro", "deepseek/deepseek-r1"],
+  codex_oauth: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "o3"]
+};
+var CODEX_CALLBACK_URI = "http://localhost:1455/auth/callback";
+function asRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function normalizeAiProvider(value) {
+  if (typeof value !== "string") return void 0;
+  const provider = value.trim().toLowerCase();
+  if (provider === "gemini") return "google";
+  if (provider === "openai" || provider === "codex") return "codex_oauth";
+  return Object.hasOwn(AI_MODEL_CATALOG, provider) ? provider : void 0;
+}
+function normalizeAiModel(provider, value) {
+  if (typeof value !== "string") return void 0;
+  const id = value.trim();
+  if (isOpenAiApiKey(id) || /^sk-or-v1-/i.test(id) || /^AIza[a-zA-Z0-9_-]{35}$/.test(id) || isCodexAccessToken(id)) return void 0;
+  const model = id.toLowerCase();
+  if (provider === "platform") return AI_MODEL_CATALOG.platform.some((candidate) => candidate === model) ? model : void 0;
+  if (provider === "google") {
+    const googleModel = model.replace(/^models\//, "");
+    return /^[a-z0-9][a-z0-9._-]{0,127}$/.test(googleModel) ? googleModel : void 0;
+  }
+  if (provider === "openrouter") {
+    return model.length <= 128 && /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?::[a-z0-9._-]+)?$/.test(model) ? model : void 0;
+  }
+  return /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(model) ? model : void 0;
+}
+function normalizeHeaderSecret(value, maxLength = 8e3) {
+  if (typeof value !== "string" || /[^\x20-\x7e]/.test(value)) return void 0;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= maxLength && /^[!-~]+$/.test(trimmed) ? trimmed : void 0;
+}
+function normalizeCodexAccountId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value) ? value : void 0;
+}
+function isOpenAiApiKey(key) {
+  return /^sk-(?!or-v1-)[a-zA-Z0-9_-]{12,}$/.test(key);
+}
+function isCodexAccessToken(key) {
+  return /^eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$/.test(key);
+}
+function isByokKeyFormat(provider, key, accountId) {
+  if (provider === "google") return /^AIza[a-zA-Z0-9_-]{35}$/.test(key);
+  if (provider === "openrouter") return /^sk-or-v1-[a-zA-Z0-9_-]{16,}$/.test(key);
+  return isOpenAiApiKey(key) || isCodexAccessToken(key) || Boolean(accountId && /^[a-zA-Z0-9._~-]{16,}$/.test(key));
+}
+function buildDatabentoRequestHeaders(key) {
+  const clean = normalizeHeaderSecret(key, 256);
+  return clean && /^[a-zA-Z0-9_-]+$/.test(clean) ? { [AI_HEADERS.databento]: clean } : {};
+}
+function displayString(value, limit) {
+  return typeof value === "string" && value.length > 0 && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value) ? value : void 0;
+}
+function decodeCodexJwtMetadata(token) {
+  if (typeof token !== "string" || token.length > 24e3 || !isCodexAccessToken(token)) return {};
+  try {
+    const encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    const claims = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    if (!claims) return {};
+    const auth = asRecord(claims["https://api.openai.com/auth"]);
+    const profile = asRecord(claims["https://api.openai.com/profile"]);
+    const email = displayString(claims.email ?? profile?.email, 254);
+    const accountEmail = email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : void 0;
+    const plan = displayString(auth?.chatgpt_plan_type ?? claims.chatgpt_plan_type, 40);
+    const planType = plan && /^[a-zA-Z0-9_-]+$/.test(plan) ? plan : void 0;
+    const chatgptAccountId = normalizeCodexAccountId(auth?.chatgpt_account_id ?? claims.chatgpt_account_id);
+    const expiresAt = typeof claims.exp === "number" && Number.isSafeInteger(claims.exp) && claims.exp > 0 && claims.exp < 864e10 ? claims.exp * 1e3 : void 0;
+    return {
+      ...accountEmail ? { accountEmail } : {},
+      ...planType ? { planType } : {},
+      ...chatgptAccountId ? { chatgptAccountId } : {},
+      ...expiresAt ? { expiresAt } : {}
+    };
+  } catch {
+    return {};
+  }
+}
+function readCodexOauthCredential(value) {
+  const source = asRecord(value);
+  if (!source) return void 0;
+  const accessToken = normalizeHeaderSecret(source.accessToken ?? source.access_token);
+  const idMetadata = decodeCodexJwtMetadata(source.id_token);
+  const accessMetadata = decodeCodexJwtMetadata(accessToken);
+  const chatgptAccountId = accessMetadata.chatgptAccountId ?? idMetadata.chatgptAccountId ?? normalizeCodexAccountId(source.chatgptAccountId ?? source.account_id);
+  if (!accessToken || isOpenAiApiKey(accessToken) || !isByokKeyFormat("codex_oauth", accessToken, chatgptAccountId)) return void 0;
+  const refreshToken = normalizeHeaderSecret(source.refreshToken ?? source.refresh_token);
+  const expiry = source.expiresAt;
+  const expiresAt = accessMetadata.expiresAt ?? (typeof expiry === "number" && Number.isFinite(expiry) && expiry > 0 ? expiry : void 0);
+  return {
+    accessToken,
+    ...refreshToken ? { refreshToken } : {},
+    ...chatgptAccountId ? { chatgptAccountId } : {},
+    accountEmail: idMetadata.accountEmail ?? accessMetadata.accountEmail ?? displayString(source.accountEmail, 254),
+    planType: idMetadata.planType ?? accessMetadata.planType ?? displayString(source.planType, 40),
+    expiresAt
+  };
+}
+
 // src/utils/liveChartMarkets.ts
 var LIVE_CHART_SYMBOLS = [
   "XAUUSD",
@@ -2432,11 +2552,11 @@ var REGIME_LABELS = {
 function riskSupervisionRegimeLabel(regime, lang) {
   return deskText(lang, ...REGIME_LABELS[regime]);
 }
-function asRecord(value) {
+function asRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 }
 function parseRiskSuperviseRequest(input) {
-  const body = asRecord(input);
+  const body = asRecord2(input);
   if (!body || !Array.isArray(body.candles) || body.candles.length === 0 || body.candles.length > 512) return null;
   const symbolText = typeof body.symbol === "string" ? body.symbol.trim().toUpperCase() : "";
   const timeframeText = typeof body.timeframe === "string" ? body.timeframe.trim().toLowerCase() : "";
@@ -2621,7 +2741,7 @@ function containsForbiddenField(input) {
   return false;
 }
 function sanitizeAiRiskSupervisionReport(input, deterministicReport, model, source = "gemini") {
-  const parsed = asRecord(input);
+  const parsed = asRecord2(input);
   if (!parsed || containsForbiddenField(parsed)) return null;
   const wording = reportWording(deterministicReport);
   const { fallbackReason: _fallbackReason, ...base } = deterministicReport;
@@ -2644,121 +2764,53 @@ function sanitizeAiRiskSupervisionReport(input, deterministicReport, model, sour
 // server/ai/byokProvider.ts
 import { createHash as createHash3 } from "node:crypto";
 import { isIP } from "node:net";
-import { GoogleGenAI as GoogleGenAI2 } from "@google/genai";
+import { FinishReason, GoogleGenAI as GoogleGenAI2 } from "@google/genai";
 
-// src/utils/aiProviderConfig.ts
-var AI_HEADERS = {
-  provider: "X-TallyNX-AI-Provider",
-  model: "X-TallyNX-AI-Model",
-  key: "X-TallyNX-AI-Key",
-  account: "X-TallyNX-Codex-Account-Id",
-  databento: "X-TallyNX-Databento-Key",
-  oauthCode: "X-TallyNX-Codex-Code",
-  oauthVerifier: "X-TallyNX-Codex-Verifier",
-  oauthState: "X-TallyNX-Codex-State"
-};
-var AI_MODEL_CATALOG = {
-  platform: ["auto", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-3.1-flash-lite"],
-  google: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-4-hydrogen", "gemini-3.5-flash-lite"],
-  openrouter: ["anthropic/claude-sonnet-4", "openai/gpt-4.1", "openai/o3", "google/gemini-2.5-pro", "deepseek/deepseek-r1"],
-  codex_oauth: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "o3"]
-};
-var CODEX_CALLBACK_URI = "http://localhost:1455/auth/callback";
-function asRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+// src/utils/serverSentEvents.ts
+function isEventStream(response) {
+  return response.headers.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
 }
-function normalizeAiProvider(value) {
-  if (typeof value !== "string") return void 0;
-  const provider = value.trim().toLowerCase();
-  if (provider === "gemini") return "google";
-  if (provider === "openai" || provider === "codex") return "codex_oauth";
-  return Object.hasOwn(AI_MODEL_CATALOG, provider) ? provider : void 0;
-}
-function normalizeAiModel(provider, value) {
-  if (typeof value !== "string") return void 0;
-  const id = value.trim();
-  if (isOpenAiApiKey(id) || /^sk-or-v1-/i.test(id) || /^AIza[a-zA-Z0-9_-]{35}$/.test(id) || isCodexAccessToken(id)) return void 0;
-  const model = id.toLowerCase();
-  if (provider === "platform") return AI_MODEL_CATALOG.platform.some((candidate) => candidate === model) ? model : void 0;
-  if (provider === "google") {
-    const googleModel = model.replace(/^models\//, "");
-    return /^[a-z0-9][a-z0-9._-]{0,127}$/.test(googleModel) ? googleModel : void 0;
-  }
-  if (provider === "openrouter") {
-    return model.length <= 128 && /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?::[a-z0-9._-]+)?$/.test(model) ? model : void 0;
-  }
-  return /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(model) ? model : void 0;
-}
-function normalizeHeaderSecret(value, maxLength = 8e3) {
-  if (typeof value !== "string" || /[^\x20-\x7e]/.test(value)) return void 0;
-  const trimmed = value.trim();
-  return trimmed && trimmed.length <= maxLength && /^[!-~]+$/.test(trimmed) ? trimmed : void 0;
-}
-function normalizeCodexAccountId(value) {
-  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value) ? value : void 0;
-}
-function isOpenAiApiKey(key) {
-  return /^sk-(?!or-v1-)[a-zA-Z0-9_-]{12,}$/.test(key);
-}
-function isCodexAccessToken(key) {
-  return /^eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$/.test(key);
-}
-function isByokKeyFormat(provider, key, accountId) {
-  if (provider === "google") return /^AIza[a-zA-Z0-9_-]{35}$/.test(key);
-  if (provider === "openrouter") return /^sk-or-v1-[a-zA-Z0-9_-]{16,}$/.test(key);
-  return isOpenAiApiKey(key) || isCodexAccessToken(key) || Boolean(accountId && /^[a-zA-Z0-9._~-]{16,}$/.test(key));
-}
-function buildDatabentoRequestHeaders(key) {
-  const clean = normalizeHeaderSecret(key, 256);
-  return clean && /^[a-zA-Z0-9_-]+$/.test(clean) ? { [AI_HEADERS.databento]: clean } : {};
-}
-function displayString(value, limit) {
-  return typeof value === "string" && value.length > 0 && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value) ? value : void 0;
-}
-function decodeCodexJwtMetadata(token) {
-  if (typeof token !== "string" || token.length > 24e3 || !isCodexAccessToken(token)) return {};
+async function* readServerSentEvents(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const maxSize = 512e3;
+  let buffer = "";
+  let name = "message";
+  let lines = [];
+  let size = 0;
   try {
-    const encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-    const claims = asRecord2(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
-    if (!claims) return {};
-    const auth = asRecord2(claims["https://api.openai.com/auth"]);
-    const profile = asRecord2(claims["https://api.openai.com/profile"]);
-    const email = displayString(claims.email ?? profile?.email, 254);
-    const accountEmail = email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : void 0;
-    const plan = displayString(auth?.chatgpt_plan_type ?? claims.chatgpt_plan_type, 40);
-    const planType = plan && /^[a-zA-Z0-9_-]+$/.test(plan) ? plan : void 0;
-    const chatgptAccountId = normalizeCodexAccountId(auth?.chatgpt_account_id ?? claims.chatgpt_account_id);
-    const expiresAt = typeof claims.exp === "number" && Number.isSafeInteger(claims.exp) && claims.exp > 0 && claims.exp < 864e10 ? claims.exp * 1e3 : void 0;
-    return {
-      ...accountEmail ? { accountEmail } : {},
-      ...planType ? { planType } : {},
-      ...chatgptAccountId ? { chatgptAccountId } : {},
-      ...expiresAt ? { expiresAt } : {}
-    };
-  } catch {
-    return {};
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      const chunk = buffer + decoder.decode(value, { stream: !done });
+      const pendingCr = !done && chunk.endsWith("\r");
+      const linesInChunk = (pendingCr ? chunk.slice(0, -1) : chunk).split(/\r\n|\n|\r/);
+      buffer = (linesInChunk.pop() ?? "") + (pendingCr ? "\r" : "");
+      if (buffer.length > maxSize) throw new Error("Event stream line is too large.");
+      if (done) {
+        if (buffer) linesInChunk.push(buffer);
+        linesInChunk.push("");
+      }
+      for (const line of linesInChunk) {
+        if (line === "") {
+          if (lines.length > 0) yield { name, data: lines.join("\n") };
+          name = "message";
+          lines = [];
+          size = 0;
+        } else if (line.startsWith("event:")) {
+          name = line.slice(6).trim() || "message";
+        } else if (line === "data" || line.startsWith("data:")) {
+          const value2 = line.slice(5).replace(/^ /, "");
+          size += value2.length + 1;
+          if (size > maxSize) throw new Error("Event stream message is too large.");
+          lines.push(value2);
+        }
+      }
+      if (done) return;
+    }
+  } finally {
+    void reader.cancel().catch(() => void 0);
+    reader.releaseLock();
   }
-}
-function readCodexOauthCredential(value) {
-  const source = asRecord2(value);
-  if (!source) return void 0;
-  const accessToken = normalizeHeaderSecret(source.accessToken ?? source.access_token);
-  const idMetadata = decodeCodexJwtMetadata(source.id_token);
-  const accessMetadata = decodeCodexJwtMetadata(accessToken);
-  const chatgptAccountId = accessMetadata.chatgptAccountId ?? normalizeCodexAccountId(source.chatgptAccountId ?? source.account_id) ?? idMetadata.chatgptAccountId;
-  if (!accessToken || isOpenAiApiKey(accessToken) || !isByokKeyFormat("codex_oauth", accessToken, chatgptAccountId)) return void 0;
-  const refreshToken = normalizeHeaderSecret(source.refreshToken ?? source.refresh_token);
-  const expiry = source.expiresAt;
-  const expiresAt = accessMetadata.expiresAt ?? (typeof expiry === "number" && Number.isFinite(expiry) && expiry > 0 ? expiry : void 0);
-  return {
-    accessToken,
-    ...refreshToken ? { refreshToken } : {},
-    ...chatgptAccountId ? { chatgptAccountId } : {},
-    accountEmail: idMetadata.accountEmail ?? accessMetadata.accountEmail ?? displayString(source.accountEmail, 254),
-    planType: idMetadata.planType ?? accessMetadata.planType ?? displayString(source.planType, 40),
-    expiresAt
-  };
 }
 
 // server/ai/byokProvider.ts
@@ -2792,12 +2844,19 @@ function createDeskAiAccessResolver(deps) {
     if (rawProvider === void 0 || provider === "platform") {
       if (req.get(AI_HEADERS.key) !== void 0) return byokRequired;
       const privilege = await deps.resolvePlatformAiPrivilege(authorization);
+      if (authorization && !privilege.uid) {
+        return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Sign in again to use Platform Gemini." };
+      }
       if (!privilege.eligible || !privilege.uid) return byokRequired;
+      const model = normalizeAiModel("platform", rawModel);
+      if (rawModel !== void 0 && !model) {
+        return { ok: false, status: 400, code: "INVALID_AI_MODEL", error: "Choose a valid Platform Gemini model in Settings." };
+      }
       const key = deps.getPlatformKey()?.trim();
       if (!key) return { ok: false, status: 503, code: "MISSING_API_KEY", error: "Platform Gemini is unavailable. Connect your own provider key in Settings." };
       return {
         ok: true,
-        connection: { provider: "platform", key, model: normalizeAiModel("platform", rawModel) },
+        connection: { provider: "platform", key, model },
         rateSubject: aiRateSubject(req, privilege.uid)
       };
     }
@@ -2818,12 +2877,14 @@ function createDeskAiAccessResolver(deps) {
   }
   return resolveDeskAiAccess2;
 }
-function createGoogleAiClient(key, apiVersion) {
+function createGoogleAiClient(key, apiVersion, fetcher) {
   return new GoogleGenAI2({
     apiKey: key,
     vertexai: false,
     httpOptions: {
       ...apiVersion ? { apiVersion } : {},
+      timeout: 25e3,
+      ...fetcher ? { fetch: fetcher } : {},
       headers: { "User-Agent": "aistudio-build" }
     }
   });
@@ -2836,13 +2897,18 @@ var AiUpstreamError = class extends Error {
 };
 function aiUpstreamStatus(error) {
   if (error instanceof AiUpstreamError) return error.status;
-  const status = asRecord2(error)?.status;
+  const status = asRecord(error)?.status;
   if (error instanceof Error && /\b(?:API_KEY_INVALID|API key not valid)\b/i.test(error.message)) return 401;
   return typeof status === "number" ? status : void 0;
 }
 function isAiCredentialError(error) {
   const status = aiUpstreamStatus(error);
   return status === 401 || status === 403;
+}
+function assertCompleteGoogleReply(finishReason) {
+  if (finishReason && finishReason !== FinishReason.STOP && finishReason !== FinishReason.FINISH_REASON_UNSPECIFIED) {
+    throw new AiUpstreamError(502);
+  }
 }
 var CODEX_ORIGINATOR = "codex_cli_rs";
 var CODEX_API = "https://chatgpt.com/backend-api";
@@ -2872,104 +2938,84 @@ async function verifyPersonalAiConnection(connection, fetcher = fetch) {
   return response.status;
 }
 function textFromResponse(payload, codex) {
-  const value = asRecord2(payload);
+  const value = asRecord(payload);
   if (codex) {
     if (typeof value?.output_text === "string") return value.output_text;
     const output = Array.isArray(value?.output) ? value.output : [];
     return output.map((item) => {
-      const message2 = asRecord2(item);
+      const message2 = asRecord(item);
       const content = message2?.type === "message" && Array.isArray(message2.content) ? message2.content : [];
       return content.map((part) => {
-        const text = asRecord2(part);
+        const text = asRecord(part);
         return text?.type === "output_text" && typeof text.text === "string" ? text.text : "";
       }).join("");
     }).join("");
   }
   const choices = Array.isArray(value?.choices) ? value.choices : [];
-  const message = asRecord2(asRecord2(choices[0])?.message);
+  const message = asRecord(asRecord(choices[0])?.message);
   return typeof message?.content === "string" ? message.content : "";
 }
-async function readProviderStream(response, codex, onText) {
+function parseProviderPayload(data) {
+  try {
+    const value = asRecord(JSON.parse(data));
+    if (value) return value;
+  } catch {
+  }
+  throw new AiUpstreamError(502);
+}
+function assertProviderSuccess(value) {
+  const response = asRecord(value.response) ?? value;
+  const error = asRecord(value.error) ?? asRecord(response.error);
+  if (error || value.type === "error" || value.type === "response.failed" || value.type === "response.incomplete" || response.status === "failed" || response.status === "incomplete") {
+    const code = error?.code ?? value.code;
+    throw new AiUpstreamError(typeof code === "number" && code >= 400 && code <= 599 ? code : code === "invalid_api_key" || code === "token_expired" ? 401 : code === "rate_limit_exceeded" ? 429 : 502);
+  }
+  const choice = firstChoice(value);
+  if (choice?.finish_reason === "error" || choice?.finish_reason === "length" || choice?.finish_reason === "content_filter") {
+    throw new AiUpstreamError(502);
+  }
+}
+function firstChoice(value) {
+  return asRecord(Array.isArray(value.choices) ? value.choices[0] : void 0);
+}
+var MAX_PROVIDER_TEXT = 256e3;
+async function readProviderStream(response, connection, onText) {
   if (!response.body) throw new AiUpstreamError(502);
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let lines = [];
-  let eventSize = 0;
-  let accumulated = "";
-  let completed = false;
-  let terminal = false;
-  function consumeEvent() {
-    if (!lines.length) return;
-    const data = lines.join("\n");
-    lines = [];
-    eventSize = 0;
+  const codex = usesCodexBackend(connection);
+  let model = connection.model;
+  let reply = "";
+  let finished = false;
+  let outputItems = "";
+  function append(delta) {
+    reply += delta;
+    if (reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
+    if (delta) onText?.(delta);
+  }
+  for await (const { data } of readServerSentEvents(response.body)) {
     if (data === "[DONE]") {
-      completed = true;
-      terminal = true;
-      return;
+      if (!codex) finished = true;
+      break;
     }
-    const value = asRecord2(JSON.parse(data));
-    if (!value) throw new AiUpstreamError(502);
-    const error = asRecord2(value.error) ?? asRecord2(asRecord2(value.response)?.error);
-    if (error || value.type === "response.failed" || value.type === "response.incomplete" || value.type === "error") {
-      const code = error?.code ?? value.code;
-      throw new AiUpstreamError(typeof code === "number" ? code : code === "invalid_api_key" ? 401 : 502);
-    }
-    const choices = Array.isArray(value.choices) ? value.choices : [];
-    const choice = asRecord2(choices[0]);
-    if (choice?.finish_reason === "error") throw new AiUpstreamError(502);
-    const delta = codex ? value.type === "response.output_text.delta" ? value.delta : void 0 : asRecord2(choice?.delta)?.content;
-    if (typeof delta === "string" && delta) {
-      accumulated += delta;
-      if (accumulated.length > 256e3) throw new AiUpstreamError(502);
-      onText?.(delta);
+    const value = parseProviderPayload(data);
+    assertProviderSuccess(value);
+    const choice = firstChoice(value);
+    const codexResponse = asRecord(value.response);
+    model = normalizeAiModel(connection.provider, codex ? codexResponse?.model : value.model) ?? model;
+    const delta = codex ? value.type === "response.output_text.delta" ? value.delta : void 0 : asRecord(choice?.delta)?.content;
+    if (typeof delta === "string") append(delta);
+    if (codex && value.type === "response.output_item.done") {
+      outputItems += textFromResponse({ output: [value.item] }, true);
+      if (outputItems.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
     }
     if (codex && value.type === "response.completed") {
-      if (!accumulated) {
-        accumulated = textFromResponse(value.response, true);
-        if (accumulated) onText?.(accumulated);
-      }
-      completed = true;
-      terminal = true;
+      if (!reply.trim()) append(textFromResponse(codexResponse, true) || outputItems);
+      finished = true;
+      break;
     }
-    if (!codex && typeof choice?.finish_reason === "string") {
-      if (choice.finish_reason === "length" || choice.finish_reason === "content_filter") throw new AiUpstreamError(502);
-      completed = true;
-    }
+    if (!codex && choice?.finish_reason === "stop") finished = true;
   }
-  function consumeLine(line) {
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    if (line === "") consumeEvent();
-    else if (line.startsWith("data:")) {
-      const data = line.slice(5).trimStart();
-      eventSize += data.length;
-      if (eventSize > 512e3) throw new AiUpstreamError(502);
-      lines.push(data);
-    }
-  }
-  try {
-    for (; ; ) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      if (buffer.length > 512e3) throw new AiUpstreamError(502);
-      let newline;
-      while (!terminal && (newline = buffer.indexOf("\n")) !== -1) {
-        consumeLine(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-      }
-      if (terminal) break;
-      if (done) {
-        if (buffer) consumeLine(buffer);
-        consumeEvent();
-        break;
-      }
-    }
-  } finally {
-    await reader.cancel().catch(() => void 0);
-  }
-  if (!completed || !accumulated.trim()) throw new AiUpstreamError(502);
-  return accumulated;
+  if (!finished || !reply.trim()) throw new AiUpstreamError(502);
+  return { reply, model };
 }
 async function requestTextProvider(connection, input, signal, schema, stream, fetcher = fetch) {
   const codex = usesCodexBackend(connection);
@@ -3011,21 +3057,21 @@ async function requestTextProvider(connection, input, signal, schema, stream, fe
     await response.body?.cancel();
     throw new AiUpstreamError(response.status);
   }
-  if (response.headers.get("content-type")?.includes("text/event-stream")) {
-    return readProviderStream(response, codex, stream?.onText);
-  }
-  const reply = textFromResponse(await response.json(), codex);
-  if (!reply.trim()) throw new AiUpstreamError(502);
+  if (isEventStream(response)) return readProviderStream(response, connection, stream?.onText);
+  const value = parseProviderPayload(await response.text());
+  assertProviderSuccess(value);
+  const reply = textFromResponse(value, codex);
+  if (!reply.trim() || reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
   stream?.onText(reply);
-  return reply;
+  return { reply, model: normalizeAiModel(connection.provider, value.model) ?? connection.model };
 }
 async function streamOrGenerateCoachReply(connection, input, options) {
   if (!isGoogleConnection(connection)) {
-    const reply2 = await requestTextProvider(connection, input, options.signal, void 0, options.stream, options.fetcher);
-    return { reply: reply2, model: connection.model, sources: [] };
+    const result = await requestTextProvider(connection, input, options.signal, void 0, options.stream, options.fetcher);
+    return { ...result, sources: [] };
   }
   const model = connection.model ?? AI_MODEL_CATALOG.google[0];
-  const ai = createGoogleAiClient(connection.key);
+  const ai = createGoogleAiClient(connection.key, void 0, options.fetcher);
   const request = {
     model,
     contents: [
@@ -3051,17 +3097,20 @@ async function streamOrGenerateCoachReply(connection, input, options) {
   if (options.stream) {
     const response = await ai.models.generateContentStream(request);
     for await (const chunk of response) {
+      assertCompleteGoogleReply(chunk.candidates?.[0]?.finishReason);
       const text = chunk.text ?? "";
       reply += text;
+      if (reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
       if (text) options.stream.onText(text);
       collectSources(chunk.candidates?.[0]?.groundingMetadata?.groundingChunks);
     }
   } else {
     const response = await ai.models.generateContent(request);
+    assertCompleteGoogleReply(response.candidates?.[0]?.finishReason);
     reply = response.text ?? "";
     collectSources(response.candidates?.[0]?.groundingMetadata?.groundingChunks);
   }
-  if (!reply.trim()) throw new AiUpstreamError(502);
+  if (!reply.trim() || reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
   return { reply, model, sources: [...sourceMap.values()] };
 }
 async function generateStructuredRiskSupervision(connection, input, signal) {
@@ -3072,14 +3121,12 @@ async function generateStructuredRiskSupervision(connection, input, signal) {
 Return one JSON object matching this schema:
 ${JSON.stringify(input.schema)}`
     };
-    let reply;
     try {
-      reply = await requestTextProvider(connection, structuredInput, signal, input.schema);
+      return await requestTextProvider(connection, structuredInput, signal, input.schema);
     } catch (error) {
       if (![400, 422].includes(aiUpstreamStatus(error) ?? 0)) throw error;
-      reply = await requestTextProvider(connection, structuredInput, signal);
+      return requestTextProvider(connection, structuredInput, signal);
     }
-    return { reply, model: connection.model };
   }
   const ai = createGoogleAiClient(connection.key);
   const generate = async (model) => (await ai.models.generateContent({
@@ -3126,6 +3173,7 @@ function createRiskSuperviseRouter(deps) {
     const snapshot = computeQuantSupervisionSnapshot(symbol, timeframe, candles, portfolio);
     const deterministic = buildDeterministicSupervisionReport(snapshot, lang, (/* @__PURE__ */ new Date()).toISOString());
     function sendFallback(reason, status = 200, error) {
+      if (res.destroyed) return;
       const report = { ...deterministic, fallbackReason: reason };
       const payload = { fallbackUsed: true, fallbackReason: reason };
       if (status === 403) {
@@ -3134,15 +3182,19 @@ function createRiskSuperviseRouter(deps) {
         res.status(status).json({ ok: status === 200, ...status !== 200 ? { code: reason, error } : {}, ...payload, report });
       }
     }
-    const access = await deps.resolveDeskAiAccess(req, "text");
-    if (!access.ok) {
-      if (access.code === "MISSING_API_KEY") sendFallback("GEMINI_API_KEY_MISSING");
-      else sendFallback(access.code, access.status, access.error);
-      return;
-    }
-    const { connection } = access;
-    const provider = isGoogleConnection(connection) ? "gemini" : connection.provider;
+    const disconnected = new AbortController();
+    const onClose = () => disconnected.abort();
+    res.once("close", onClose);
+    let connection;
     try {
+      const access = await deps.resolveDeskAiAccess(req, "text");
+      if (!access.ok) {
+        if (access.code === "MISSING_API_KEY") sendFallback("GEMINI_API_KEY_MISSING");
+        else sendFallback(access.code, access.status, access.error);
+        return;
+      }
+      connection = access.connection;
+      const provider = isGoogleConnection(connection) ? "gemini" : connection.provider;
       const rate = await deps.checkDistributedRateLimit(`risk-supervise:${access.rateSubject}`);
       if (!rate.allowed) {
         res.set("Retry-After", String(rate.retryAfterSec));
@@ -3163,19 +3215,21 @@ function createRiskSuperviseRouter(deps) {
         }),
         system: "Analytical & Risk Supervision Only. Describe observed market structure, data quality, and measured risk. Use only wording allowed by the schema. Include distinct checklist items and each reported structural band. Keep all content educational and descriptive.",
         schema: buildRiskSupervisionResponseSchema(deterministic)
-      }, AbortSignal.timeout(28e3));
+      }, AbortSignal.any([disconnected.signal, AbortSignal.timeout(28e3)]));
       const report = sanitizeAiRiskSupervisionReport(parseModelJson(result.reply), deterministic, result.model, provider);
       if (!report) {
         sendFallback(provider === "gemini" ? "GEMINI_REPORT_INVALID" : "AI_REPORT_INVALID");
         return;
       }
-      res.json({ ok: true, fallbackUsed: false, report });
+      if (!res.destroyed) res.json({ ok: true, fallbackUsed: false, report });
     } catch (error) {
-      if (connection.provider !== "platform" && isAiCredentialError(error)) {
+      if (connection && connection.provider !== "platform" && isAiCredentialError(error)) {
         sendFallback("BYOK_REQUIRED", 403, BYOK_REQUIRED_MESSAGE);
       } else {
-        sendFallback(provider === "gemini" ? "GEMINI_UNAVAILABLE" : "AI_PROVIDER_UNAVAILABLE");
+        sendFallback(connection && isGoogleConnection(connection) ? "GEMINI_UNAVAILABLE" : "AI_PROVIDER_UNAVAILABLE");
       }
+    } finally {
+      res.off("close", onClose);
     }
   });
   return router;
@@ -3264,11 +3318,11 @@ function createByokRouter(deps) {
     });
     res.json({ ok: true, authorizationUrl: `${AUTH_ORIGIN}/oauth/authorize?${query}`, verifier, state, redirectUri, expiresAt });
   }));
-  async function tokenRequest(params, refreshToken) {
+  async function tokenRequest(params, previous) {
     const response = await fetcher(`${AUTH_ORIGIN}/oauth/token`, {
       method: "POST",
-      headers: { "Content-Type": refreshToken ? "application/json" : "application/x-www-form-urlencoded" },
-      body: refreshToken ? JSON.stringify(params) : new URLSearchParams(params),
+      headers: { "Content-Type": previous ? "application/json" : "application/x-www-form-urlencoded" },
+      body: previous ? JSON.stringify(params) : new URLSearchParams(params),
       redirect: "error",
       signal: AbortSignal.timeout(12e3)
     });
@@ -3276,11 +3330,12 @@ function createByokRouter(deps) {
       await response.body?.cancel();
       return { status: response.status };
     }
-    const data = asRecord2(await response.json());
+    const data = asRecord(await response.json());
     const seconds = Number(data?.expires_in);
     const credential = readCodexOauthCredential({
       ...data,
-      refresh_token: data?.refresh_token || refreshToken,
+      account_id: data?.account_id ?? previous?.accountId,
+      refresh_token: normalizeHeaderSecret(data?.refresh_token) ?? previous?.token,
       expiresAt: Number.isFinite(seconds) && seconds > 0 && seconds <= 31536e3 ? Date.now() + seconds * 1e3 : void 0
     });
     return { status: response.status, credential };
@@ -3304,7 +3359,7 @@ function createByokRouter(deps) {
       code_verifier: verifier
     });
     if (!result.credential) {
-      res.status(result.status >= 400 && result.status < 500 ? 400 : 502).json({ ok: false, code: "OAUTH_EXCHANGE_FAILED", error: "Codex could not exchange this code. Start a new sign-in." });
+      res.status(result.status === 429 ? 429 : result.status >= 400 && result.status < 500 ? 400 : 502).json({ ok: false, code: "OAUTH_EXCHANGE_FAILED", error: "Codex could not exchange this code. Start a new sign-in." });
       return;
     }
     res.json({ ok: true, credential: result.credential });
@@ -3315,12 +3370,15 @@ function createByokRouter(deps) {
       res.status(400).json({ ok: false, code: "INVALID_REFRESH_TOKEN", error: "Reconnect your Codex account." });
       return;
     }
-    const result = await tokenRequest({ client_id: clientId, grant_type: "refresh_token", refresh_token: refreshToken }, refreshToken);
+    const result = await tokenRequest({ client_id: clientId, grant_type: "refresh_token", refresh_token: refreshToken }, {
+      token: refreshToken,
+      accountId: normalizeCodexAccountId(req.get(AI_HEADERS.account))
+    });
     if (!result.credential) {
       const rejected = [400, 401, 403].includes(result.status);
-      res.status(rejected ? 403 : 502).json({
+      res.status(rejected ? 403 : result.status === 429 ? 429 : 502).json({
         ok: false,
-        code: rejected ? "BYOK_REQUIRED" : "PROVIDER_UNAVAILABLE",
+        code: rejected ? "BYOK_REQUIRED" : result.status === 429 ? "RATE_LIMITED" : "PROVIDER_UNAVAILABLE",
         error: rejected ? "Reconnect your Codex account." : "Codex is temporarily unavailable."
       });
       return;
@@ -3749,9 +3807,9 @@ async function loadYahooBars(symbol, timeframe) {
       signal: AbortSignal.timeout(symbol === "GC=F" ? 7e3 : 4e3)
     });
     if (!response.ok) return null;
-    const payload = asRecord2(await response.json());
-    const result = asRecord2(array(asRecord2(payload?.chart)?.result)[0]);
-    const quote = asRecord2(array(asRecord2(result?.indicators)?.quote)[0]);
+    const payload = asRecord(await response.json());
+    const result = asRecord(array(asRecord(payload?.chart)?.result)[0]);
+    const quote = asRecord(array(asRecord(result?.indicators)?.quote)[0]);
     const timestamps = array(result?.timestamp);
     const open = array(quote?.open);
     const high = array(quote?.high);
@@ -3793,8 +3851,8 @@ async function loadDatabentoBars(key, timeframe) {
       await metadata.body?.cancel();
       return { status: upstreamStatus(metadata.status), candles: null };
     }
-    const range = asRecord2(await metadata.json());
-    const schemaRange = asRecord2(asRecord2(range?.schema)?.[schema]);
+    const range = asRecord(await metadata.json());
+    const schemaRange = asRecord(asRecord(range?.schema)?.[schema]);
     const availableFrom = schemaRange?.start ?? range?.start;
     const availableTo = schemaRange?.end ?? range?.end;
     if (typeof availableFrom !== "string" || typeof availableTo !== "string") return { status: "empty", candles: null };
@@ -3827,8 +3885,8 @@ async function loadDatabentoBars(key, timeframe) {
     const candles = [];
     for (const line of (await response.text()).split("\n")) {
       if (!line.trim()) continue;
-      const row = asRecord2(JSON.parse(line));
-      const timestamp = asRecord2(row?.hd)?.ts_event;
+      const row = asRecord(JSON.parse(line));
+      const timestamp = asRecord(row?.hd)?.ts_event;
       const ts = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
       if (!(ts >= start && ts < end)) continue;
       const candle = makeCandle(
@@ -3925,6 +3983,17 @@ function createComexBridgeRouter({ fetchLiveSpotQuote }) {
 }
 
 // server/ai/platformPrivilege.ts
+function readFirebaseLookupCaller(payload, requireVerifiedEmail) {
+  const users = asRecord(payload)?.users;
+  const user = asRecord(Array.isArray(users) ? users[0] : void 0);
+  if (!user || typeof user.localId !== "string" || !user.localId.trim() || user.disabled === true || requireVerifiedEmail && user.emailVerified !== true) return null;
+  return {
+    uid: user.localId,
+    email: typeof user.email === "string" ? user.email : "",
+    emailVerified: user.emailVerified === true,
+    customAttributes: typeof user.customAttributes === "string" ? user.customAttributes : void 0
+  };
+}
 var caches = /* @__PURE__ */ new WeakMap();
 function listed(value, list, ignoreCase = false) {
   if (!value || !list) return false;
@@ -3932,13 +4001,13 @@ function listed(value, list, ignoreCase = false) {
 }
 function claimsFrom(value) {
   try {
-    return value ? asRecord2(JSON.parse(value)) : void 0;
+    return value ? asRecord(JSON.parse(value)) : void 0;
   } catch {
     return void 0;
   }
 }
 function field(document2, name) {
-  return asRecord2(asRecord2(document2?.fields)?.[name])?.stringValue;
+  return asRecord(asRecord(document2?.fields)?.[name])?.stringValue;
 }
 async function lookupFirestoreRole(uid, authorization, deps) {
   const fetcher = deps.fetcher ?? fetch;
@@ -3964,7 +4033,7 @@ async function lookupFirestoreRole(uid, authorization, deps) {
       });
       if (response.status === 404) return { complete: true };
       if (!response.ok) return { complete: false };
-      return { complete: true, document: asRecord2(await response.json()) };
+      return { complete: true, document: asRecord(await response.json()) };
     } catch {
       return { complete: false };
     }
@@ -4323,7 +4392,7 @@ var LiveChartResponseCache = class {
         ageMs: Math.max(0, now - cached.cachedAtMs)
       };
     }
-    const existingFlight = !options.forceRefresh ? this.inFlight.get(cacheKey) : void 0;
+    const existingFlight = this.inFlight.get(cacheKey);
     if (existingFlight) {
       try {
         const telemetry = await existingFlight;
@@ -4343,7 +4412,8 @@ var LiveChartResponseCache = class {
         throw err;
       }
     }
-    const flightPromise = fetcher().then((telemetry) => {
+    const flightPromise = Promise.resolve().then(fetcher).then((telemetry) => {
+      if (this.inFlight.get(cacheKey) !== flightPromise) return telemetry;
       if (this.store.size >= this.maxEntries && !this.store.has(cacheKey)) {
         const oldestKey = this.store.keys().next().value;
         if (oldestKey) this.store.delete(oldestKey);
@@ -4632,17 +4702,7 @@ async function verifyFirebaseBearerToken(authHeader, requireVerifiedEmail = true
       signal: AbortSignal.timeout(4e3)
     });
     if (!resp.ok) return null;
-    const data = await resp.json();
-    const user = data.users && data.users[0];
-    if (!user || !user.localId || user.disabled || requireVerifiedEmail && user.emailVerified !== true) {
-      return null;
-    }
-    return {
-      uid: user.localId,
-      email: user.email || "",
-      emailVerified: user.emailVerified === true,
-      customAttributes: user.customAttributes
-    };
+    return readFirebaseLookupCaller(await resp.json(), requireVerifiedEmail);
   } catch {
     return null;
   }
@@ -6014,6 +6074,10 @@ function createApp() {
     return out;
   }
   app2.post("/api/chat", async (req, res) => {
+    const disconnected = new AbortController();
+    const onClose = () => disconnected.abort();
+    res.once("close", onClose);
+    const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(55e3)]);
     let isSseStarted = false;
     let usingPersonalKey = false;
     res.set("Cache-Control", "no-store");
@@ -6043,6 +6107,7 @@ data: ${JSON.stringify(data)}
       usingPersonalKey = connection.provider !== "platform";
       const rate = await checkDistributedRateLimit(`chat:${access.rateSubject}`, 35);
       if (!rate.allowed) {
+        res.set("Retry-After", String(rate.retryAfterSec));
         res.status(429).json({
           error: `\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19 AI \u0E42\u0E04\u0E49\u0E0A\u0E04\u0E23\u0E1A\u0E42\u0E04\u0E27\u0E15\u0E32\u0E0A\u0E31\u0E48\u0E27\u0E04\u0E23\u0E32\u0E27 (35 \u0E04\u0E23\u0E31\u0E49\u0E07 / 15 \u0E19\u0E32\u0E17\u0E35) \u0E01\u0E23\u0E38\u0E13\u0E32\u0E23\u0E2D ${rate.retryAfterSec} \u0E27\u0E34\u0E19\u0E32\u0E17\u0E35 \u0E2B\u0E23\u0E37\u0E2D\u0E43\u0E0A\u0E49\u0E1B\u0E38\u0E48\u0E21\u0E2A\u0E23\u0E38\u0E1B\u0E41\u0E1C\u0E19\u0E08\u0E32\u0E01\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07`,
           code: "RATE_LIMITED"
@@ -6060,7 +6125,7 @@ data: ${JSON.stringify(data)}
         attachments,
         enableWebSearch,
         stream
-      } = asRecord2(req.body) ?? {};
+      } = asRecord(req.body) ?? {};
       if (!message || typeof message !== "string" || !message.trim()) {
         res.status(400).json({ error: "\u0E01\u0E23\u0E38\u0E13\u0E32\u0E1E\u0E34\u0E21\u0E1E\u0E4C\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21\u0E17\u0E35\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E16\u0E32\u0E21\u0E42\u0E04\u0E49\u0E0A\u0E40\u0E17\u0E23\u0E14" });
         return;
@@ -6078,7 +6143,7 @@ data: ${JSON.stringify(data)}
       const attachmentList = Array.isArray(attachments) ? attachments : [];
       if (attachmentList.length) {
         for (const input of attachmentList.slice(0, 3)) {
-          const item = asRecord2(input);
+          const item = asRecord(input);
           if (!item) continue;
           const mime = String(item.mimeType || "").toLowerCase().trim();
           const name = String(item.name || "attachment").slice(0, 80);
@@ -6136,41 +6201,36 @@ ${message.trim()}` : message.trim();
           res.status(400).json({ code: "TEXT_ONLY_PROVIDER", error: "Use Google Gemini for images and PDFs, or remove the attachment." });
           return;
         }
-        const disconnected = new AbortController();
-        const onClose = () => disconnected.abort();
-        res.once("close", onClose);
         const search = connection.provider === "google" && Boolean(enableWebSearch);
         const route = { model: connection.model, failoverUsed: false, webSearchUsed: search, router: { routedBy: "manual" } };
-        try {
-          const reply = await streamOrGenerateCoachReply(connection, {
-            system: baseSystemInstruction + SAFE_HARBOR_REMINDER,
-            history: formattedHistory.map((item) => ({
-              role: item.role === "model" ? "assistant" : "user",
-              content: item.parts[0].text
-            })),
-            prompt: userPromptText,
-            attachments: binaryParts,
-            webSearch: search
-          }, {
-            signal: AbortSignal.any([disconnected.signal, AbortSignal.timeout(5e4)]),
-            ...stream === true ? { stream: { onText: (delta) => {
-              if (!isSseStarted) emitSse("route", route);
-              emitSse("delta", { text: delta });
-            } } } : {}
-          });
-          if (res.destroyed) return;
-          const payload = { ...route, ...reply, timestamp: (/* @__PURE__ */ new Date()).toISOString() };
-          if (stream === true) {
-            emitSse("done", payload);
-            res.end();
-          } else {
-            res.json(payload);
-          }
-        } finally {
-          res.off("close", onClose);
+        signal.throwIfAborted();
+        const reply = await streamOrGenerateCoachReply(connection, {
+          system: baseSystemInstruction + SAFE_HARBOR_REMINDER,
+          history: formattedHistory.map((item) => ({
+            role: item.role === "model" ? "assistant" : "user",
+            content: item.parts[0].text
+          })),
+          prompt: userPromptText,
+          attachments: binaryParts,
+          webSearch: search
+        }, {
+          signal,
+          ...stream === true ? { stream: { onText: (delta) => {
+            if (!isSseStarted) emitSse("route", route);
+            emitSse("delta", { text: delta });
+          } } } : {}
+        });
+        if (res.destroyed) return;
+        const payload = { ...route, ...reply, timestamp: (/* @__PURE__ */ new Date()).toISOString() };
+        if (stream === true) {
+          emitSse("done", payload);
+          res.end();
+        } else {
+          res.json(payload);
         }
         return;
       }
+      signal.throwIfAborted();
       const routePlan = await planModelRoute({
         prompt: message.trim(),
         hasRichContext: Boolean(safeContext || safeChartContext || attachedDocsText),
@@ -6180,6 +6240,7 @@ ${message.trim()}` : message.trim();
         preference: connection.model ?? model,
         decisionClient: createDecisionGenAIClient(connection.key)
       });
+      signal.throwIfAborted();
       const buildContentsForModel = (candidateModel, suffix) => {
         const allowPdf = modelSupportsPdf(candidateModel);
         const filteredBinary = binaryParts.filter((b) => allowPdf || b.mimeType !== "application/pdf");
@@ -6233,11 +6294,13 @@ ${fullSys}` }]
               model: candidateModel,
               contents,
               config: {
+                abortSignal: signal,
                 ...systemInstruction ? { systemInstruction } : {},
                 ...shouldSearch ? { tools: [{ googleSearch: {} }] } : {}
               }
             });
             for await (const chunk of responseStream) {
+              assertCompleteGoogleReply(chunk.candidates?.[0]?.finishReason);
               const deltaText = chunk.text || "";
               if (deltaText && !routeEmitted) {
                 routeEmitted = true;
@@ -6257,6 +6320,7 @@ ${fullSys}` }]
               }
               if (deltaText) {
                 accumulated += deltaText;
+                if (accumulated.length > 256e3) throw new AiUpstreamError(502);
                 emitSse("delta", { text: deltaText });
               }
               for (const src of extractGroundingSources(chunk)) {
@@ -6266,27 +6330,12 @@ ${fullSys}` }]
                 }
               }
             }
-            if (!routeEmitted) {
-              emitSse("route", {
-                model: candidateModel,
-                failoverUsed: i > 0,
-                webSearchUsed: shouldSearch,
-                router: {
-                  decisionModel: routePlan.decisionModel,
-                  routedBy: routePlan.routedBy,
-                  routeTier: routePlan.routeTier,
-                  confidence: routePlan.decisionConfidence,
-                  safeHarborTriggered: routePlan.asksForTradeSignal,
-                  needsWebSearch: useWebSearch
-                }
-              });
-            }
-            const finalReply = accumulated.trim().length > 0 ? accumulated : "\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E04\u0E33\u0E15\u0E2D\u0E1A\u0E44\u0E14\u0E49\u0E43\u0E19\u0E02\u0E13\u0E30\u0E19\u0E35\u0E49 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E25\u0E2D\u0E07\u0E43\u0E2B\u0E21\u0E48\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07";
+            if (!accumulated.trim()) throw new AiUpstreamError(502);
             if (collectedSources.length > 0) {
               emitSse("sources", { sources: collectedSources });
             }
             emitSse("done", {
-              reply: finalReply,
+              reply: accumulated,
               model: candidateModel,
               failoverUsed: i > 0,
               sources: collectedSources,
@@ -6304,7 +6353,7 @@ ${fullSys}` }]
             break;
           } catch (err) {
             lastErr = err;
-            const canRetry = accumulated.length === 0 && i < routePlan.candidateModels.length - 1 && isRetryableQuotaOrTransientError(err);
+            const canRetry = !signal.aborted && accumulated.length === 0 && i < routePlan.candidateModels.length - 1 && isRetryableQuotaOrTransientError(err);
             if (!canRetry) {
               throw err;
             }
@@ -6318,19 +6367,25 @@ ${fullSys}` }]
       }
       let finalSources = [];
       const orchestrated = await executeWithModelFailover(routePlan, async (candidateModel, suffix) => {
+        signal.throwIfAborted();
         const shouldSearch = useWebSearch && modelSupportsGoogleSearch(candidateModel);
         const { systemInstruction, contents } = buildContentsForModel(candidateModel, suffix);
         const response = await ai.models.generateContent({
           model: candidateModel,
           contents,
           config: {
+            abortSignal: signal,
             ...systemInstruction ? { systemInstruction } : {},
             ...shouldSearch ? { tools: [{ googleSearch: {} }] } : {}
           }
         });
+        assertCompleteGoogleReply(response.candidates?.[0]?.finishReason);
+        const reply = response.text?.trim();
+        if (!reply || reply.length > 256e3) throw new AiUpstreamError(502);
         finalSources = extractGroundingSources(response);
-        return response.text ?? "\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E04\u0E33\u0E15\u0E2D\u0E1A\u0E44\u0E14\u0E49\u0E43\u0E19\u0E02\u0E13\u0E30\u0E19\u0E35\u0E49 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E25\u0E2D\u0E07\u0E43\u0E2B\u0E21\u0E48\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07";
+        return reply;
       });
+      if (res.destroyed) return;
       res.json({
         reply: orchestrated.reply,
         model: orchestrated.model,
@@ -6363,33 +6418,46 @@ data: ${JSON.stringify({ code, error: errorMsg })}
         return;
       }
       res.status(byokRequired ? 403 : quota ? 429 : 502).json({ code, error: errorMsg });
+    } finally {
+      res.off("close", onClose);
     }
   });
   async function authorizeDeskVoice(req, res, bucket) {
     res.set("Cache-Control", "no-store");
-    const access = await resolveDeskAiAccess(req, "voice");
-    if (!access.ok) {
-      res.status(access.status).json({ error: access.error, code: access.code });
+    try {
+      const access = await resolveDeskAiAccess(req, "voice");
+      if (!access.ok) {
+        res.status(access.status).json({ error: access.error, code: access.code });
+        return null;
+      }
+      const rate = await checkDistributedRateLimit(`${bucket}:${access.rateSubject}`, bucket === "live" ? 15 : 50);
+      if (!rate.allowed) {
+        res.set("Retry-After", String(rate.retryAfterSec));
+        res.status(429).json({ error: "The voice request limit has been reached. Try again later.", code: "RATE_LIMITED" });
+        return null;
+      }
+      return res.destroyed ? null : access.connection;
+    } catch {
+      if (!res.destroyed) res.status(502).json({ error: "Voice authorization is temporarily unavailable.", code: "AI_PROVIDER_UNAVAILABLE" });
       return null;
     }
-    const rate = await checkDistributedRateLimit(`${bucket}:${access.rateSubject}`, bucket === "live" ? 15 : 50);
-    if (!rate.allowed) {
-      res.set("Retry-After", String(rate.retryAfterSec));
-      res.status(429).json({ error: "The voice request limit has been reached. Try again later.", code: "RATE_LIMITED" });
-      return null;
-    }
-    return access.connection;
   }
   function sendVoiceCredentialError(res, error, personal) {
     if (!personal || !isAiCredentialError(error)) return false;
     res.status(403).json({ error: BYOK_REQUIRED_MESSAGE, code: "BYOK_REQUIRED" });
     return true;
   }
+  function voiceRequestSignal(res) {
+    const disconnected = new AbortController();
+    res.once("close", () => disconnected.abort());
+    return AbortSignal.any([disconnected.signal, AbortSignal.timeout(28e3)]);
+  }
   app2.post("/api/ai/transcribe", async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, "voice");
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
-      const { audioBase64, mimeType } = asRecord2(req.body) ?? {};
+      const { audioBase64, mimeType } = asRecord(req.body) ?? {};
       const cleanBase64 = typeof audioBase64 === "string" ? audioBase64.replace(/^data:[^;]+;base64,/, "").trim() : "";
       if (!cleanBase64 || cleanBase64.length > 45e5) {
         res.status(400).json({ error: "\u0E44\u0E1F\u0E25\u0E4C\u0E40\u0E2A\u0E35\u0E22\u0E07\u0E44\u0E21\u0E48\u0E16\u0E39\u0E01\u0E15\u0E49\u0E2D\u0E07\u0E2B\u0E23\u0E37\u0E2D\u0E21\u0E35\u0E02\u0E19\u0E32\u0E14\u0E43\u0E2B\u0E0D\u0E48\u0E40\u0E01\u0E34\u0E19\u0E01\u0E33\u0E2B\u0E19\u0E14" });
@@ -6438,7 +6506,7 @@ data: ${JSON.stringify({ code, error: errorMsg })}
                 ]
               }
             }
-          });
+          }, { signal });
           const transcript = (interaction.output_text || "").trim();
           if (transcript) {
             res.json({ text: transcript, model: GEMINI_35_TRANSCRIBE, failoverUsed: false });
@@ -6453,6 +6521,7 @@ data: ${JSON.stringify({ code, error: errorMsg })}
       const fallbackCandidates = connection.provider === "google" ? [.../* @__PURE__ */ new Set([connection.model || "gemini-2.5-flash", "gemini-2.5-flash", GEMINI_FLASH_LITE_35])] : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
       let lastErr;
       for (const fallbackModel of fallbackCandidates) {
+        signal.throwIfAborted();
         try {
           const resp = await ai.models.generateContent({
             model: fallbackModel,
@@ -6471,11 +6540,15 @@ data: ${JSON.stringify({ code, error: errorMsg })}
                   }
                 ]
               }
-            ]
+            ],
+            config: { abortSignal: signal }
           });
+          assertCompleteGoogleReply(resp.candidates?.[0]?.finishReason);
           const text = (resp.text || "").trim();
-          res.json({ text, model: fallbackModel, failoverUsed: true });
-          return;
+          if (text) {
+            res.json({ text, model: fallbackModel, failoverUsed: true });
+            return;
+          }
         } catch (err) {
           lastErr = err;
           if (!isRetryableQuotaOrTransientError(err) && ![400, 404].includes(aiUpstreamStatus(err) ?? 0)) throw err;
@@ -6483,6 +6556,7 @@ data: ${JSON.stringify({ code, error: errorMsg })}
       }
       throw lastErr instanceof Error ? lastErr : new Error("Transcription failed");
     } catch (err) {
+      if (res.destroyed) return;
       if (!sendVoiceCredentialError(res, err, connection.provider === "google")) {
         res.status(502).json({ error: "The provider could not transcribe this audio.", code: "TRANSCRIBE_FAILED" });
       }
@@ -6491,8 +6565,9 @@ data: ${JSON.stringify({ code, error: errorMsg })}
   app2.post("/api/ai/tts", async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, "voice");
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
-      const { text, voice } = asRecord2(req.body) ?? {};
+      const { text, voice, lang } = asRecord(req.body) ?? {};
       const cleanText = stripMarkdownForSpeech(typeof text === "string" ? text : "").slice(0, 1800);
       if (!cleanText) {
         res.status(400).json({ error: "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E2A\u0E31\u0E07\u0E40\u0E04\u0E23\u0E32\u0E30\u0E2B\u0E4C\u0E40\u0E2A\u0E35\u0E22\u0E07" });
@@ -6502,6 +6577,7 @@ data: ${JSON.stringify({ code, error: errorMsg })}
       const ai = createGoogleAiClient(connection.key);
       const ttsModels = [GEMINI_38_FLASH_LITE_TTS, GEMINI_38_FLASH_TTS];
       for (let i = 0; i < ttsModels.length; i++) {
+        signal.throwIfAborted();
         const ttsModel = ttsModels[i];
         try {
           const interaction = await ai.interactions.create({
@@ -6510,9 +6586,9 @@ data: ${JSON.stringify({ code, error: errorMsg })}
             input: cleanText,
             response_modalities: ["audio"],
             generation_config: {
-              speech_config: [{ voice: safeVoice, language: "th" }]
+              speech_config: [{ voice: safeVoice, language: lang === "en" ? "en" : "th" }]
             }
-          });
+          }, { signal });
           const audioData = interaction.output_audio?.data;
           const audioMime = interaction.output_audio?.mime_type || "audio/wav";
           if (audioData) {
@@ -6532,14 +6608,15 @@ data: ${JSON.stringify({ code, error: errorMsg })}
       }
       res.json({ ok: true, fallbackClientTts: true });
     } catch {
-      res.json({ ok: true, fallbackClientTts: true });
+      if (!res.destroyed) res.json({ ok: true, fallbackClientTts: true });
     }
   });
   app2.post("/api/ai/live-token", async (req, res) => {
     const connection = await authorizeDeskVoice(req, res, "live");
     if (!connection) return;
+    const signal = voiceRequestSignal(res);
     try {
-      const { mode, voice, deskContext, liveChartContext } = asRecord2(req.body) ?? {};
+      const { mode, voice, deskContext, liveChartContext } = asRecord(req.body) ?? {};
       const liveMode = mode === "thinking" ? "thinking" : "standard";
       const targetModel = liveMode === "thinking" ? GEMINI_38_LIVE_THINKING : GEMINI_38_LIVE;
       const safeVoice = sanitizeVoiceName(voice);
@@ -6559,14 +6636,16 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       const now = Date.now();
       const expireTime = new Date(now + 30 * 60 * 1e3).toISOString();
       const newSessionExpireTime = new Date(now + 90 * 1e3).toISOString();
-      const apiVersion = connection.provider === "google" ? "v1beta" : "v1alpha";
+      const apiVersion = "v1beta";
       const tokenClient = createGoogleAiClient(connection.key, apiVersion);
       const candidateLiveModels = liveMode === "thinking" ? [GEMINI_38_LIVE_THINKING, GEMINI_38_LIVE] : [GEMINI_38_LIVE];
       let lastErr;
       for (const candidateModel of candidateLiveModels) {
+        signal.throwIfAborted();
         try {
           const authToken = await tokenClient.authTokens.create({
             config: {
+              abortSignal: signal,
               uses: 1,
               expireTime,
               newSessionExpireTime,
@@ -6582,7 +6661,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
                   outputAudioTranscription: {},
                   contextWindowCompression: { slidingWindow: {} },
                   sessionResumption: {},
-                  ...candidateModel === GEMINI_38_LIVE_THINKING ? { thinkingConfig: { thinkingLevel: "low" } } : {}
+                  ...candidateModel === GEMINI_38_LIVE_THINKING ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}
                 }
               }
             }
@@ -6602,11 +6681,13 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
             return;
           }
         } catch (err) {
+          signal.throwIfAborted();
           if (isAiCredentialError(err)) throw err;
           lastErr = err;
           try {
             const minimalToken = await tokenClient.authTokens.create({
               config: {
+                abortSignal: signal,
                 uses: 1,
                 expireTime,
                 newSessionExpireTime,
@@ -6614,7 +6695,10 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
                   model: candidateModel,
                   config: {
                     responseModalities: [Modality.AUDIO],
-                    systemInstruction: { parts: [{ text: liveInstruction }] }
+                    systemInstruction: { parts: [{ text: liveInstruction }] },
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: safeVoice } } },
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {}
                   }
                 }
               }
@@ -6641,6 +6725,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       }
       throw lastErr instanceof Error ? lastErr : new Error("Failed to mint ephemeral Live token");
     } catch (err) {
+      if (res.destroyed) return;
       if (!sendVoiceCredentialError(res, err, connection.provider === "google")) {
         res.status(502).json({ error: "The provider could not create a temporary Live token.", code: "LIVE_TOKEN_FAILED" });
       }

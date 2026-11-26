@@ -1,4 +1,4 @@
-import type { LiveServerMessage } from '@google/genai';
+import type { LiveServerMessage, Session } from '@google/genai';
 import {
   base64ToPcm16Float32,
   downsampleFloat32ToPcm16,
@@ -25,8 +25,6 @@ export interface LiveConnectCallbacks {
   token: string;
   model: string;
   apiVersion?: 'v1alpha' | 'v1beta';
-  voice?: string;
-  enableThinking?: boolean;
   onStateChange?: (state: LiveDeskConnectionState) => void;
   onTranscript?: (ev: LiveTranscriptEvent) => void;
   onLevel?: (level: number) => void;
@@ -35,10 +33,7 @@ export interface LiveConnectCallbacks {
 }
 
 export class GeminiLiveDeskClient {
-  private session: {
-    sendRealtimeInput: (params: Record<string, unknown>) => void;
-    close: () => void;
-  } | null = null;
+  private session: Session | null = null;
   private playbackCtx: AudioContext | null = null;
   private captureCtx: AudioContext | null = null;
   private micStream: MediaStream | null = null;
@@ -51,7 +46,8 @@ export class GeminiLiveDeskClient {
   private callbacks: LiveConnectCallbacks | null = null;
   private pendingOutputTranscript = '';
   private pendingInputTranscript = '';
-  private disconnected = false;
+  private disconnected = true;
+  private connectionId = 0;
 
   private setState(next: LiveDeskConnectionState) {
     if (this.state === next) return;
@@ -68,8 +64,12 @@ export class GeminiLiveDeskClient {
   }
 
   public async connect(opts: LiveConnectCallbacks): Promise<void> {
-    await this.disconnect();
+    const closing = this.disconnect();
+    const id = this.connectionId;
+    await closing;
+    if (id !== this.connectionId) return;
     this.disconnected = false;
+    const active = () => id === this.connectionId && !this.disconnected;
     this.muted = false;
     this.callbacks = opts;
     this.pendingInputTranscript = '';
@@ -79,74 +79,38 @@ export class GeminiLiveDeskClient {
     try {
       const genaiModule = await import('@google/genai');
       const { GoogleGenAI, Modality } = genaiModule;
+      if (!active()) return;
 
       const ai = new GoogleGenAI({
         apiKey: opts.token,
-        httpOptions: { apiVersion: opts.apiVersion ?? 'v1alpha' },
+        httpOptions: { apiVersion: opts.apiVersion ?? 'v1beta' },
       });
-
-      const liveConfig: Record<string, unknown> = {
-        responseModalities: [Modality.AUDIO],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-        ...(opts.voice
-          ? {
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: opts.voice } },
-              },
-            }
-          : {}),
-        ...(opts.enableThinking
-          ? {
-              thinkingConfig: { thinkingLevel: 'low' },
-            }
-          : {}),
-      };
 
       const session = await ai.live.connect({
         model: opts.model,
-        config: liveConfig as never,
+        // The token already locks the voice, transcription and instruction fields.
+        config: { responseModalities: [Modality.AUDIO] },
         callbacks: {
-          onopen: () => {
-            if (!this.disconnected) {
-              this.setState('LISTENING');
-            }
+          onmessage: msg => { if (active()) this.handleServerMessage(msg); },
+          onerror: () => {
+            if (!active()) return;
+            opts.onError?.('Live WebSocket error');
+            void this.release('ERROR');
           },
-          onmessage: (msg: LiveServerMessage) => {
-            this.handleServerMessage(msg);
-          },
-          onerror: (err: unknown) => {
-            const message =
-              err instanceof Error
-                ? err.message
-                : typeof err === 'object' && err !== null && 'message' in err
-                  ? String((err as { message?: unknown }).message || 'Live WebSocket error')
-                  : 'การเชื่อมต่อ Live WebSocket ขัดข้อง';
-            this.setState('ERROR');
-            this.callbacks?.onError?.(message);
-          },
-          onclose: () => {
-            if (!this.disconnected) {
-              this.setState('IDLE');
-            }
-          },
+          onclose: () => { if (active()) void this.disconnect(); },
         },
       });
-
-      if (this.disconnected) {
+      if (!active()) {
         session.close();
         return;
       }
-
-      this.session = session as unknown as {
-        sendRealtimeInput: (params: Record<string, unknown>) => void;
-        close: () => void;
-      };
-      await this.startMicrophone();
-      this.setState('LISTENING');
-    } catch (err) {
-      this.setState('ERROR');
-      throw err;
+      this.session = session;
+      await this.startMicrophone(active);
+      if (active()) this.setState('LISTENING');
+    } catch (error) {
+      if (!active()) return;
+      await this.release('ERROR');
+      throw error;
     }
   }
 
@@ -176,16 +140,21 @@ export class GeminiLiveDeskClient {
       });
     }
 
-    if (content.inputTranscription?.text) {
-      const finalUserText = content.inputTranscription.text.trim();
-      this.pendingInputTranscript = '';
-      if (finalUserText) {
-        this.callbacks?.onTranscript?.({
-          role: 'user',
-          text: finalUserText,
-          isFinal: true,
-        });
+    const input = content.inputTranscription;
+    if (input?.text) {
+      if (input.finished === false) {
+        this.pendingInputTranscript += input.text;
+        this.callbacks?.onTranscript?.({ role: 'user', text: this.pendingInputTranscript, isFinal: false });
+      } else if (input.finished === true) {
+        this.pendingInputTranscript += input.text;
+      } else {
+        this.pendingInputTranscript = input.text;
       }
+    }
+    if (input?.finished === true || (input?.text && input.finished === undefined) || content.turnComplete) {
+      const text = this.pendingInputTranscript.trim();
+      this.pendingInputTranscript = '';
+      if (text) this.callbacks?.onTranscript?.({ role: 'user', text, isFinal: true });
     }
 
     if (content.outputTranscription?.text) {
@@ -291,7 +260,7 @@ export class GeminiLiveDeskClient {
     }
   }
 
-  private async startMicrophone(): Promise<void> {
+  private async startMicrophone(active: () => boolean): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('เบราว์เซอร์ไม่รองรับการเข้าถึงไมโครโฟน');
     }
@@ -303,7 +272,7 @@ export class GeminiLiveDeskClient {
         channelCount: 1,
       },
     });
-    if (this.disconnected) {
+    if (!active()) {
       stream.getTracks().forEach((t) => t.stop());
       return;
     }
@@ -314,6 +283,7 @@ export class GeminiLiveDeskClient {
       await ctx.resume();
     }
 
+    if (!active()) return;
     const source = ctx.createMediaStreamSource(stream);
     this.micSource = source;
     const processor = ctx.createScriptProcessor(4096, 1, 1);
@@ -324,7 +294,7 @@ export class GeminiLiveDeskClient {
     silentGain.gain.value = 0;
 
     processor.onaudioprocess = (ev) => {
-      if (this.disconnected || !this.session) return;
+      if (!active() || !this.session) return;
       const inputData = ev.inputBuffer.getChannelData(0);
       let sumSq = 0;
       for (let i = 0; i < inputData.length; i++) {
@@ -416,7 +386,12 @@ export class GeminiLiveDeskClient {
     }
   }
 
-  public async disconnect(): Promise<void> {
+  public disconnect(): Promise<void> {
+    return this.release('IDLE');
+  }
+
+  private async release(finalState: 'IDLE' | 'ERROR'): Promise<void> {
+    this.connectionId++;
     this.disconnected = true;
     this.stopAllPlayback();
 
@@ -453,18 +428,16 @@ export class GeminiLiveDeskClient {
       this.micStream = null;
     }
 
-    if (this.captureCtx && this.captureCtx.state !== 'closed') {
-      await this.captureCtx.close().catch(() => null);
-      this.captureCtx = null;
-    }
-
-    if (this.playbackCtx && this.playbackCtx.state !== 'closed') {
-      await this.playbackCtx.close().catch(() => null);
-      this.playbackCtx = null;
-    }
-
+    const capture = this.captureCtx;
+    const playback = this.playbackCtx;
+    this.captureCtx = null;
+    this.playbackCtx = null;
     this.callbacks?.onLevel?.(0);
-    this.setState('IDLE');
+    this.setState(finalState);
+    this.callbacks = null;
+    await Promise.all([capture, playback].map(context =>
+      context && context.state !== 'closed' ? context.close().catch(() => undefined) : undefined,
+    ));
   }
 }
 
@@ -473,8 +446,10 @@ export class VoiceWavRecorder {
   private stream: MediaStream | null = null;
   private processor: ScriptProcessorNode | null = null;
   private chunks: Int16Array[] = [];
+  private recordingId = 0;
 
   public async start(onLevel?: (level: number) => void): Promise<void> {
+    const id = ++this.recordingId;
     this.chunks = [];
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('เบราว์เซอร์ไม่รองรับการใช้งานไมโครโฟน');
@@ -487,12 +462,17 @@ export class VoiceWavRecorder {
         channelCount: 1,
       },
     });
+    if (id !== this.recordingId) {
+      stream.getTracks().forEach(track => track.stop());
+      return;
+    }
     this.stream = stream;
     const ctx = new AudioContext();
     this.ctx = ctx;
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
+    if (id !== this.recordingId) return;
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     this.processor = processor;
@@ -516,6 +496,7 @@ export class VoiceWavRecorder {
   }
 
   public async stop(): Promise<{ wavBase64: string; mimeType: 'audio/wav'; durationMs: number }> {
+    this.recordingId++;
     if (this.processor) {
       this.processor.disconnect();
       this.processor.onaudioprocess = null;
@@ -525,19 +506,19 @@ export class VoiceWavRecorder {
       this.stream.getTracks().forEach((t) => t.stop());
       this.stream = null;
     }
-    if (this.ctx && this.ctx.state !== 'closed') {
-      await this.ctx.close().catch(() => null);
-      this.ctx = null;
-    }
+    const context = this.ctx;
+    const chunks = this.chunks;
+    this.ctx = null;
+    this.chunks = [];
+    if (context && context.state !== 'closed') await context.close().catch(() => undefined);
 
-    const totalLen = this.chunks.reduce((acc, c) => acc + c.length, 0);
+    const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
     const merged = new Int16Array(totalLen);
     let offset = 0;
-    for (const c of this.chunks) {
+    for (const c of chunks) {
       merged.set(c, offset);
       offset += c.length;
     }
-    this.chunks = [];
     const durationMs = Math.round((totalLen / 16000) * 1000);
     return {
       wavBase64: encodePcm16ToWavBase64(merged, 16000),
@@ -555,10 +536,13 @@ export interface SpeechPlaybackHandle {
 export async function speakTextWithFallback(params: {
   text: string;
   requestHeaders?: Record<string, string>;
+  signal?: AbortSignal;
+  lang?: 'th' | 'en';
   voice?: string;
   onStart?: () => void;
   onEnd?: () => void;
 }): Promise<SpeechPlaybackHandle> {
+  params.signal?.throwIfAborted();
   const cleanText = stripMarkdownForSpeech(params.text).slice(0, 1800);
   if (!cleanText) {
     params.onEnd?.();
@@ -570,16 +554,19 @@ export async function speakTextWithFallback(params: {
       const resp = await fetch('/api/ai/tts', {
         method: 'POST',
         headers: params.requestHeaders,
+        signal: AbortSignal.any([AbortSignal.timeout(35_000), ...(params.signal ? [params.signal] : [])]),
         redirect: 'error',
-        body: JSON.stringify({ text: cleanText, voice: params.voice || 'Aoede' }),
+        body: JSON.stringify({ text: cleanText, voice: params.voice || 'Aoede', lang: params.lang }),
       });
+      params.signal?.throwIfAborted();
       if (resp.ok) {
         const data = (await resp.json()) as {
           audioBase64?: string;
           mimeType?: string;
           fallbackClientTts?: boolean;
         };
-        if (data.audioBase64 && !data.fallbackClientTts) {
+        params.signal?.throwIfAborted();
+        if (typeof data?.audioBase64 === 'string' && data.audioBase64 && !data.fallbackClientTts) {
           let mimeType = data.mimeType || 'audio/wav';
           let audioBase64 = data.audioBase64;
           if (/^audio\/(?:l16|pcm)\b/i.test(mimeType)) {
@@ -593,29 +580,33 @@ export async function speakTextWithFallback(params: {
           const finished = new Promise<void>((res) => {
             resolveDone = res;
           });
-          audio.onended = () => {
+          const finish = () => {
+            params.signal?.removeEventListener('abort', stop);
+            audio.onended = null;
+            audio.onerror = null;
             params.onEnd?.();
             resolveDone();
           };
-          audio.onerror = () => {
-            params.onEnd?.();
-            resolveDone();
-          };
+          const stop = () => { audio.pause(); finish(); };
+          audio.onended = finish;
+          audio.onerror = finish;
+          params.signal?.addEventListener('abort', stop, { once: true });
+          try {
+            await audio.play();
+            params.signal?.throwIfAborted();
+          } catch (error) {
+            params.signal?.removeEventListener('abort', stop);
+            audio.onended = null;
+            audio.onerror = null;
+            throw error;
+          }
           params.onStart?.();
-          await audio.play();
-          return {
-            stop: () => {
-              audio.pause();
-              audio.currentTime = 0;
-              params.onEnd?.();
-              resolveDone();
-            },
-            finished,
-          };
+          return { stop, finished };
         }
       }
     } catch {
-      // fall through cleanly to Web Speech API
+      params.signal?.throwIfAborted();
+      // Fall back to browser speech when cloud synthesis is unavailable.
     }
   }
 
@@ -623,13 +614,10 @@ export async function speakTextWithFallback(params: {
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(cleanText);
     const voices = window.speechSynthesis.getVoices();
-    const thVoice = voices.find((v) => /^th/i.test(v.lang));
-    if (thVoice) {
-      utter.voice = thVoice;
-      utter.lang = thVoice.lang;
-    } else {
-      utter.lang = 'th-TH';
-    }
+    const lang = params.lang ?? 'th';
+    const voice = voices.find(v => v.lang.toLowerCase() === lang || v.lang.toLowerCase().startsWith(`${lang}-`));
+    if (voice) utter.voice = voice;
+    utter.lang = voice?.lang ?? (lang === 'th' ? 'th-TH' : 'en-US');
     utter.rate = 1.02;
 
     let resolveDone!: () => void;
@@ -641,11 +629,7 @@ export async function speakTextWithFallback(params: {
       params.onEnd?.();
       resolveDone();
     };
-    utter.onerror = () => {
-      params.onEnd?.();
-      resolveDone();
-    };
-    params.onStart?.();
+    utter.onerror = utter.onend;
     window.speechSynthesis.speak(utter);
     return {
       stop: () => {

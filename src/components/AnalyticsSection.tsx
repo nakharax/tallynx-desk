@@ -577,9 +577,11 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
           ? fmtUSD(acc.balance)
           : '—';
   const floatingPnl = isPilot ? pilotTelemetry?.floatingPnl : posture?.floatingPnlUsd;
+  const bridge = liveMonitor?.provider === 'LIVE_BRIDGE' && liveMonitor.connected ? liveMonitor : undefined;
   const floatingPnlText = isPilot
     ? formatPilotAmount(pilotTelemetry?.floatingPnl, pilotCurrency, true)
-    : floatingPnl == null ? '—' : fmtUSD(Number(floatingPnl), true);
+    : bridge?.floatingPnl != null ? formatPilotAmount(bridge.floatingPnl, bridge.currency, true)
+      : floatingPnl == null || !Number.isFinite(Number(floatingPnl)) ? '—' : fmtUSD(Number(floatingPnl), true);
   const pilotProfitText =
     pilotProfit !== undefined
       ? formatPilotAmount(pilotProfit, pilotCurrency, true)
@@ -637,14 +639,14 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
         <div className="fx-stat-card">
           <div className="fx-stat-label">{copy.balance}</div>
           <div className="fx-stat-val mono sensitive-val">
-            {isPilot ? pilotBalanceText : fmtUSD(acc.balance)}
+            {isPilot ? pilotBalanceText : bridge?.balance != null ? formatPilotAmount(bridge.balance, bridge.currency) : fmtUSD(acc.balance)}
           </div>
         </div>
 
         <div className="fx-stat-card">
           <div className="fx-stat-label">{copy.equity}</div>
           <div className="fx-stat-val mono sensitive-val">
-            {isPilot ? pilotEquityText : fmtUSD(posture?.equityUsd ?? acc.balance)}
+            {isPilot ? pilotEquityText : bridge?.equity != null ? formatPilotAmount(bridge.equity, bridge.currency) : fmtUSD(posture?.equityUsd ?? acc.balance)}
           </div>
         </div>
 

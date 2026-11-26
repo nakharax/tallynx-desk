@@ -7,6 +7,19 @@ export interface VerifiedAiCaller {
   customAttributes?: string;
 }
 
+export function readFirebaseLookupCaller(payload: unknown, requireVerifiedEmail: boolean): VerifiedAiCaller | null {
+  const users = asRecord(payload)?.users;
+  const user = asRecord(Array.isArray(users) ? users[0] : undefined);
+  if (!user || typeof user.localId !== 'string' || !user.localId.trim() || user.disabled === true ||
+      (requireVerifiedEmail && user.emailVerified !== true)) return null;
+  return {
+    uid: user.localId,
+    email: typeof user.email === 'string' ? user.email : '',
+    emailVerified: user.emailVerified === true,
+    customAttributes: typeof user.customAttributes === 'string' ? user.customAttributes : undefined,
+  };
+}
+
 export interface PlatformAiPrivilege {
   eligible: boolean;
   role: PlatformAiRole;

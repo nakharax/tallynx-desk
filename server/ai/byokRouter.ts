@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type RequestHandler } from 'express';
 import {
-  AI_HEADERS, AI_MODEL_CATALOG, CODEX_CALLBACK_URI, asRecord, buildDatabentoRequestHeaders, normalizeHeaderSecret,
+  AI_HEADERS, AI_MODEL_CATALOG, CODEX_CALLBACK_URI, asRecord, buildDatabentoRequestHeaders, normalizeCodexAccountId, normalizeHeaderSecret,
   readCodexOauthCredential,
 } from '../../src/utils/aiProviderConfig.js';
 import { GEMINI_DECISION_MODEL, GEMINI_FLASH_LITE_31, GEMINI_FLASH_LITE_35, GEMINI_38_LIVE } from '../../src/utils/geminiOrchestrator.js';
@@ -95,11 +95,11 @@ export function createByokRouter(deps: ByokRouterDependencies) {
     res.json({ ok: true, authorizationUrl: `${AUTH_ORIGIN}/oauth/authorize?${query}`, verifier, state, redirectUri, expiresAt });
   }));
 
-  async function tokenRequest(params: Record<string, string>, refreshToken?: string) {
+  async function tokenRequest(params: Record<string, string>, previous?: { token: string; accountId?: string }) {
     const response = await fetcher(`${AUTH_ORIGIN}/oauth/token`, {
       method: 'POST',
-      headers: { 'Content-Type': refreshToken ? 'application/json' : 'application/x-www-form-urlencoded' },
-      body: refreshToken ? JSON.stringify(params) : new URLSearchParams(params),
+      headers: { 'Content-Type': previous ? 'application/json' : 'application/x-www-form-urlencoded' },
+      body: previous ? JSON.stringify(params) : new URLSearchParams(params),
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),
     });
@@ -111,7 +111,8 @@ export function createByokRouter(deps: ByokRouterDependencies) {
     const seconds = Number(data?.expires_in);
     const credential = readCodexOauthCredential({
       ...data,
-      refresh_token: data?.refresh_token || refreshToken,
+      account_id: data?.account_id ?? previous?.accountId,
+      refresh_token: normalizeHeaderSecret(data?.refresh_token) ?? previous?.token,
       expiresAt: Number.isFinite(seconds) && seconds > 0 && seconds <= 31_536_000 ? Date.now() + seconds * 1000 : undefined,
     });
     return { status: response.status, credential };
@@ -134,7 +135,7 @@ export function createByokRouter(deps: ByokRouterDependencies) {
       client_id: clientId, grant_type: 'authorization_code', redirect_uri: redirectUri, code, code_verifier: verifier,
     });
     if (!result.credential) {
-      res.status(result.status >= 400 && result.status < 500 ? 400 : 502)
+      res.status(result.status === 429 ? 429 : result.status >= 400 && result.status < 500 ? 400 : 502)
         .json({ ok: false, code: 'OAUTH_EXCHANGE_FAILED', error: 'Codex could not exchange this code. Start a new sign-in.' });
       return;
     }
@@ -147,11 +148,13 @@ export function createByokRouter(deps: ByokRouterDependencies) {
       res.status(400).json({ ok: false, code: 'INVALID_REFRESH_TOKEN', error: 'Reconnect your Codex account.' });
       return;
     }
-    const result = await tokenRequest({ client_id: clientId, grant_type: 'refresh_token', refresh_token: refreshToken }, refreshToken);
+    const result = await tokenRequest({ client_id: clientId, grant_type: 'refresh_token', refresh_token: refreshToken }, {
+      token: refreshToken, accountId: normalizeCodexAccountId(req.get(AI_HEADERS.account)),
+    });
     if (!result.credential) {
       const rejected = [400, 401, 403].includes(result.status);
-      res.status(rejected ? 403 : 502).json({
-        ok: false, code: rejected ? 'BYOK_REQUIRED' : 'PROVIDER_UNAVAILABLE',
+      res.status(rejected ? 403 : result.status === 429 ? 429 : 502).json({
+        ok: false, code: rejected ? 'BYOK_REQUIRED' : result.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         error: rejected ? 'Reconnect your Codex account.' : 'Codex is temporarily unavailable.',
       });
       return;

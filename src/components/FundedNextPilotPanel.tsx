@@ -73,7 +73,12 @@ function formatPilotMessage(message: string, lang: DeskLanguage): string {
   }
 }
 
-export function FundedNextPilotPanel({
+export function FundedNextPilotPanel(props: Props) {
+  const { firebaseUid, portId, account } = props;
+  return <ScopedFundedNextPilotPanel key={JSON.stringify([firebaseUid, portId, account.fundedNextAccountId, account.fundedNextConnectionId])} {...props} />;
+}
+
+function ScopedFundedNextPilotPanel({
   lang = 'en',
   account, portId, journal, firebaseUid, onGetIdToken, pilotFeed, pilotPolling, pilotOAuthPort,
   onConnectPilot, onCancelPilotOAuth, onUpdatePilotPorts,
@@ -145,7 +150,7 @@ export function FundedNextPilotPanel({
   }, [firebaseUid, getToken, connectionId, refreshKey, pilotOAuthPort, onUpdatePilotPorts]);
 
   useEffect(() => {
-    if (!firebaseUid || !accountId || pilotPolling) return;
+    if (!firebaseUid || !accountId || pilotPolling || pilotOAuthPort === portId) return;
     const controller = new AbortController();
     const refresh = async () => {
       try {
@@ -160,7 +165,7 @@ export function FundedNextPilotPanel({
     };
     void refresh();
     return () => controller.abort();
-  }, [firebaseUid, accountId, getToken, pilotPolling, refreshKey, pilotOAuthPort]);
+  }, [firebaseUid, accountId, getToken, pilotPolling, refreshKey, pilotOAuthPort, portId]);
 
   const isPilotPort = account.syncProvider === 'FUNDEDNEXT_MCP';
   const selected = isPilotPort ? directory?.accounts.find(item => item.id === accountId) : undefined;
@@ -169,7 +174,7 @@ export function FundedNextPilotPanel({
   const snapshot = read?.data?.snapshot;
   const liveTelemetry = read?.data?.liveTelemetry;
   const liveOpenPositions = liveTelemetry?.openPositions ?? snapshot?.openPositions ?? [];
-  const liveBalanceNum = liveTelemetry?.balance ?? (snapshot?.balance != null ? Number(snapshot.balance) : account.initial);
+  const liveBalanceNum = liveTelemetry?.balance ?? (snapshot?.balance != null ? Number(snapshot.balance) : NaN);
   const liveEquityNum = liveTelemetry?.equity ?? (snapshot?.equity != null ? Number(snapshot.equity) : liveBalanceNum);
   const liveDailyLimit = liveTelemetry?.dailyLossLimitUsd ?? Math.max(100, account.initial * 0.05);
   const liveMetrics = computeLivePositionMetrics(
@@ -342,11 +347,11 @@ export function FundedNextPilotPanel({
             <div><dt>{t("Balance", "ยอดคงเหลือ")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.balance ?? snapshot?.balance, snapshot?.currency)}</dd></div>
             <div><dt>{t("Equity", "Equity")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.equity ?? snapshot?.equity ?? snapshot?.balance, snapshot?.currency)}</dd></div>
             <div><dt>{t("Floating PnL", "กำไร/ขาดทุนลอยตัว")}</dt><dd className="mono">{formatPilotAmount(liveTelemetry?.floatingPnl ?? snapshot?.floatingPnl, snapshot?.currency, true)}</dd></div>
-            <div><dt>{t("Open positions", "สถานะที่เปิดอยู่")}</dt><dd className="mono">{liveOpenPositions.length}</dd></div>
-            <div><dt>{t("Daily DD Left", "DD รายวันคงเหลือ")}</dt><dd className="mono">{formatPilotAmount(liveMetrics.summary.dailyDdRemainingUsd, snapshot?.currency ?? 'USD')}</dd></div>
+            <div><dt>{t("Open positions", "สถานะที่เปิดอยู่")}</dt><dd className="mono">{liveTelemetry?.openPositions || snapshot?.openPositions ? liveOpenPositions.length : '—'}</dd></div>
+            <div><dt>{t("Daily DD Left", "DD รายวันคงเหลือ")}</dt><dd className="mono">{Number.isFinite(liveBalanceNum) ? formatPilotAmount(liveMetrics.summary.dailyDdRemainingUsd, snapshot?.currency ?? 'USD') : '—'}</dd></div>
             <div><dt>{t("Margin Level", "ระดับมาร์จิ้น")}</dt><dd className="mono">{liveMetrics.summary.marginLevelPct != null ? `${liveMetrics.summary.marginLevelPct.toFixed(1)}%` : '—'}</dd></div>
           </dl>
-          {pilotPolling && !reconnect && (
+          {pilotPolling && liveTelemetry && !reconnect && (
             <div className="fundednext-live-summary">
               <div className="fundednext-live-summary-head">
                 <span>
@@ -357,10 +362,10 @@ export function FundedNextPilotPanel({
                   </span>
                 </span>
                 <span className="mono">
-                  {liveTelemetry?.rateFloorMs
+                  {Number.isFinite(liveTelemetry.rateFloorMs) && liveTelemetry.rateFloorMs > 0
                     ? t(`${Math.round(liveTelemetry.rateFloorMs / 1000)}s server floor`, `รอบเซิร์ฟเวอร์ ${Math.round(liveTelemetry.rateFloorMs / 1000)}วิ`)
                     : t('3s active', 'อัปเดตทุก 3วิ')}
-                  {liveTelemetry?.consistencyLiveImpactPct != null &&
+                  {liveTelemetry.consistencyLiveImpactPct != null && Number.isFinite(liveTelemetry.consistencyLiveImpactPct) &&
                     ` · ${t('Day share', 'สัดส่วนวันนี้')} ${liveTelemetry.consistencyLiveImpactPct.toFixed(1)}%`}
                 </span>
               </div>
