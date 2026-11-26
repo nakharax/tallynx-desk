@@ -27,10 +27,10 @@ export function ReviewAutopsySection({
   const wins = accountTrades.filter((trade) => Number(trade.pnlUsd) > 0).length;
   const winRate = tradeCount ? `${(100 * wins / tradeCount).toFixed(1)}%` : '—';
   const metrics = [
-    { label: t('Balance', 'ยอดคงเหลือ'), value: account ? balance : '—' },
-    { label: t('Trades', 'จำนวนรายการ'), value: account ? tradeCount.toLocaleString(lang) : '—' },
-    { label: t('Win rate', 'อัตราชนะ'), value: winRate },
-    { label: t('Daily drawdown headroom', 'วงเงินขาดทุนรายวันที่เหลือ'), value: dailyDrawdownHeadroom },
+    { label: t('Balance', 'ยอดคงเหลือ'), value: account ? balance : '—', sensitive: true },
+    { label: t('Trades', 'จำนวนรายการ'), value: account ? tradeCount.toLocaleString(lang) : '—', sensitive: false },
+    { label: t('Win rate', 'อัตราชนะ'), value: winRate, sensitive: false },
+    { label: t('Daily drawdown headroom', 'วงเงินขาดทุนรายวันที่เหลือ'), value: dailyDrawdownHeadroom, sensitive: true },
   ];
 
   return (
@@ -46,10 +46,10 @@ export function ReviewAutopsySection({
           </button>
         </div>
         <dl className="review-diagnostics-metrics">
-          {metrics.map(({ label, value }) => (
+          {metrics.map(({ label, value, sensitive }) => (
             <div key={label}>
               <dt>{label}</dt>
-              <dd className="mono">{privacyMasked && value !== '—' ? '••••' : value}</dd>
+              <dd className="mono">{sensitive && privacyMasked && value !== '—' ? '••••' : value}</dd>
             </div>
           ))}
         </dl>

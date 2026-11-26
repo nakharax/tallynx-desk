@@ -5166,19 +5166,34 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   display: flex;
   flex-direction: column;
   flex: 1 0 auto;
+  min-width: 0;
+  max-width: 100%;
   min-height: auto;
   padding: var(--workspace-card-padding);
   gap: 16px;
 }
-.tv-toolbar { padding-bottom: 6px; }
+.tv-toolbar { padding-bottom: 6px; min-width: 0; }
 .tv-control-group,
 .chart-quant-links {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   min-width: 0;
+  max-width: 100%;
   gap: 5px 8px;
-  flex-shrink: 0;
+}
+.tv-control-group { flex: 0 1 auto; }
+.tv-toolbar .chart-mode-toggle,
+.tv-toolbar .topbar-group,
+.tv-toolbar .control-pill {
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+}
+.tv-toolbar .control-pill select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
 }
 .tv-canvas-grid {
   display: grid;
