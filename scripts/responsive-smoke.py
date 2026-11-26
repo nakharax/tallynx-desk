@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 TallyNX Desk Responsive Smoke Test (Mobile & Tablet Regression Guard)
-Verifies zero horizontal overflow, zero topbar collisions, clickable drawers/modals,
-and real-data rendering across mobile (375px) and tablet (768px-1024px) viewports.
+Verifies workflow navigation, responsive layout, and clickable drawers/modals
+with seeded trade records across mobile (375px) and tablet (768px-1024px).
 
 Usage:
   python3 scripts/responsive-smoke.py --url http://127.0.0.1:3000
@@ -185,30 +185,66 @@ def main():
                 else:
                     print(f"[PASS] {vp_name} / {label}")
 
-            def click_pillar(idx, sub_idx=None):
-                mob_vis = page.evaluate(
-                    "() => getComputedStyle(document.querySelector('.fx-mobile-bottom-nav')).display !== 'none'"
-                )
-                nav_sel = ".fx-mobile-bottom-nav button" if mob_vis else ".fx-sidebar-nav button"
-                page.locator(nav_sel).nth(idx).click(timeout=5000)
-                page.wait_for_timeout(450)
-                if sub_idx is not None:
-                    tabs = page.locator(".workspace-subtabs button")
-                    if tabs.count() > sub_idx:
-                        tabs.nth(sub_idx).click(timeout=5000)
-                        page.wait_for_timeout(450)
+            nav = page.locator(".fx-mobile-bottom-nav")
+            mobile = nav.is_visible()
+            more = nav.locator('[data-pillar="more"]')
+            more_sheet = nav.locator(".fx-mobile-more-sheet")
 
-            # 1. Portfolio Overview & Performance & Journal (with 18 real trades)
-            check("portfolio_overview")
-            page.locator("#analysis-view-performance-tab").click(timeout=5000)
-            page.wait_for_timeout(400)
-            check("portfolio_performance")
-            click_pillar(0, 1)
-            check("trade_journal")
+            def click_pillar(pillar, section):
+                rail = nav if mobile else page.locator(".fx-sidebar-nav")
+                if mobile and pillar in ("rules", "mall", "settings"):
+                    more.click(timeout=5000)
+                    more_sheet.wait_for(state="visible", timeout=5000)
+                    check(f"more_open_{pillar}")
+                rail.locator(f'[data-pillar="{pillar}"]').click(timeout=5000)
+                page.locator(f"#{section}").wait_for(state="visible", timeout=10000)
+                if mobile and pillar in ("rules", "mall", "settings"):
+                    more_sheet.wait_for(state="hidden", timeout=5000)
+                    assert "active" in more.get_attribute("class").split()
 
-            # 2. Mall + Drawer (real close button click)
-            click_pillar(3)
-            page.wait_for_timeout(400)
+            def click_subtab(section, element_id=None):
+                page.locator(f'.workspace-subtabs [data-section="{section}"]').click(timeout=5000)
+                page.locator(f"#{element_id or section}").wait_for(state="visible", timeout=10000)
+
+            click_pillar("desk", "sec-accounts")
+            check("desk_overview")
+            for view in ("performance", "calendar", "account"):
+                page.locator(f"#analysis-view-{view}-tab").click(timeout=5000)
+                check(f"desk_{view}")
+
+            click_pillar("plan", "tv-chart-root")
+            check("plan_chart")
+            click_subtab("calculator-root")
+            check("plan_calculator")
+            click_subtab("desk-cards-root")
+            check("plan_12_gate")
+            for index, label in ((1, "gates_matrix"), (2, "gates_golden_rules")):
+                page.locator("#desk-cards-root .fx-folder-tab").nth(index).click(timeout=5000)
+                check(label)
+
+            click_pillar("quant", "sec-quant-risk")
+            page.locator("#sec-quant-risk .risk-sv-market select").last.select_option("1h")
+            check("quant_ai_risk")
+            click_subtab("sec-comex-bridge")
+            check("quant_comex")
+
+            click_pillar("review", "sec-review-autopsy")
+            check("review_autopsy")
+            click_subtab("journal-root")
+            check("review_journal")
+
+            if mobile:
+                more.click(timeout=5000)
+                page.keyboard.press("Escape")
+                more_sheet.wait_for(state="hidden", timeout=5000)
+                assert more.evaluate("(button) => button === document.activeElement")
+                more.click(timeout=5000)
+                page.locator("#main-topbar").click(position={"x": 3, "y": 3}, timeout=5000)
+                more_sheet.wait_for(state="hidden", timeout=5000)
+
+            click_pillar("rules", "sec-proprules")
+            check("rules")
+            click_pillar("mall", "sec-mall")
             check("mall_floor")
             page.locator(".mall-inspector-toggle").click(timeout=5000)
             page.wait_for_timeout(300)
@@ -216,39 +252,34 @@ def main():
             page.locator(".mall-inspector header button").first.click(timeout=5000)
             page.wait_for_timeout(250)
 
-            # 3. Plan (Calculator + 12-Gate 5-State Matrix & Golden Rules)
-            click_pillar(1, 0)
-            check("calculator")
-            click_pillar(1, 1)
-            page.locator("#desk-cards-root .fx-folder-tab").nth(1).click(timeout=5000)
-            page.wait_for_timeout(300)
-            check("gates_matrix")
-            page.locator("#desk-cards-root .fx-folder-tab").nth(2).click(timeout=5000)
-            page.wait_for_timeout(300)
-            check("gates_golden_rules")
+            click_subtab("sec-marketplace", "sec-market")
+            check("mall_market")
 
-            # 4. Settings (scrolled)
-            click_pillar(4)
-            check("settings_top")
+            click_pillar("settings", "sec-settings")
+            for tab in ("display", "keys", "accounts", "sync"):
+                page.locator(f"#settings-{tab}-tab").click(timeout=5000)
+                page.locator(f"#settings-{tab}-panel").wait_for(state="visible", timeout=5000)
+                check(f"settings_{tab}")
             page.evaluate("() => { const m = document.querySelector('main.container'); if (m) m.scrollTop = 420; }")
-            page.wait_for_timeout(200)
             check("settings_scrolled")
 
-            # 5. MT5 Modal
-            page.locator("#btn-top-import").click(timeout=5000)
+            # MT5 Modal from Settings Sync
+            page.locator("#settings-mt5-bridge").click(timeout=5000)
             page.wait_for_timeout(300)
             check("mt5_modal")
             page.keyboard.press("Escape")
             page.wait_for_timeout(200)
 
-            # 6. Command Palette trigger clickability (wait for lazy chunk mount)
-            page.locator(".topbar-cmd-trigger").click(timeout=5000)
-            page.wait_for_selector(".cmd-palette-input", timeout=5000)
-            page.keyboard.press("Escape")
+            # Command Palette opens the requested Settings tab.
+            page.keyboard.press("Control+k")
+            palette = page.locator(".cmd-palette-input")
+            palette.fill("AI & Keys", timeout=5000)
+            palette.press("Enter")
             page.wait_for_selector(".cmd-palette-input", state="detached", timeout=5000)
+            page.locator("#settings-keys-panel").wait_for(state="visible", timeout=5000)
 
             # 7. Right Dock (AI Coach) open + topbar toggle clickability + backdrop dismiss on tablet
-            click_pillar(0, 0)
+            click_pillar("desk", "sec-accounts")
             page.locator(".topbar-coach-btn").click(timeout=5000)
             page.wait_for_selector(".right-dock-aside", timeout=5000)
             page.wait_for_timeout(300)

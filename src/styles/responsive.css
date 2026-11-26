@@ -509,19 +509,61 @@
 .settings-page-root {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  max-width: 1040px;
+}
+
+.settings-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+
+.settings-tabs > button {
+  min-width: 0;
+  min-height: 38px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 12px / 1.25 var(--font-sans);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.settings-tabs > button:is(:hover, [aria-selected="true"]) {
+  border-color: var(--border-color);
+  background: var(--bg-surface-solid);
+  color: var(--text-primary);
+}
+
+.settings-panel:not([hidden]) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  min-width: 0;
+}
+
+.settings-panel > .card,
+.settings-ports-block > .card,
+.settings-sync-block > .db-manager-card {
+  padding: var(--workspace-card-padding);
 }
 
 .settings-prefs-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
   margin-top: 8px;
 }
 
 .settings-pref-tile {
   display: flex;
-  flex: 1 1 200px;
   min-width: 0;
   flex-direction: column;
   gap: 8px;
@@ -531,9 +573,44 @@
   background: var(--bg-canvas);
 }
 
-.settings-pref-backdrop {
-  flex-basis: max-content;
-  max-width: 100%;
+.settings-branding-card { gap: 12px; }
+
+.workspace-branding-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px 16px;
+  min-width: 0;
+}
+
+.workspace-branding-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.workspace-branding-form .inp { width: 100%; min-width: 0; }
+.workspace-branding-form .btn { justify-self: start; }
+
+.settings-panel > .settings-mt5-card {
+  display: flex;
+  flex-flow: row wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.settings-mt5-card p {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .settings-prefs-grid,
+  .workspace-branding-form { grid-template-columns: minmax(0, 1fr); }
 }
 
 .settings-pref-label {
@@ -601,15 +678,6 @@
 }
 
 /* Settings page embedded layout fixes */
-.settings-pref-subtitle {
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--text-muted);
-  line-height: 1.45;
-  margin-top: 2px;
-  overflow-wrap: anywhere;
-}
-
 #sec-settings .desk-modal-header {
   position: static !important;
   top: auto !important;
@@ -1098,7 +1166,7 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
     left: 10px;
     max-width: none;
   }
-  /* Mobile 5-pillar bottom navigation bar */
+  /* Mobile workflow navigation and More disclosure */
   .fx-mobile-bottom-nav {
     display: grid !important;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1116,8 +1184,7 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
   }
   .fx-mob-nav-btn {
     border: none;
-    border-top: 2px solid transparent;
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-secondary);
     display: flex;
@@ -1137,8 +1204,41 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
   }
   .fx-mob-nav-btn.active {
     color: var(--accent-ink);
-    border-top-color: var(--accent-ink);
-    background: var(--bg-subtle);
+    background: var(--nav-active);
+  }
+  .fx-mobile-more-sheet:not([hidden]) {
+    position: absolute;
+    inset-inline-end: 8px;
+    bottom: calc(100% + 8px);
+    display: grid;
+    gap: 4px;
+    width: min(280px, calc(100% - 16px));
+    max-height: calc(100dvh - var(--mob-nav-h) - var(--safe-bottom) - 20px);
+    overflow-y: auto;
+    padding: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface-solid);
+    box-shadow: var(--shadow-md);
+  }
+  .fx-mobile-more-sheet > button {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-primary);
+    font: 600 13px / 1.25 var(--font-sans);
+    text-align: start;
+    cursor: pointer;
+  }
+  .fx-mobile-more-sheet > button:is(:hover, [aria-current="page"]) {
+    border-color: var(--border-color);
+    background: var(--nav-active);
+    color: var(--accent-ink);
   }
   /* Prevent iOS Safari auto-zoom when tapping text/search/textarea inputs */
   @supports (-webkit-touch-callout: none) {

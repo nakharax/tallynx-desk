@@ -1,24 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ArrowUpRight, Camera, Copy, Layers3, Radio, X } from 'lucide-react';
-import { GhrWorkspaceState, TradeDirection } from '../types/ghr';
-import { fmtUSD, formatCalculatorLot, getActiveCalculator } from '../utils/ghrRules';
+import React, { useEffect, useRef, useState } from 'react';
+import { Activity, ArrowUpRight, Radio } from 'lucide-react';
 import { useLiveChartFeed } from '../utils/useLiveChartFeed';
 import { deskText, type DeskLanguage } from '../utils/deskI18n';
 import type { DeskTheme } from '../utils/webHandoff';
-import type { QuantPortfolioInput } from '../utils/quantSupervisionEngine';
-import { AiRiskSupervisionCard } from './AiRiskSupervisionCard';
-import { ComexBridgePanel } from './ComexBridgePanel';
 
 interface TradingViewChartSectionProps {
-  state: GhrWorkspaceState;
   lang?: DeskLanguage;
-  uid?: string | null;
   deskTheme?: DeskTheme;
-  riskSupervisionPortfolio?: QuantPortfolioInput;
-  onUpdateDir: (dir: TradeDirection) => void;
-  onUpdateEntry: (raw: string, num: number) => void;
-  onCopyText: (text: string, label: string) => void;
-  onAnalyzeInCoach?: (symbol: string) => void;
+  onOpenAiRisk: () => void;
+  onOpenComex: () => void;
 }
 
 type BrokerSymbol =
@@ -36,11 +26,11 @@ const BROKER_OPTIONS: { value: BrokerSymbol; label: string }[] = [
   { value: 'CAPITALCOM:GOLD', label: 'Capital.com · GOLD Spot' },
 ];
 
-const TIMEFRAME_OPTIONS: { value: TimeframeInterval; label: string; badge?: [string, string] }[] = [
+const TIMEFRAME_OPTIONS: { value: TimeframeInterval; label: string }[] = [
   { value: '1', label: 'M1' },
-  { value: '5', label: 'M5', badge: ['Gate 3 Entry', 'Gate 3 จุดเข้า'] },
+  { value: '5', label: 'M5' },
   { value: '15', label: 'M15' },
-  { value: '60', label: 'H1', badge: ['Gates 1–2 Structure', 'Gate 1–2 โครงสร้าง'] },
+  { value: '60', label: 'H1' },
   { value: '240', label: 'H4' },
   { value: 'D', label: 'D1' },
 ];
@@ -168,38 +158,18 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
 };
 
 export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = ({
-  state,
   lang = 'en',
-  uid = null,
   deskTheme = 'alabaster',
-  riskSupervisionPortfolio,
-  onUpdateDir,
-  onUpdateEntry,
-  onCopyText,
-  onAnalyzeInCoach,
+  onOpenAiRisk,
+  onOpenComex,
 }) => {
   const [symbol, setSymbol] = useState<BrokerSymbol>('OANDA:XAUUSD');
   const [interval, setIntervalState] = useState<TimeframeInterval>('15');
   const [layoutMode, setLayoutMode] = useState<'SINGLE' | 'DUAL_GHR'>('DUAL_GHR');
   const [chartThemeOverride, setChartThemeOverride] = useState<'light' | 'dark'>();
   const chartTheme = chartThemeOverride ?? (deskTheme === 'obsidian' ? 'dark' : 'light');
-  const [snapshot, setSnapshot] = useState<{ plan: ReturnType<typeof getActiveCalculator>; dir: TradeDirection; time: string } | null>(null);
   const t = (en: string, th: string) => deskText(lang, en, th);
-
-  const plan = useMemo(() => getActiveCalculator(state), [state]);
-  const levels = [{ label: 'SL', ...plan.sl }, ...plan.legs.map((leg, i) => ({ label: 'TP' + (i + 1), ...leg }))];
-  const price = (value: number) => value.toFixed(plan.contract.priceDecimals);
   const timeframe = FEED_TIMEFRAMES[layoutMode === 'DUAL_GHR' ? '5' : interval];
-
-  const handleCopyMt5FromChart = () => {
-    if (!plan.isValid) return;
-    const text = [
-      `${plan.instrument} ${state.calcDir} LIMIT @ ${price(plan.entry)}`,
-      `SL ${price(plan.sl.price)}`,
-      ...plan.legs.map((leg, i) => `TP${i + 1} ${price(leg.price)} (${formatCalculatorLot(leg.lot)} L)`),
-    ].join(' | ');
-    onCopyText(text, t('MT5 plan from chart', 'แผน MT5 จากกราฟ'));
-  };
 
   return (
     <section id="tv-chart-root" className="fx-analysis-root">
@@ -220,7 +190,7 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
                 aria-pressed={layoutMode === 'DUAL_GHR'}
                 className={`chart-mode-btn ${layoutMode === 'DUAL_GHR' ? 'active' : ''}`}
                 onClick={() => setLayoutMode('DUAL_GHR')}
-                title={t('Show H1 structure (Gates 1–2) and M5 pullback entry (Gate 3) side by side', 'แสดงกราฟ H1 สำหรับดูโครงสร้าง (Gate 1–2) และกราฟ M5 สำหรับดูจังหวะย่อเข้า (Gate 3) พร้อมกัน')}
+                title={t('Show H1 and M5 charts side by side', 'แสดงกราฟ H1 และ M5 พร้อมกัน')}
               >
                 {t('Dual chart (H1 + M5 GHR)', 'กราฟคู่ (H1 + M5 GHR)')}
               </button>
@@ -245,7 +215,7 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
                     aria-pressed={interval === tf.value}
                     className={`chart-mode-btn ${interval === tf.value ? 'active' : ''}`}
                     onClick={() => setIntervalState(tf.value)}
-                    title={tf.badge ? t(...tf.badge) : t(`Timeframe ${tf.label}`, `กรอบเวลา ${tf.label}`)}
+                    title={t(`Timeframe ${tf.label}`, `กรอบเวลา ${tf.label}`)}
                   >
                     {tf.label}
                   </button>
@@ -286,107 +256,14 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
           </div>
         </div>
 
-        {/* Live 3-TP Reference Strip linked directly with Calculator */}
-        <div className="tv-reference-bar">
-          <div className="tv-plan-header">
-            <strong className="desk-icon-title"><Layers3 size={15} aria-hidden="true" />{t('Calculator blueprint', 'แผนจากเครื่องคำนวณ')} · {plan.instrument}</strong>
-            <span className="mono sensitive-val">{plan.isValid ? formatCalculatorLot(plan.totalLot) + ' L · ' + fmtUSD(plan.risk) : '—'}</span>
-          </div>
-          <div className="tv-plan-controls">
-            <div className="tv-control-group">
-            <div className="chart-mode-toggle">
-              <button
-                type="button"
-                aria-pressed={state.calcDir === 'BUY'}
-                className={`chart-mode-btn ${state.calcDir === 'BUY' ? 'active buy-pill' : ''}`}
-                onClick={() => onUpdateDir('BUY')}
-              >
-                BUY LIMIT
-              </button>
-              <button
-                type="button"
-                aria-pressed={state.calcDir === 'SELL'}
-                className={`chart-mode-btn ${state.calcDir === 'SELL' ? 'active sell-pill' : ''}`}
-                onClick={() => onUpdateDir('SELL')}
-              >
-                SELL LIMIT
-              </button>
-            </div>
-
-            <div className="tv-entry-field">
-              <label
-                htmlFor="tv-quick-entry"
-                style={{ fontSize: '11.5px', fontWeight: 600, color: 'var(--text-secondary)' }}
-              >
-                {t('Entry ($):', 'จุดเข้า ($):')}
-              </label>
-              <input
-                id="tv-quick-entry"
-                type="number"
-                step={10 ** -plan.contract.priceDecimals}
-                className="mono"
-                value={state.calcEntryRaw}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  const num = parseFloat(raw);
-                  onUpdateEntry(raw, Number.isFinite(num) ? num : 0);
-                }}
-              />
-            </div>
-            </div>
-            <div className="tv-plan-actions">
-            <button type="button" className="btn xs" disabled={!plan.isValid} onClick={handleCopyMt5FromChart}>
-              <Copy size={13} aria-hidden="true" />{t('Copy MT5', 'คัดลอก MT5')}
-            </button>
-            <button
-              type="button"
-              className="btn xs"
-              disabled={!plan.isValid && !snapshot}
-              aria-expanded={!!snapshot}
-              onClick={() => setSnapshot(snapshot ? null : { plan, dir: state.calcDir, time: new Date().toISOString() })}
-            >
-              <Camera size={13} aria-hidden="true" />{snapshot ? t('Hide snapshot', 'ซ่อนภาพแผน') : t('Snapshot', 'จับภาพแผน')}
-            </button>
-            {onAnalyzeInCoach && (
-              <button
-                type="button"
-                className="btn xs primary tv-coach-cta"
-                onClick={() => onAnalyzeInCoach('XAUUSD')}
-                title={t('Review this symbol’s chart structure in AI Coach', 'เปิดการวิเคราะห์โครงสร้างกราฟสินทรัพย์นี้ใน AI Coach')}
-              >
-                {t('Analyze in AI Live Desk', 'วิเคราะห์ใน AI Live Desk')}<ArrowUpRight size={14} aria-hidden="true" />
-              </button>
-            )}
-            </div>
-          </div>
-          <div className="tv-plan-levels">
-            {levels.map(level => (
-              <div key={level.label} data-stop={level.label === 'SL'}>
-                <small>{level.label} <span>{plan.isValid ? (level.label === 'SL' ? '−' : '+') + level.points.toLocaleString(lang, { maximumFractionDigits: 4 }) + 'p' : '—'}</span></small>
-                <strong className="mono">{plan.isValid ? price(level.price) : '—'}</strong>
-              </div>
-            ))}
-          </div>
+        <div className="chart-quant-links">
+          <button type="button" className="btn sm" onClick={onOpenAiRisk}>
+            {t('AI Risk', 'ความเสี่ยง AI')} <ArrowUpRight size={14} aria-hidden="true" />
+          </button>
+          <button type="button" className="btn sm" onClick={onOpenComex}>
+            {t('COMEX Bridge', 'สะพานข้อมูล COMEX')} <ArrowUpRight size={14} aria-hidden="true" />
+          </button>
         </div>
-
-        {snapshot && (
-          <figure className="tv-plan-snapshot">
-            <figcaption>
-              <strong className="desk-icon-title"><Camera size={14} aria-hidden="true" />{t('Plan snapshot', 'ภาพแผนความเสี่ยง')}</strong>
-              <span className="mono">{snapshot.plan.instrument} · {snapshot.dir} · {new Date(snapshot.time).toLocaleTimeString(lang, { timeZone: 'Asia/Bangkok', hour12: false })} ICT</span>
-              <button type="button" className="btn xs" onClick={() => setSnapshot(null)}><X size={12} aria-hidden="true" />{t('Close', 'ปิด')}</button>
-            </figcaption>
-            {[
-              { label: t('Entry', 'จุดเข้า'), price: snapshot.plan.entry, tone: 'entry' },
-              { label: 'SL', price: snapshot.plan.sl.price, tone: 'stop' },
-              ...snapshot.plan.legs.map((leg, index) => ({ label: 'TP' + (index + 1), price: leg.price, tone: 'target' })),
-            ].sort((a, b) => b.price - a.price).map(level => (
-              <div className="snapshot-price mono" key={level.label} data-tone={level.tone}>
-                <span>{level.label}</span><i aria-hidden="true" /><strong>{level.price.toFixed(snapshot.plan.contract.priceDecimals)}</strong>
-              </div>
-            ))}
-          </figure>
-        )}
 
         {/* Main TradingView Chart Canvas */}
         <div
@@ -399,14 +276,14 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
                 interval="60"
                 theme={chartTheme}
                 lang={lang}
-                titleBadge={t('1. H1 structure (Gate 1: 100–200p HVN zone · Gate 2: confirmed H1 candle close)', '1. โครงสร้างหลัก H1 (Gate 1: โซน HVN 100–200p · Gate 2: แท่ง H1 ปิดยืนยัน)')}
+                titleBadge={t('H1 market structure', 'โครงสร้างตลาด H1')}
               />
               <SingleTradingViewEmbed
                 symbol={symbol}
                 interval="5"
                 theme={chartTheme}
                 lang={lang}
-                titleBadge={t('2. M5 pullback (Gate 3: M5 candle close for a Limit setup)', '2. การย่อตัวบน M5 (Gate 3: เกณฑ์แท่ง M5 ปิดสำหรับ Limit)')}
+                titleBadge={t('M5 price action', 'การเคลื่อนไหวราคา M5')}
               />
             </>
           ) : (
@@ -422,13 +299,6 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
           )}
         </div>
       </div>
-      <AiRiskSupervisionCard
-        lang={lang}
-        initialTimeframe={timeframe ?? '5m'}
-        portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
-        accountScope={state.activePort}
-      />
-      <ComexBridgePanel lang={lang} uid={uid} onCopyText={onCopyText} />
     </section>
   );
 };

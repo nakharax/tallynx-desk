@@ -441,7 +441,7 @@ export const PropRulesSection: React.FC<PropRulesSectionProps> = React.memo(({
 
   return (
     <section id="sec-proprules" className="proprules-workspace">
-      <NewsBlackoutRadar lang={lang} firmId={selectedFirm.id} firmName={selectedFirm.shortName} />
+      <div className="proprules-overview">
       {/* ================================================================= */}
       {/* TOP BAR: Quiet Header, Filters & Collapsible Universal Red Rule   */}
       {/* ================================================================= */}
@@ -596,6 +596,9 @@ export const PropRulesSection: React.FC<PropRulesSectionProps> = React.memo(({
             {probeError.detail && !/[\u0e00-\u0e7f]/.test(probeError.detail) && ` (${probeError.detail})`}
           </div>
         )}
+      </div>
+
+        <NewsBlackoutRadar lang={lang} firmId={selectedFirm.id} firmName={selectedFirm.shortName} />
       </div>
 
       {/* ================================================================= */}
