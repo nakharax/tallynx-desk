@@ -6,9 +6,11 @@ import {
   Calculator,
   CandlestickChart,
   Command,
+  FlaskConical,
   Languages,
   Moon,
   RefreshCw,
+  ScanLine,
   Scale,
   Search,
   Settings,
@@ -19,8 +21,9 @@ import {
   Wallet,
 } from 'lucide-react';
 import type { AccountInfo } from '../types/ghr';
-import { deskText, formatAccountDisplayName, type DeskLanguage } from '../utils/deskI18n';
+import { DESK_I18N, deskText, formatAccountDisplayName, type DeskLanguage } from '../utils/deskI18n';
 import { DeskDialog } from './DeskDialog';
+import type { SettingsTab } from './SettingsPageSection';
 
 export interface CommandPaletteProps {
   open: boolean;
@@ -31,6 +34,8 @@ export interface CommandPaletteProps {
   accounts: Record<string, AccountInfo>;
   activePort: string;
   onSwitchPage: (pageId: string) => void;
+  activeSettingsTab: SettingsTab;
+  onOpenSettingsTab: (tab: SettingsTab) => void;
   onSelectAccount: (portId: string) => void;
   onOpenMt5Sync: () => void;
   onToggleTheme: () => void;
@@ -58,6 +63,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   accounts,
   activePort,
   onSwitchPage,
+  activeSettingsTab,
+  onOpenSettingsTab,
   onSelectAccount,
   onOpenMt5Sync,
   onToggleTheme,
@@ -78,125 +85,80 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   }, [open]);
 
   const items = useMemo<PaletteItem[]>(() => {
-    const workspaces: PaletteItem[] = [
-      {
-        id: 'ws-mall',
-        group: 'WORKSPACE',
-        label: t('Community Mall', 'ห้องรวมเทรดเดอร์ (Mall)'),
-        subtitle: t('Live trade ideas, blueprint zone feeds, ICT sessions', 'แผนเทรดจริง โซนคอมมูนิตี้ และเวลาตลาด ICT'),
-        keywords: 'mall community lounge feed live room ideas',
-        badge: activeNavSection === 'sec-mall' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <Users size={15} />,
-        run: () => {
-          onSwitchPage('sec-mall');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-analysis',
-        group: 'WORKSPACE',
-        label: t('Portfolio Overview', 'ภาพรวมพอร์ต (Portfolio)'),
-        subtitle: t('Equity growth curve, drawdown buffers, 7-day consistency', 'กราฟเติบโต วงเงินขาดทุน และกฎ 40% ย้อนหลัง 7 วัน'),
-        keywords: 'portfolio overview analysis performance equity drawdown',
-        badge: activeNavSection === 'sec-accounts' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <BarChart3 size={15} />,
-        run: () => {
-          onSwitchPage('sec-accounts');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-journal',
-        group: 'WORKSPACE',
-        label: t('Trade Journal', 'สมุดบันทึกเทรด'),
-        subtitle: t('Verified MT5 trade ledger, R-multiples, print PDF report', 'ประวัติเทรดจาก MT5 ค่า R และพิมพ์รายงาน PDF'),
-        keywords: 'journal trades history log xlsx import pdf',
-        badge: activeNavSection === 'journal-root' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <BarChart3 size={15} />,
-        run: () => {
-          onSwitchPage('journal-root');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-calc',
-        group: 'WORKSPACE',
-        label: t('3-TP Risk Calculator', 'เครื่องคำนวณความเสี่ยง 3-TP'),
-        subtitle: t('Strict dollar risk lot sizing, 3-TP splits, consistency check', 'คำนวณ Lot คุมความเสี่ยงเงินต้น แบ่ง 3-TP และกฎ 40%'),
-        keywords: 'plan calculator risk lot size 3-tp xauusd ghr',
-        badge: activeNavSection === 'calculator-root' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <Calculator size={15} />,
-        run: () => {
-          onSwitchPage('calculator-root');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-12gate',
-        group: 'WORKSPACE',
-        label: t('12-Gate Protocol & Golden Rules', 'เช็กลิสต์ 12-Gate และกฎเหล็ก'),
-        subtitle: t('Fail-closed pre-trade discipline gates and 5-state expectancy', 'ด่านตรวจวินัยก่อนเข้าเทรด 12 ข้อ และตารางสถิติ 5 สถานะ'),
-        keywords: '12-gate checklist discipline golden rules expectancy plan',
-        badge: activeNavSection === 'desk-cards-root' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <ShieldCheck size={15} />,
-        run: () => {
-          onSwitchPage('desk-cards-root');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-chart',
-        group: 'WORKSPACE',
-        label: t('Live Chart XAU/USD', 'กราฟสด XAU/USD'),
-        subtitle: t('Real-time TradingView stream, ATR & intraday trend', 'กราฟราคาทองคำสดพร้อมค่า ATR และแนวโน้มระหว่างวัน'),
-        keywords: 'live chart xauusd gold tradingview atr ema',
-        badge: activeNavSection === 'tv-chart-root' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <CandlestickChart size={15} />,
-        run: () => {
-          onSwitchPage('tv-chart-root');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-rules',
-        group: 'WORKSPACE',
-        label: t('PropRules Live Monitor', 'ตรวจกฎกองทุน PropRules'),
-        subtitle: t('Compare FTMO, FundedNext, The5ers, Topstep rules & risk guards', 'เทียบกฎกองทุนชั้นนำ และเฝ้าระวังวงเงินขาดทุนแบบเรียลไทม์'),
-        keywords: 'prop rules ftmo fundednext the5ers drawdown compliance',
-        badge: activeNavSection === 'sec-proprules' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <Scale size={15} />,
-        run: () => {
-          onSwitchPage('sec-proprules');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-market',
-        group: 'WORKSPACE',
-        label: t('Strategy Market', 'ตลาดชุดตั้งค่าระบบเทรด'),
-        subtitle: t('Browse verified playbook presets and load distances safely', 'เลือกชมแผนเทรดและชุดระยะความเสี่ยงมาตรฐาน'),
-        keywords: 'marketplace strategies templates store presets',
-        badge: activeNavSection === 'sec-marketplace' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <Store size={15} />,
-        run: () => {
-          onSwitchPage('sec-marketplace');
-          onClose();
-        },
-      },
-      {
-        id: 'ws-settings',
-        group: 'WORKSPACE',
-        label: t('Settings, Accounts & Sync', 'ตั้งค่า บัญชีพอร์ต และการซิงก์'),
-        subtitle: t('Manage portfolios, backup workspace, theme, language & data reset', 'จัดการพอร์ต สำรองไฟล์ JSON ตั้งค่าธีม/ภาษา และจัดการข้อมูล'),
-        keywords: 'settings backup sync restore json theme language ports accounts reset',
-        badge: activeNavSection === 'sec-settings' ? t('Active', 'ใช้งานอยู่') : undefined,
-        icon: <Settings size={15} />,
-        run: () => {
-          onSwitchPage('sec-settings');
-          onClose();
-        },
-      },
+    const { nav, pageTitles, settingsTabs } = DESK_I18N[lang];
+    const links = [
+      { section: 'sec-accounts', label: nav.desk, icon: BarChart3,
+        subtitle: t('Live positions, portfolio overview and daily risk', 'สถานะสด ภาพรวมพอร์ตและความเสี่ยงรายวัน'),
+        keywords: 'desk portfolio overview analysis performance calendar equity drawdown' },
+      { section: 'tv-chart-root', label: `${nav.plan} · ${nav.liveChart}`, icon: CandlestickChart,
+        subtitle: t('TradingView and live market telemetry', 'TradingView และตัวชี้วัดตลาดสด'),
+        keywords: 'plan live chart xauusd gold tradingview atr ema' },
+      { section: 'calculator-root', label: `${nav.plan} · ${nav.calculator}`, icon: Calculator,
+        subtitle: t('Position sizing and consistency checks', 'คำนวณขนาดสถานะและตรวจความสม่ำเสมอ'),
+        keywords: 'plan calc calculator 3-tp risk lot size consistency' },
+      { section: 'desk-cards-root', label: `${nav.plan} · ${nav.twelveGate}`, icon: ShieldCheck,
+        subtitle: t('Checklist, 5-state matrix and golden rules', 'เช็กลิสต์ ตาราง 5 สถานะ และกฎเหล็ก'),
+        keywords: 'plan 12-gate checklist discipline golden rules expectancy' },
+      { section: 'sec-quant-risk', label: `${nav.quant} · ${nav.aiRisk}`, icon: FlaskConical,
+        subtitle: t('Market structure and risk supervision', 'โครงสร้างตลาดและการกำกับความเสี่ยง'),
+        keywords: 'quant ai risk supervision market candles volatility' },
+      { section: 'sec-comex-bridge', label: `${nav.quant} · ${nav.comexBridge}`, icon: FlaskConical,
+        subtitle: t('Futures-to-spot basis and volume profile', 'ส่วนต่างฟิวเจอร์สกับสปอตและโปรไฟล์ปริมาณซื้อขาย'),
+        keywords: 'quant comex bridge databento futures spot basis volume' },
+      { section: 'sec-review-autopsy', label: `${nav.review} · ${nav.autopsy}`, icon: ScanLine,
+        subtitle: t('Account diagnostics and statement review', 'ตรวจสอบบัญชีและวิเคราะห์รายงานย้อนหลัง'),
+        keywords: 'review autopsy challenge drawdown diagnostics statement' },
+      { section: 'journal-root', label: `${nav.review} · ${pageTitles.journal}`, icon: BarChart3,
+        subtitle: t('Trade history and PDF reports', 'ประวัติการเทรดและรายงาน PDF'),
+        keywords: 'review journal trades history ledger xlsx pdf' },
+      { section: 'sec-proprules', label: nav.rules, icon: Scale,
+        subtitle: t('Prop firm rule checks and news blackout radar', 'ตรวจสอบกฎกองทุนและช่วงจำกัดจากข่าวสำคัญ'),
+        keywords: 'prop rules ftmo fundednext the5ers drawdown compliance news' },
+      { section: 'sec-mall', label: `${nav.mall} · ${pageTitles.community}`, icon: Users,
+        subtitle: t('Community lounge and workspace discussions', 'ห้องคอมมูนิตี้และการสนทนาเกี่ยวกับพื้นที่ทำงาน'),
+        keywords: 'mall community lounge feed room' },
+      { section: 'sec-marketplace', label: `${nav.mall} · ${pageTitles.marketplace}`, icon: Store,
+        subtitle: t('Browse playbook presets and templates', 'เลือกชมเพลย์บุ๊กและเทมเพลต'),
+        keywords: 'mall market marketplace strategies templates store presets' },
     ];
+    const activeBadge = t('Active', 'ใช้งานอยู่');
+    const workspaces: PaletteItem[] = links.map(({ section, label, icon: Icon, subtitle, keywords }) => ({
+      id: section,
+      group: 'WORKSPACE',
+      label,
+      subtitle,
+      keywords,
+      badge: activeNavSection === section ? activeBadge : undefined,
+      icon: <Icon size={15} />,
+      run: () => {
+        onSwitchPage(section);
+        onClose();
+      },
+    }));
+
+    const settingsLinks: { tab: SettingsTab; subtitle: string; keywords: string }[] = [
+      { tab: 'display', subtitle: t('Theme, language, branding and currency', 'ธีม ภาษา แบรนด์ และสกุลเงิน'),
+        keywords: 'display appearance theme language branding privacy currency' },
+      { tab: 'keys', subtitle: t('Gemini, Codex, OpenRouter and Databento credentials', 'คีย์และการเชื่อมต่อ Gemini, Codex, OpenRouter และ Databento'),
+        keywords: 'ai & keys api keys byok gemini codex oauth openrouter databento' },
+      { tab: 'accounts', subtitle: t('Switch or manage workspace accounts', 'สลับหรือจัดการบัญชีในพื้นที่ทำงาน'),
+        keywords: 'accounts portfolio ports manage' },
+      { tab: 'sync', subtitle: t('Cloud backups and the MT5 Bridge', 'สำรองข้อมูลบนคลาวด์และเชื่อมต่อ MT5'),
+        keywords: 'sync database backup restore cloud mt5 bridge' },
+    ];
+    workspaces.push(...settingsLinks.map(({ tab, subtitle, keywords }): PaletteItem => ({
+      id: `settings-${tab}`,
+      group: 'WORKSPACE',
+      label: `${nav.settings} · ${settingsTabs[tab]}`,
+      subtitle,
+      keywords: `settings ${keywords}`,
+      badge: activeNavSection === 'sec-settings' && activeSettingsTab === tab ? activeBadge : undefined,
+      icon: <Settings size={15} />,
+      run: () => {
+        onOpenSettingsTab(tab);
+        onClose();
+      },
+    })));
 
     const actions: PaletteItem[] = [
       {
@@ -264,17 +226,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }));
 
     return [...actions, ...workspaces, ...accountItems];
-  }, [accounts, activeNavSection, activePort, lang, onClose, onOpenMt5Sync, onSelectAccount, onSwitchPage, onToggleAiCoach, onToggleLanguage, onToggleTheme, theme]);
+  }, [accounts, activeNavSection, activePort, activeSettingsTab, lang, onClose, onOpenMt5Sync, onOpenSettingsTab, onSelectAccount, onSwitchPage, onToggleAiCoach, onToggleLanguage, onToggleTheme, theme]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (item) =>
-        item.label.toLowerCase().includes(q) ||
-        item.subtitle.toLowerCase().includes(q) ||
-        item.keywords.toLowerCase().includes(q)
-    );
+    const terms = query.toLowerCase().split(/[\s·&]+/).filter(Boolean);
+    return items.filter(({ label, subtitle, keywords }) => {
+      const searchable = `${label} ${subtitle} ${keywords}`.toLowerCase();
+      return terms.every((term) => searchable.includes(term));
+    });
   }, [items, query]);
 
   useEffect(() => {

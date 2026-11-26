@@ -20,7 +20,7 @@ import { canFallbackToUsdWorkspace, formatPilotAmount } from '../utils/fundedNex
 import type { PilotTelemetryView } from '../utils/fundedNextPilot';
 import type { AnyLivePositionInput, LiveTelemetryPoint } from '../utils/liveTelemetryBuffer';
 import { LivePositionMonitorCard, type LiveMonitorControlState } from './LivePositionMonitorCard';
-import { PropAutopsyCard } from './PropAutopsyCard';
+import { NewsBlackoutRadar } from './NewsBlackoutRadar';
 import {
   buildMonthlyConsistencyCalendar,
   buildSevenDayConsistencyCalendar,
@@ -107,6 +107,10 @@ interface AnalyticsSectionProps {
   livePositions?: readonly AnyLivePositionInput[];
   telemetrySeries?: readonly LiveTelemetryPoint[];
   liveMonitor?: LiveMonitorControlState;
+  propFirmId?: string;
+  dailyDrawdownHeadroom: string;
+  onOpenRules: () => void;
+  onOpenAutopsy: () => void;
   posture?: {
     sessions: RealtimeAnalyticsSummary['sessions'];
     dailyBufferUsd?: number;
@@ -146,6 +150,10 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
   livePositions,
   telemetrySeries,
   liveMonitor,
+  propFirmId,
+  dailyDrawdownHeadroom,
+  onOpenRules,
+  onOpenAutopsy,
   posture,
   onManageAccounts,
   onInspectDateInJournal,
@@ -594,22 +602,18 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
   const circumference = Math.PI * radius; // ~138.23
   const winArcLength =
     totalTrades > 0 ? (winCount / totalTrades) * circumference : 0;
-  const autopsyCard = (
-    <PropAutopsyCard
-      key={state.activePort}
+  const guardSummary = (
+    <NewsBlackoutRadar
       lang={lang}
-      account={activeAccCfg}
-      report={activeAccCfg ? state.mt5RawReports?.[state.activePort] : undefined}
-      journal={activeAccCfg ? portTrades : EMPTY_TRADES}
-      mt5TimeOffset={state.mt5TimeOffset}
-      privacyMasked={state.privacyMasked}
-      onApplyGuardrailsToPlan={onOpenCalculator}
+      firmId={propFirmId}
+      onOpenRules={onOpenRules}
+      summary={{ headroom: dailyDrawdownHeadroom, onOpenAutopsy }}
     />
   );
 
   return (
     <section id="sec-accounts" className="fx-analysis-root fx-workstation" aria-labelledby="analysis-overview-title">
-      <h1 id="analysis-overview-title">{text('Portfolio analysis', 'วิเคราะห์พอร์ต')}</h1>
+      <h1 id="analysis-overview-title">{DESK_I18N[lang].pageTitles.desk}</h1>
       <AnalysisTabs views={ANALYSIS_VIEWS} selected={activeView} onSelect={setActiveView}
         group="view" label={text('Analysis views', 'มุมมองการวิเคราะห์')} lang={lang} />
       <section id="analysis-view-panel" className="analysis-view" data-view={activeView} role="tabpanel" aria-labelledby={`analysis-view-${activeView}-tab`} tabIndex={0}>
@@ -620,7 +624,7 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
             {text('Manage accounts', 'จัดการบัญชี')}
           </button>
         </div>
-        {activeView === 'overview' && autopsyCard}
+        {activeView === 'overview' && guardSummary}
       </>) : <>
       {activeView === 'overview' && <>
       {liveMonitor && (
@@ -669,8 +673,7 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
         </div>
       </div>
 
-      {autopsyCard}
-
+      {guardSummary}
       <div className="analysis-overview-grid">
         <section className="card analysis-overview-main" aria-label={text('Portfolio overview insight', 'มุมมองหลักของพอร์ต')}>
           {portTrades.length > 0 ? (

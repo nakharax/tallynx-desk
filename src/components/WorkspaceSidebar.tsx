@@ -1,116 +1,57 @@
 import React from 'react';
-import { Compass, LayoutDashboard, Scale, Settings, Users } from 'lucide-react';
 import { DESK_I18N, deskText, type DeskLanguage } from '../utils/deskI18n';
 import { TallyNxLogo } from './TallyNxLogo';
+import { primaryWorkspaceLinks, secondaryWorkspaceLinks, type WorkspacePillar } from './workspaceNavigation';
 
-export type WorkspacePillar = 'mall' | 'portfolio' | 'plan' | 'rules' | 'settings';
+export type { WorkspacePillar } from './workspaceNavigation';
 
 interface WorkspaceSidebarProps {
   lang: DeskLanguage;
   activePillar: WorkspacePillar;
   onGoHome?: () => void;
-  onOpenMall: () => void;
-  onSwitchPage: (sectionId: string) => void;
-  onOpenSettings: () => void;
+  onNavigate: (sectionId: string) => void;
 }
 
-export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = React.memo(({
+export const WorkspaceSidebar = React.memo(function WorkspaceSidebar({
   lang,
   activePillar,
   onGoHome,
-  onOpenMall,
-  onSwitchPage,
-  onOpenSettings,
-}) => {
-  const ui = DESK_I18N[lang];
+  onNavigate,
+}: WorkspaceSidebarProps) {
+  const { nav } = DESK_I18N[lang];
   const t = (en: string, th: string) => deskText(lang, en, th);
+  const renderLink = ({ pillar, section, icon: Icon }: (typeof primaryWorkspaceLinks | typeof secondaryWorkspaceLinks)[number]) => (
+    <button
+      key={pillar}
+      type="button"
+      data-pillar={pillar}
+      className={`fx-side-btn ${activePillar === pillar ? 'active' : ''}`}
+      aria-current={activePillar === pillar ? 'page' : undefined}
+      onClick={() => onNavigate(section)}
+    >
+      <Icon className="ico" aria-hidden="true" />
+      <span className="fx-side-label">{nav[pillar]}</span>
+    </button>
+  );
 
   return (
-    <aside className="fx-sidebar" aria-label={t('Main Navigation', 'เมนูหลัก')}>
+    <aside className="fx-sidebar">
       <button
         type="button"
         className="fx-sidebar-logo"
         title={t('TallyNX Desk · Home', 'TallyNX Desk · หน้าแรก')}
-        onClick={onGoHome ?? (() => onSwitchPage('sec-accounts'))}
-        style={{ color: 'var(--text-primary)' }}
+        onClick={onGoHome ?? (() => onNavigate('sec-accounts'))}
       >
         <TallyNxLogo lang={lang} className="fx-logo-svg" />
       </button>
-
-      <nav className="fx-sidebar-nav">
-        <button
-          type="button"
-          className={`fx-side-btn ${activePillar === 'portfolio' ? 'active' : ''}`}
-          aria-current={activePillar === 'portfolio' ? 'page' : undefined}
-          title={t('Portfolio & Journal', 'พอร์ตและสมุดเทรด')}
-          onClick={() => onSwitchPage('sec-accounts')}
-        >
-          <LayoutDashboard className="ico" aria-hidden="true" />
-          <span className="fx-side-label">{t('Portfolio', 'พอร์ต')}</span>
-        </button>
-
-        <button
-          type="button"
-          className={`fx-side-btn ${activePillar === 'plan' ? 'active' : ''}`}
-          aria-current={activePillar === 'plan' ? 'page' : undefined}
-          title={t('Plan: Calculator, 12-Gate & Live Chart', 'วางแผน: คำนวณ, 12-Gate และกราฟ')}
-          onClick={() => onSwitchPage('calculator-root')}
-        >
-          <Compass className="ico" aria-hidden="true" />
-          <span className="fx-side-label">{t('Plan', 'วางแผน')}</span>
-        </button>
-
-        <button
-          type="button"
-          className={`fx-side-btn ${activePillar === 'rules' ? 'active' : ''}`}
-          aria-current={activePillar === 'rules' ? 'page' : undefined}
-          title={ui.nav.propRules}
-          onClick={() => onSwitchPage('sec-proprules')}
-        >
-          <Scale className="ico" aria-hidden="true" />
-          <span className="fx-side-label">{t('Rules', 'กฎกองทุน')}</span>
-        </button>
-
-        <button
-          type="button"
-          className={`fx-side-btn ${activePillar === 'mall' ? 'active' : ''}`}
-          aria-current={activePillar === 'mall' ? 'page' : undefined}
-          title={ui.nav.community}
-          onClick={onOpenMall}
-        >
-          <Users className="ico" aria-hidden="true" />
-          <span className="fx-side-label">{t('Mall', 'มอลล์')}</span>
-        </button>
-
-        <button
-          type="button"
-          className={`fx-side-btn ${activePillar === 'settings' ? 'active' : ''}`}
-          aria-current={activePillar === 'settings' ? 'page' : undefined}
-          title={ui.nav.settings}
-          onClick={onOpenSettings}
-        >
-          <Settings className="ico" aria-hidden="true" />
-          <span className="fx-side-label">{ui.nav.settings}</span>
-        </button>
+      <nav className="fx-sidebar-nav" aria-label={t('Main navigation', 'เมนูหลัก')}>
+        <div className="fx-sidebar-group">{primaryWorkspaceLinks.map(renderLink)}</div>
+        <div className="fx-sidebar-secondary">
+          <div className="fx-sidebar-divider" aria-hidden="true" />
+          <div className="fx-sidebar-group">{secondaryWorkspaceLinks.map(renderLink)}</div>
+        </div>
       </nav>
-
-      <div
-        className="fx-sidebar-version mono"
-        style={{
-          marginTop: 'auto',
-          padding: '10px 4px',
-          fontSize: '10px',
-          color: 'var(--text-muted)',
-          opacity: 0.72,
-          textAlign: 'center',
-          letterSpacing: '0.04em',
-        }}
-        title={t('TallyNX Desk · Release v5.0', 'TallyNX Desk · รุ่น v5.0')}
-      >
-        v5.0
-      </div>
+      <div className="fx-sidebar-version mono">v5.0</div>
     </aside>
   );
 });
-
-WorkspaceSidebar.displayName = 'WorkspaceSidebar';

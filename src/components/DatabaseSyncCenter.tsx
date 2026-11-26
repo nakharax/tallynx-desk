@@ -2,12 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { User } from 'firebase/auth';
 import { GhrWorkspaceState, Mt5TimeOffsetSetting, SnapshotItem, SyncLogEntry } from '../types/ghr';
 import {
-  DEFAULT_WORKSPACE_BRAND,
   getTradeSession,
   MT5_TIME_OFFSET_OPTIONS,
   normalizeMt5TimeOffsetSetting,
   parseMt5DateTimeToBangkok,
-  workspaceBrandDisplayName,
 } from '../utils/ghrRules';
 import { deskText, formatAccountDisplayName, formatMt5TimeOffsetLabel, formatTradeNoteDisplay } from '../utils/deskI18n';
 import type { DeskLanguage } from '../utils/deskI18n';
@@ -36,7 +34,7 @@ interface DatabaseSyncCenterProps {
   onUpdateApiConfig: (url: string, key: string) => void;
   onApiPushNow: () => void;
   onApiPullNow: () => void;
-  onUpdateBranding: (brandName: string, subtitle: string) => void;
+  brandingContent?: React.ReactNode;
   onUpdateMt5TimeOffset?: (offset: Mt5TimeOffsetSetting) => void;
   onResetFactory: () => void;
 }
@@ -110,7 +108,7 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
   onUpdateApiConfig,
   onApiPushNow,
   onApiPullNow,
-  onUpdateBranding,
+  brandingContent,
   onUpdateMt5TimeOffset,
   onResetFactory,
 }) => {
@@ -118,21 +116,12 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
   const locale = lang === 'th' ? 'th-TH' : 'en-GB';
   const [apiUrl, setApiUrl] = useState(state.apiEndpointUrl || '');
   const [apiKey, setApiKey] = useState(state.apiSecretKey || '');
-  const [brandName, setBrandName] = useState(workspaceBrandDisplayName(state.deskBrandName));
-  const [brandSubtitle, setBrandSubtitle] = useState(
-    state.deskBrandSubtitle || 'desk.tallynx.com · Trading OS & Journal'
-  );
   const [confirmFactoryReset, setConfirmFactoryReset] = useState(false);
 
   useEffect(() => {
     setApiUrl(state.apiEndpointUrl || '');
     setApiKey(state.apiSecretKey || '');
   }, [state.apiEndpointUrl, state.apiSecretKey]);
-
-  useEffect(() => {
-    setBrandName(workspaceBrandDisplayName(state.deskBrandName));
-    setBrandSubtitle(state.deskBrandSubtitle || 'desk.tallynx.com · Trading OS & Journal');
-  }, [state.deskBrandName, state.deskBrandSubtitle]);
 
   const portCount = Object.keys(state.accounts || {}).length;
   const tradeCount = Array.isArray(state.journal) ? state.journal.length : 0;
@@ -483,7 +472,6 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
           );
         })()}
 
-        {/* Bottom Bar: Branding & Factory Reset */}
         <div
           style={{
             background: 'var(--bg-subtle)',
@@ -497,37 +485,7 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
             minWidth: 0,
           }}
         >
-          {/* Branding */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0 }}>
-            <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
-              {t("Desk branding (white label)", "ปรับแต่งชื่อโต๊ะเทรด (White-Label Branding)")}
-            </span>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 130px), 1fr))', gap: '6px', alignItems: 'center' }}>
-              <input
-                type="text"
-                aria-label={t("White-label desk name", "ชื่อโต๊ะเทรด White-Label")}
-                placeholder={DEFAULT_WORKSPACE_BRAND}
-                value={brandName}
-                onChange={(e) => setBrandName(e.target.value)}
-                style={{ minWidth: 0, width: '100%', height: '30px', padding: '0 8px', fontSize: '12px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-surface-solid)', color: 'var(--text-primary)' }}
-              />
-              <input
-                type="text"
-                aria-label={t("Brand subtitle", "คำอธิบายใต้ชื่อแบรนด์")}
-                placeholder="desk.tallynx.com · Trading OS & Journal"
-                value={brandSubtitle}
-                onChange={(e) => setBrandSubtitle(e.target.value)}
-                style={{ minWidth: 0, width: '100%', height: '30px', padding: '0 8px', fontSize: '12px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-surface-solid)', color: 'var(--text-primary)' }}
-              />
-              <button
-                type="button"
-                className="btn xs primary"
-                onClick={() => onUpdateBranding(brandName, brandSubtitle)}
-              >
-                {t("Save", "บันทึก")}
-              </button>
-            </div>
-          </div>
+          {brandingContent}
 
           {/* Factory Reset */}
           <div className="desk-modal-footer">

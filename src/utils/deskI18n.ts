@@ -189,6 +189,16 @@ export const DESK_I18N: Record<
   DeskLanguage,
   {
     nav: {
+      desk: string;
+      plan: string;
+      quant: string;
+      review: string;
+      rules: string;
+      mall: string;
+      more: string;
+      aiRisk: string;
+      comexBridge: string;
+      autopsy: string;
       analysis: string;
       liveChart: string;
       calculator: string;
@@ -199,6 +209,7 @@ export const DESK_I18N: Record<
       propRules: string;
       settings: string;
     };
+    settingsTabs: Record<'display' | 'keys' | 'accounts' | 'sync', string>;
     topbar: {
       accounts: string;
       addPort: string;
@@ -304,6 +315,10 @@ export const DESK_I18N: Record<
       pnlGrowthSummary: string;
     };
     pageTitles: {
+      desk: string;
+      aiRisk: string;
+      comexBridge: string;
+      autopsy: string;
       liveChart: string;
       calculator: string;
       twelveGate: string;
@@ -318,9 +333,19 @@ export const DESK_I18N: Record<
 > = {
   en: {
     nav: {
+      desk: 'Desk',
+      plan: 'Plan',
+      quant: 'Quant',
+      review: 'Review',
+      rules: 'Rules',
+      mall: 'Mall',
+      more: 'More',
+      aiRisk: 'AI Risk',
+      comexBridge: 'COMEX Bridge',
+      autopsy: 'Autopsy',
       analysis: 'Analysis',
       liveChart: 'Live Chart',
-      calculator: 'Calculator',
+      calculator: '3-TP Calc',
       twelveGate: '12-Gate',
       journal: 'Journal',
       marketplace: 'Market',
@@ -328,6 +353,7 @@ export const DESK_I18N: Record<
       propRules: 'PropRules',
       settings: 'Settings',
     },
+    settingsTabs: { display: 'Display', keys: 'AI & Keys', accounts: 'Accounts', sync: 'Sync' },
     topbar: {
       accounts: 'Accounts',
       addPort: '+ Port',
@@ -434,22 +460,36 @@ export const DESK_I18N: Record<
       pnlGrowthSummary: 'Growth and Trade Outcomes',
     },
     pageTitles: {
-      liveChart: 'Live Chart XAU/USD',
-      calculator: '3-TP & Consistency',
+      desk: 'Desk',
+      aiRisk: 'AI Risk',
+      comexBridge: 'COMEX Bridge',
+      autopsy: 'Challenge Autopsy',
+      liveChart: 'Live Chart',
+      calculator: '3-TP Calculator',
       twelveGate: '12-Gate Protocol',
       journal: 'Trade Journal',
-      marketplace: 'Desk Marketplace',
+      marketplace: 'Strategy Market',
       community: 'Mall Lounge',
-      propRules: 'PropRules Live',
+      propRules: 'Prop Rules',
       analysis: 'Analysis',
-      settings: 'Settings & Sync',
+      settings: 'Settings',
     },
   },
   th: {
     nav: {
+      desk: 'หน้าหลัก',
+      plan: 'วางแผน',
+      quant: 'ควอนต์',
+      review: 'รีวิว',
+      rules: 'กฎกองทุน',
+      mall: 'มอลล์',
+      more: 'เพิ่มเติม',
+      aiRisk: 'ความเสี่ยง AI',
+      comexBridge: 'สะพานข้อมูล COMEX',
+      autopsy: 'วิเคราะห์ย้อนหลัง',
       analysis: 'วิเคราะห์',
       liveChart: 'กราฟสด',
-      calculator: 'คำนวณ',
+      calculator: 'คำนวณ 3-TP',
       twelveGate: '12-Gate',
       journal: 'สมุดเทรด',
       marketplace: 'มาร์เก็ต',
@@ -457,6 +497,7 @@ export const DESK_I18N: Record<
       propRules: 'กฎกองทุน',
       settings: 'ตั้งค่า',
     },
+    settingsTabs: { display: 'การแสดงผล', keys: 'AI และคีย์', accounts: 'บัญชี', sync: 'การซิงก์' },
     topbar: {
       accounts: 'พอร์ต',
       addPort: '+ พอร์ต',
@@ -563,15 +604,19 @@ export const DESK_I18N: Record<
       pnlGrowthSummary: 'สัดส่วนชนะ-แพ้ และโครงสร้างผลลัพธ์',
     },
     pageTitles: {
-      liveChart: 'กราฟสด XAU/USD',
-      calculator: 'คำนวณ 3-TP & กฎ 40%',
+      desk: 'หน้าหลัก',
+      aiRisk: 'ประเมินความเสี่ยงด้วย AI',
+      comexBridge: 'สะพานข้อมูล COMEX',
+      autopsy: 'วิเคราะห์พอร์ตสอบย้อนหลัง',
+      liveChart: 'กราฟสด',
+      calculator: 'เครื่องคำนวณ 3-TP',
       twelveGate: 'เช็กลิสต์ 12-Gate',
       journal: 'สมุดบันทึกเทรด',
-      marketplace: 'มาร์เก็ตเพลซ',
-      community: 'มอลล์แชท',
-      propRules: 'เช็กกฎกองทุน',
+      marketplace: 'ตลาดชุดตั้งค่า',
+      community: 'ห้องคอมมูนิตี้มอลล์',
+      propRules: 'กฎกองทุน',
       analysis: 'วิเคราะห์พอร์ต',
-      settings: 'ตั้งค่าและการซิงก์',
+      settings: 'ตั้งค่า',
     },
   },
 };

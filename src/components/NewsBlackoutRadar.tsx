@@ -8,6 +8,7 @@ interface NewsBlackoutRadarProps {
   firmId?: string;
   firmName?: string;
   onOpenRules?: () => void;
+  summary?: { headroom: string; onOpenAutopsy: () => void };
 }
 
 const EVENT_TIME_FORMATTERS: Record<DeskLanguage, Intl.DateTimeFormat> = {
@@ -30,7 +31,7 @@ const EVENT_TIME_FORMATTERS: Record<DeskLanguage, Intl.DateTimeFormat> = {
 };
 
 export const NewsBlackoutRadar: React.FC<NewsBlackoutRadarProps> = React.memo(
-  function NewsBlackoutRadar({ lang, firmId, firmName, onOpenRules }: NewsBlackoutRadarProps) {
+  function NewsBlackoutRadar({ lang, firmId, firmName, onOpenRules, summary }: NewsBlackoutRadarProps) {
     const titleId = useId();
     const [now, setNow] = useState(Date.now);
 
@@ -70,7 +71,7 @@ export const NewsBlackoutRadar: React.FC<NewsBlackoutRadarProps> = React.memo(
       </>
     );
 
-    if (onOpenRules) {
+    if (onOpenRules && !summary) {
       return (
         <button
           className="news-status-chip"
@@ -89,6 +90,35 @@ export const NewsBlackoutRadar: React.FC<NewsBlackoutRadarProps> = React.memo(
     const eventName = lang === 'th' ? reading.eventNameTh : reading.eventName;
     const eventDate = reading.eventAtMs === null ? null : new Date(reading.eventAtMs);
     const eventTime = eventDate ? EVENT_TIME_FORMATTERS[lang].format(eventDate) : null;
+
+    if (summary) {
+      return (
+        <section className="card desk-guard-summary" aria-labelledby={titleId}>
+          <div>
+            <h2 className="card-title desk-icon-title" id={titleId}>
+              <ShieldCheck size={17} aria-hidden="true" />
+              {t('Prop Guard & Next News', 'การคุมความเสี่ยงกองทุนและข่าวถัดไป')}
+            </h2>
+            <p>{t('Daily drawdown headroom', 'วงเงินขาดทุนรายวันที่เหลือ')}{' '}
+              <strong className="mono">{summary.headroom}</strong>
+            </p>
+          </div>
+          <div>
+            <span className="news-status-chip" data-news-status={reading.status} role="status">{chip}</span>
+            <p>
+              {eventName && eventDate
+                ? <><strong>{eventName}</strong> · <time dateTime={eventDate.toISOString()}>{eventTime} {t('BKK', 'เวลาไทย')}</time></>
+                : t('No upcoming release in the schedule.', 'ไม่มีข่าวถัดไปในปฏิทิน')}
+            </p>
+          </div>
+          <div className="desk-guard-actions">
+            <button type="button" className="btn sm" onClick={onOpenRules}>{t('Rules', 'กฎกองทุน')}</button>
+            <button type="button" className="btn sm" onClick={summary.onOpenAutopsy}>{t('Autopsy', 'วิเคราะห์ย้อนหลัง')}</button>
+          </div>
+        </section>
+      );
+    }
+
     const minutesUntil = reading.minutesUntil ?? 0;
     const minutes = Math.ceil(Math.abs(minutesUntil));
     const countdown =

@@ -1,77 +1,107 @@
-import React from 'react';
-import { Compass, LayoutDashboard, Scale, Settings, Users } from 'lucide-react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { Ellipsis } from 'lucide-react';
 import { DESK_I18N, deskText, type DeskLanguage } from '../utils/deskI18n';
-import type { WorkspacePillar } from './WorkspaceSidebar';
+import { mobileMoreLinks, mobileWorkspaceLinks, type WorkspacePillar } from './workspaceNavigation';
 
 interface MobileBottomNavProps {
   lang: DeskLanguage;
   activePillar: WorkspacePillar;
-  onOpenMall: () => void;
-  onSwitchPage: (sectionId: string) => void;
+  onNavigate: (sectionId: string) => void;
 }
 
-export const MobileBottomNav: React.FC<MobileBottomNavProps> = React.memo(({
+export const MobileBottomNav = React.memo(function MobileBottomNav({
   lang,
   activePillar,
-  onOpenMall,
-  onSwitchPage,
-}) => {
-  const ui = DESK_I18N[lang];
-  const t = (en: string, th: string) => deskText(lang, en, th);
+  onNavigate,
+}: MobileBottomNavProps) {
+  const { nav } = DESK_I18N[lang];
+  const [moreOpen, setMoreOpen] = useState(false);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const sheetId = useId();
+  const moreActive = mobileMoreLinks.some(({ pillar }) => pillar === activePillar);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node
+        && !sheetRef.current?.contains(event.target)
+        && !moreRef.current?.contains(event.target)) {
+        setMoreOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setMoreOpen(false);
+      moreRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    const mobileViewport = window.matchMedia('(max-width: 768px)');
+    const onViewportChange = () => {
+      if (!mobileViewport.matches) setMoreOpen(false);
+    };
+    mobileViewport.addEventListener('change', onViewportChange);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      mobileViewport.removeEventListener('change', onViewportChange);
+    };
+  }, [moreOpen]);
 
   return (
-    <nav className="fx-mobile-bottom-nav" aria-label={t('Mobile Navigation', 'เมนูมือถือ')}>
+    <nav
+      className="fx-mobile-bottom-nav"
+      aria-label={deskText(lang, 'Mobile navigation', 'เมนูมือถือ')}
+    >
+      {mobileWorkspaceLinks.map(({ pillar, section, icon: Icon }) => (
+        <button
+          key={pillar}
+          type="button"
+          data-pillar={pillar}
+          className={`fx-mob-nav-btn ${activePillar === pillar ? 'active' : ''}`}
+          aria-current={activePillar === pillar ? 'page' : undefined}
+          onClick={() => {
+            setMoreOpen(false);
+            onNavigate(section);
+          }}
+        >
+          <Icon className="fx-mob-ico" size={18} aria-hidden="true" />
+          <span>{nav[pillar]}</span>
+        </button>
+      ))}
       <button
+        ref={moreRef}
         type="button"
-        className={`fx-mob-nav-btn ${activePillar === 'portfolio' ? 'active' : ''}`}
-        aria-current={activePillar === 'portfolio' ? 'page' : undefined}
-        onClick={() => onSwitchPage('sec-accounts')}
+        data-pillar="more"
+        className={`fx-mob-nav-btn ${moreActive || moreOpen ? 'active' : ''}`}
+        aria-expanded={moreOpen}
+        aria-controls={sheetId}
+        onClick={() => setMoreOpen((open) => !open)}
       >
-        <LayoutDashboard className="fx-mob-ico" size={18} aria-hidden="true" />
-        <span>{t('Portfolio', 'พอร์ต')}</span>
+        <Ellipsis className="fx-mob-ico" size={18} aria-hidden="true" />
+        <span>{nav.more}</span>
       </button>
-
-      <button
-        type="button"
-        className={`fx-mob-nav-btn ${activePillar === 'plan' ? 'active' : ''}`}
-        aria-current={activePillar === 'plan' ? 'page' : undefined}
-        onClick={() => onSwitchPage('calculator-root')}
-      >
-        <Compass className="fx-mob-ico" size={18} aria-hidden="true" />
-        <span>{t('Plan', 'วางแผน')}</span>
-      </button>
-
-      <button
-        type="button"
-        className={`fx-mob-nav-btn ${activePillar === 'rules' ? 'active' : ''}`}
-        aria-current={activePillar === 'rules' ? 'page' : undefined}
-        onClick={() => onSwitchPage('sec-proprules')}
-      >
-        <Scale className="fx-mob-ico" size={18} aria-hidden="true" />
-        <span>{t('Rules', 'กฎ')}</span>
-      </button>
-
-      <button
-        type="button"
-        className={`fx-mob-nav-btn ${activePillar === 'mall' ? 'active' : ''}`}
-        aria-current={activePillar === 'mall' ? 'page' : undefined}
-        onClick={onOpenMall}
-      >
-        <Users className="fx-mob-ico" size={18} aria-hidden="true" />
-        <span>{t('Mall', 'มอลล์')}</span>
-      </button>
-
-      <button
-        type="button"
-        className={`fx-mob-nav-btn ${activePillar === 'settings' ? 'active' : ''}`}
-        aria-current={activePillar === 'settings' ? 'page' : undefined}
-        onClick={() => onSwitchPage('sec-settings')}
-      >
-        <Settings className="fx-mob-ico" size={18} aria-hidden="true" />
-        <span>{ui.nav.settings}</span>
-      </button>
+      <div ref={sheetRef} id={sheetId} className="fx-mobile-more-sheet" hidden={!moreOpen}>
+        {mobileMoreLinks.map(({ pillar, section, icon: Icon }) => (
+          <button
+            key={pillar}
+            type="button"
+            data-pillar={pillar}
+            aria-current={activePillar === pillar ? 'page' : undefined}
+            onClick={() => {
+              setMoreOpen(false);
+              moreRef.current?.focus();
+              onNavigate(section);
+            }}
+          >
+            <Icon size={17} aria-hidden="true" />
+            <span>{nav[pillar]}</span>
+          </button>
+        ))}
+      </div>
     </nav>
   );
 });
-
-MobileBottomNav.displayName = 'MobileBottomNav';

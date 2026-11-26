@@ -25,15 +25,18 @@ test('returns to the hostname home when history restores an unrecognized route',
   assert.equal(resolveDeskHistorySection({ pathname: '/chart', search: '', hash: '', hostname: 'mall.tallynx.com' }), 'tv-chart-root');
 });
 
-test('resolves each Desk page from its clean path, query alias, hash alias or section ID', () => {
+test('resolves and serializes each canonical Desk page', () => {
   const pages = {
-    analysis: 'sec-accounts',
+    desk: 'sec-accounts',
     chart: 'tv-chart-root',
     calc: 'sec-calc',
     gate: 'desk-cards-root',
+    quant: 'sec-quant-risk',
+    comex: 'sec-comex-bridge',
+    review: 'sec-review-autopsy',
     journal: 'journal-root',
+    rules: 'sec-proprules',
     market: 'sec-market',
-    proprules: 'sec-proprules',
     mall: 'sec-mall',
     settings: 'sec-settings',
   };
@@ -44,12 +47,26 @@ test('resolves each Desk page from its clean path, query alias, hash alias or se
     assert.equal(resolveDeskSection(`?page=${page}`), id);
     assert.equal(resolveDeskSection('', `#/${page}`), id);
     assert.equal(resolveDeskSection('', `#${id}`), id);
+    assert.equal(updateDeskPageUrl('/?lang=th', id), `/${page}?lang=th`);
   }
-  assert.equal(resolveDeskSection('', '', '/portfolio'), 'sec-accounts');
-  assert.equal(resolveDeskSection('', '', '/plan'), 'sec-calc');
-  assert.equal(resolveDeskSection('', '', '/rules'), 'sec-proprules');
-  assert.equal(resolveDeskSection('', '', '/community'), 'sec-mall');
-  assert.equal(resolveDeskSection('', '', '/marketplace'), 'sec-market');
+});
+
+test('preserves legacy path, query, and hash aliases', () => {
+  const aliases = {
+    analysis: 'sec-accounts',
+    portfolio: 'sec-accounts',
+    plan: 'tv-chart-root',
+    'ai-risk': 'sec-quant-risk',
+    autopsy: 'sec-review-autopsy',
+    proprules: 'sec-proprules',
+    community: 'sec-mall',
+    marketplace: 'sec-market',
+  };
+  for (const [alias, id] of Object.entries(aliases)) {
+    assert.equal(resolveDeskSection('', '', `/${alias}`), id);
+    assert.equal(resolveDeskSection(`?page=${alias}`), id);
+    assert.equal(resolveDeskSection('', `#${alias}`), id);
+  }
   assert.equal(resolveDeskSection('', '#calculator-root'), 'sec-calc');
   assert.equal(resolveDeskSection('', '#sec-marketplace'), 'sec-market');
   assert.equal(resolveDeskSection('?page=community'), 'sec-mall');
@@ -122,10 +139,10 @@ test('serializes clean paths while stripping legacy page params and navigation h
     updateDeskPageUrl('/?lang=th&theme=dark&page=proprules#proprules', 'calculator-root'),
     '/calc?lang=th&theme=dark',
   );
-  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'sec-proprules'), '/proprules?lang=en');
+  assert.equal(updateDeskPageUrl('/?lang=en#chart', 'sec-proprules'), '/rules?lang=en');
   assert.equal(updateDeskPageUrl('/?lang=en#chart', 'journal-root'), '/journal?lang=en');
   assert.equal(updateDeskPageUrl('/?lang=en#unrelated', 'sec-marketplace'), '/market?lang=en#unrelated');
-  assert.equal(updateDeskPageUrl('/calc?lang=th', 'sec-accounts'), '/analysis?lang=th');
+  assert.equal(updateDeskPageUrl('/calc?lang=th', 'sec-accounts'), '/desk?lang=th');
   assert.equal(updateDeskPageUrl('/portfolio', 'sec-settings'), '/settings');
   assert.equal(updateDeskPageUrl('/rules', 'desk-cards-root'), '/gate');
   assert.equal(updateDeskPageUrl('/mall', 'tv-chart-root'), '/chart');

@@ -134,11 +134,13 @@ import { useOnlineStatus } from './hooks/usePWAInstall';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { DeskDialog } from './components/DeskDialog';
 import { WorkspaceSkeleton } from './components/WorkspaceSkeleton';
-import { WorkspaceSidebar } from './components/WorkspaceSidebar';
+import { WorkspaceSidebar, type WorkspacePillar } from './components/WorkspaceSidebar';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { NewsBlackoutRadar } from './components/NewsBlackoutRadar';
+import { WorkspaceBrandingForm } from './components/WorkspaceBrandingForm';
 import type { Mt5ReadOnlySyncRequest } from './components/TradeJournalSection';
 import type { MallEntry } from './components/CommunityMallSection';
+import type { SettingsTab } from './components/SettingsPageSection';
 
 const SettingsPageSection = React.lazy(() =>
   import('./components/SettingsPageSection').then((m) => ({ default: m.SettingsPageSection }))
@@ -194,6 +196,15 @@ const TradingViewChartSection = React.lazy(() =>
     default: m.TradingViewChartSection,
   }))
 );
+const AiRiskSupervisionCard = React.lazy(() =>
+  import('./components/AiRiskSupervisionCard').then((m) => ({ default: m.AiRiskSupervisionCard }))
+);
+const ComexBridgePanel = React.lazy(() =>
+  import('./components/ComexBridgePanel').then((m) => ({ default: m.ComexBridgePanel }))
+);
+const ReviewAutopsySection = React.lazy(() =>
+  import('./components/ReviewAutopsySection').then((m) => ({ default: m.ReviewAutopsySection }))
+);
 const HelpGuideModal = React.lazy(() =>
   import('./components/HelpGuideModal').then((m) => ({ default: m.HelpGuideModal }))
 );
@@ -238,7 +249,7 @@ const DESK_ROOM_KEY = 'nx_ghr_room_mode_v1';
 
 type DeskRoomMode = 'clean' | 'night' | 'daylight';
 
-type DeskPillar = 'mall' | 'portfolio' | 'plan' | 'rules' | 'settings';
+type DeskPillar = WorkspacePillar;
 
 const DEFAULT_INSTRUMENT_ENTRY: Record<string, number> = {
   XAUUSD: 2650,
@@ -251,8 +262,10 @@ const DEFAULT_INSTRUMENT_ENTRY: Record<string, number> = {
 
 function getDeskPillar(section: string): DeskPillar {
   if (section === 'sec-mall' || section === 'sec-marketplace') return 'mall';
-  if (section === 'sec-accounts' || section === 'journal-root') return 'portfolio';
+  if (section === 'sec-accounts') return 'desk';
   if (section === 'calculator-root' || section === 'desk-cards-root' || section === 'tv-chart-root') return 'plan';
+  if (section === 'sec-quant-risk' || section === 'sec-comex-bridge') return 'quant';
+  if (section === 'sec-review-autopsy' || section === 'journal-root') return 'review';
   if (section === 'sec-proprules') return 'rules';
   return 'settings';
 }
@@ -428,7 +441,7 @@ export default function App() {
     } catch { /* Keep a session handle when storage is unavailable. */ }
     return fallback;
   });
-  const [coachLiveChartSymbol, setCoachLiveChartSymbol] = useState<string | null>(null);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('display');
   const [coachPendingPrompt, setCoachPendingPrompt] = useState<string | null>(null);
   const [rightDockFocusTick, setRightDockFocusTick] = useState<number>(0);
   const [showRightDock, setShowRightDock] = useState(() => {
@@ -1726,10 +1739,16 @@ export default function App() {
       handleSwitchPage(homeSection);
     }
   }, [handleSwitchPage, openMall]);
-  const handleOpenSettings = useCallback(() => {
+  const handleOpenSettings = useCallback((tab: SettingsTab = 'display') => {
+    setSettingsTab(tab);
     setShowAccountsDrawer(false);
     handleSwitchPage('sec-settings');
   }, [handleSwitchPage]);
+  const handleNavigatePillar = useCallback((section: string) => {
+    if (section === 'sec-mall') openMall();
+    else if (section === 'sec-settings') handleOpenSettings();
+    else handleSwitchPage(section);
+  }, [handleOpenSettings, handleSwitchPage, openMall]);
   const handleOpenMt5SyncModal = useCallback(() => {
     commitWorkspaceChange((prev) => ({ ...prev, showMt5Importer: true }));
   }, [commitWorkspaceChange]);
@@ -2843,6 +2862,12 @@ export default function App() {
       ? ui.pageTitles.calculator
       : activeNavSection === 'desk-cards-root'
       ? ui.pageTitles.twelveGate
+      : activeNavSection === 'sec-quant-risk'
+      ? ui.pageTitles.aiRisk
+      : activeNavSection === 'sec-comex-bridge'
+      ? ui.pageTitles.comexBridge
+      : activeNavSection === 'sec-review-autopsy'
+      ? ui.pageTitles.autopsy
       : activeNavSection === 'journal-root'
       ? ui.pageTitles.journal
       : activeNavSection === 'sec-marketplace'
@@ -2853,7 +2878,7 @@ export default function App() {
       ? ui.pageTitles.propRules
       : activeNavSection === 'sec-settings'
       ? ui.pageTitles.settings
-      : ui.pageTitles.analysis;
+      : ui.pageTitles.desk;
 
   const realtimeAnalytics = useMemo(
     () => computeRealtimeAnalytics(state.journal, state.activePort),
@@ -3276,6 +3301,21 @@ export default function App() {
     />
   );
 
+  const brandingForm = (
+    <WorkspaceBrandingForm
+      lang={deskLang}
+      name={state.deskBrandName}
+      subtitle={state.deskBrandSubtitle}
+      onSave={(deskBrandName, deskBrandSubtitle) => {
+        commitWorkspaceChange(
+          (prev) => ({ ...prev, deskBrandName, deskBrandSubtitle }),
+          { snapshotReason: 'ปรับชื่อแบรนด์ White-Label' }
+        );
+        addToast('Desk branding saved.', 'บันทึกชื่อแบรนด์โต๊ะเทรดแล้ว');
+      }}
+    />
+  );
+
   const renderDbSyncCenter = (onClose?: () => void) => (
     <DatabaseSyncCenter
       lang={deskLang}
@@ -3287,6 +3327,7 @@ export default function App() {
       pendingOfflineCount={pendingOfflineCount}
       snapshots={snapshots}
       syncLogs={syncLogs}
+      brandingContent={onClose ? brandingForm : undefined}
       onClose={onClose}
       onGoogleLogin={handleGoogleLogin}
       onGoogleLogout={async () => {
@@ -3444,17 +3485,6 @@ export default function App() {
           );
         }
       }}
-      onUpdateBranding={(brandName, subtitle) => {
-        commitWorkspaceChange(
-          (prev) => ({
-            ...prev,
-            deskBrandName: brandName.trim() || DEFAULT_WORKSPACE_BRAND,
-            deskBrandSubtitle: subtitle.trim() || 'desk.tallynx.com · Risk Analytics & Trade Journal',
-          }),
-          { snapshotReason: 'ปรับชื่อแบรนด์ White-Label' }
-        );
-        addToast('Desk branding saved.', 'บันทึกชื่อแบรนด์โต๊ะเทรดแล้ว');
-      }}
       onUpdateMt5TimeOffset={(nextTimeOffset) =>
         handleUpdateMt5Settings(
           stateRef.current.mt5GroupMode || 'IDEA',
@@ -3492,20 +3522,25 @@ export default function App() {
 
   const activePillar = getDeskPillar(activeNavSection);
   const pillarSubtabs: Record<DeskPillar, Array<{ id: string; label: string }>> = {
-    mall: [
-      { id: 'sec-mall', label: t('Mall Lounge', 'ห้องคอมมูนิตี้มอลล์') },
-      { id: 'sec-marketplace', label: t('Strategy Market', 'ตลาดชุดตั้งค่า') },
-    ],
-    portfolio: [
-      { id: 'sec-accounts', label: t('Overview & Risk', 'ภาพรวมและความเสี่ยง') },
-      { id: 'journal-root', label: t('Trade Journal', 'สมุดบันทึกเทรด') },
-    ],
+    desk: [],
     plan: [
-      { id: 'calculator-root', label: t('3-TP Calc', 'คำนวณ 3-TP') },
-      { id: 'desk-cards-root', label: t('12-Gate & Rules', '12-Gate & กฎเหล็ก') },
-      { id: 'tv-chart-root', label: t('Live Chart', 'กราฟสด') },
+      { id: 'tv-chart-root', label: ui.nav.liveChart },
+      { id: 'calculator-root', label: ui.nav.calculator },
+      { id: 'desk-cards-root', label: ui.nav.twelveGate },
+    ],
+    quant: [
+      { id: 'sec-quant-risk', label: ui.nav.aiRisk },
+      { id: 'sec-comex-bridge', label: ui.nav.comexBridge },
+    ],
+    review: [
+      { id: 'sec-review-autopsy', label: ui.nav.autopsy },
+      { id: 'journal-root', label: ui.nav.journal },
     ],
     rules: [],
+    mall: [
+      { id: 'sec-mall', label: ui.pageTitles.community },
+      { id: 'sec-marketplace', label: ui.pageTitles.marketplace },
+    ],
     settings: [],
   };
   const activeSubtabs = pillarSubtabs[activePillar];
@@ -3514,15 +3549,13 @@ export default function App() {
     <div className="fx-app-layout">
       {deskRoomMode !== 'clean' && <div className="fx-room-backdrop" aria-hidden="true" />}
       {/* ================================================================= */}
-      {/* LEFT VERTICAL 5-PILLAR RAIL (v5.0)                                */}
+      {/* DESKTOP WORKFLOW & SECONDARY NAVIGATION                           */}
       {/* ================================================================= */}
       <WorkspaceSidebar
         lang={deskLang}
         activePillar={activePillar}
         onGoHome={handleOpenBrandHome}
-        onOpenMall={handleOpenMallDefault}
-        onSwitchPage={handleSwitchPage}
-        onOpenSettings={handleOpenSettings}
+        onNavigate={handleNavigatePillar}
       />
 
       {/* ================================================================= */}
@@ -3956,7 +3989,7 @@ export default function App() {
                       style={{ justifyContent: 'flex-start' }}
                       onClick={() => {
                         setShowToolsMenu(false);
-                        handleSwitchPage('sec-settings');
+                        handleOpenSettings();
                       }}
                     >
                       {ui.pageTitles.settings}
@@ -3981,7 +4014,7 @@ export default function App() {
         </header>
 
         <div className="saas-shell">
-          {!isMallPage && (
+          {!isMallPage && activePillar !== 'desk' && (
             <section className="preflight-shield" aria-label={t('Pre-Flight Shield Status', 'สถานะตรวจความเสี่ยงก่อนเทรด')}>
               <strong><ShieldCheck size={15} aria-hidden="true" />{t('Pre-Flight Shield Status', 'สถานะตรวจความเสี่ยงก่อนเทรด')}</strong>
               <button
@@ -4009,6 +4042,7 @@ export default function App() {
                 <button
                   key={tab.id}
                   type="button"
+                  data-section={tab.id}
                   className={`workspace-subtab ${activeNavSection === tab.id ? 'is-active' : ''}`}
                   aria-current={activeNavSection === tab.id ? 'page' : undefined}
                   onClick={() => handleSwitchPage(tab.id)}
@@ -4186,6 +4220,10 @@ export default function App() {
                 livePositions={activeLivePositions}
                 telemetrySeries={activeTelemetrySeries}
                 liveMonitor={liveMonitorState}
+                propFirmId={activeFirmId}
+                dailyDrawdownHeadroom={state.privacyMasked && shieldHeadroom !== '—' ? '••••' : shieldHeadroom}
+                onOpenRules={handleOpenPropRulesPage}
+                onOpenAutopsy={() => handleSwitchPage('sec-review-autopsy')}
                 onManageAccounts={openAccountsDrawer}
                 onOpenMt5SyncModal={handleOpenMt5SyncModal}
                 onOpenCalculator={handleOpenCalcPage}
@@ -4201,28 +4239,36 @@ export default function App() {
               <TradingViewChartSection
                 deskTheme={deskTheme}
                 lang={deskLang}
-                uid={firebaseUid}
+                onOpenAiRisk={() => handleSwitchPage('sec-quant-risk')}
+                onOpenComex={() => handleSwitchPage('sec-comex-bridge')}
+              />
+            )}
+
+            {activeNavSection === 'sec-quant-risk' && (
+              <div id="sec-quant-risk" className="quant-workspace">
+                <AiRiskSupervisionCard
+                  lang={deskLang}
+                  initialTimeframe="5m"
+                  portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
+                  accountScope={state.activePort}
+                />
+              </div>
+            )}
+            {activeNavSection === 'sec-comex-bridge' && (
+              <div id="sec-comex-bridge" className="quant-workspace">
+                <ComexBridgePanel lang={deskLang} uid={firebaseUid} onCopyText={copyText} />
+              </div>
+            )}
+            {activeNavSection === 'sec-review-autopsy' && (
+              <ReviewAutopsySection
+                lang={deskLang}
                 state={state}
-                riskSupervisionPortfolio={riskSupervisionPortfolio}
-                onUpdateDir={(dir: TradeDirection) =>
-                  commitWorkspaceChange((prev) => ({ ...prev, calcDir: dir }))
-                }
-                onUpdateEntry={(raw: string, num: number) =>
-                  commitWorkspaceChange((prev) => ({
-                    ...prev,
-                    calcEntryRaw: raw,
-                    calcEntry: num,
-                  }))
-                }
-                onCopyText={copyText}
-                onAnalyzeInCoach={(sym: string) => {
-                  setCoachLiveChartSymbol(sym);
-                  setCoachPendingPrompt(
-                    `วิเคราะห์กราฟสด ${sym} พร้อมสรุปโครงสร้าง EMA20/EMA50, RSI(14), ATR(14), แนวรับ-แนวต้าน และแผนความเสี่ยง 3-TP ปัจจุบัน`
-                  );
-                  setRightDockFocusTick((n) => n + 1);
-                  setShowRightDock(true);
-                }}
+                balance={liveMonitorState.provider === 'LIVE_BRIDGE' && liveMonitorState.connected && liveMonitorState.balance != null
+                  ? formatPilotAmount(liveMonitorState.balance, liveMonitorState.currency)
+                  : displayBalance}
+                dailyDrawdownHeadroom={shieldHeadroom}
+                onOpenJournal={() => handleSwitchPage('journal-root')}
+                onOpenCalculator={handleOpenCalcPage}
               />
             )}
 
@@ -4823,6 +4869,8 @@ export default function App() {
               <SettingsPageSection
                 firebaseUid={currentUser?.uid ?? null}
                 lang={deskLang}
+                activeTab={settingsTab}
+                onSelectTab={setSettingsTab}
                 deskTheme={deskTheme}
                 roomMode={deskRoomMode}
                 thbRate={state.thbRate}
@@ -4839,6 +4887,8 @@ export default function App() {
                 }
                 accountsContent={renderAccountSwitcher()}
                 syncContent={renderDbSyncCenter()}
+                brandingContent={brandingForm}
+                onOpenMt5Sync={handleOpenMt5SyncModal}
               />
             )}
           </React.Suspense>
@@ -4908,8 +4958,6 @@ export default function App() {
                 rMultipleToday={mallSessionR}
                 status={mallStatus}
                 onStatusChange={setMallStatus}
-                requestedSymbol={coachLiveChartSymbol}
-                onClearRequestedSymbol={() => setCoachLiveChartSymbol(null)}
                 pendingCoachPrompt={coachPendingPrompt}
                 onClearPendingCoachPrompt={() => setCoachPendingPrompt(null)}
                 focusCoachTick={rightDockFocusTick}
@@ -4980,7 +5028,9 @@ export default function App() {
               activeNavSection={activeNavSection}
               accounts={state.accounts}
               activePort={state.activePort}
-              onSwitchPage={handleSwitchPage}
+              onSwitchPage={handleNavigatePillar}
+              activeSettingsTab={settingsTab}
+              onOpenSettingsTab={handleOpenSettings}
               onSelectAccount={handleSelectPort}
               onOpenMt5Sync={() =>
                 commitWorkspaceChange((prev) => ({ ...prev, showMt5Importer: true }))
@@ -4997,8 +5047,7 @@ export default function App() {
         <MobileBottomNav
           lang={deskLang}
           activePillar={activePillar}
-          onOpenMall={handleOpenMallDefault}
-          onSwitchPage={handleSwitchPage}
+          onNavigate={handleNavigatePillar}
         />
       </div>
     </div>

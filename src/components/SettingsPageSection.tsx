@@ -1,9 +1,16 @@
 import React from 'react';
+import { RefreshCw } from 'lucide-react';
 import { DESK_I18N, deskText, type DeskLanguage } from '../utils/deskI18n';
+import { navigateDeskTabs } from '../utils/navigateDeskTabs';
 import { AiAndDataKeysCard } from './AiAndDataKeysCard';
+
+const SETTINGS_TABS = ['display', 'keys', 'accounts', 'sync'] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
 interface SettingsPageSectionProps {
   lang: DeskLanguage;
+  activeTab: SettingsTab;
+  onSelectTab: (tab: SettingsTab) => void;
   firebaseUid: string | null;
   deskTheme: 'obsidian' | 'alabaster';
   roomMode: 'clean' | 'night' | 'daylight';
@@ -14,12 +21,16 @@ interface SettingsPageSectionProps {
   onChangeLang: (lang: DeskLanguage) => void;
   onChangeThbRate: (rate: number) => void;
   onTogglePrivacyMask: () => void;
+  onOpenMt5Sync: () => void;
+  brandingContent: React.ReactNode;
   accountsContent: React.ReactNode;
   syncContent: React.ReactNode;
 }
 
 export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
   lang,
+  activeTab,
+  onSelectTab,
   firebaseUid,
   deskTheme,
   roomMode,
@@ -30,26 +41,22 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
   onChangeLang,
   onChangeThbRate,
   onTogglePrivacyMask,
+  onOpenMt5Sync,
+  brandingContent,
   accountsContent,
   syncContent,
 }) => {
   const ui = DESK_I18N[lang];
   const t = (en: string, th: string) => deskText(lang, en, th);
 
-  return (
-    <section id="sec-settings" className="settings-page-root" aria-label={ui.pageTitles.settings}>
+  const panels: Record<SettingsTab, React.ReactNode> = {
+    display: <>
       <div className="card settings-prefs-card">
         <div className="card-header">
           <div style={{ minWidth: 0 }}>
             <h2 className="card-title">
               {t('Workspace display', 'การแสดงผลของ Desk')}
             </h2>
-            <div className="settings-pref-subtitle">
-              {t(
-                'Choose a theme and language, set the USD/THB rate, or hide balances.',
-                'เลือกธีมและภาษา ตั้งเรต USD/THB หรือซ่อนยอดเงิน'
-              )}
-            </div>
           </div>
         </div>
         <div className="settings-prefs-grid">
@@ -143,12 +150,58 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
           </div>
         </div>
       </div>
-
-      <AiAndDataKeysCard uid={firebaseUid} lang={lang} />
-
-      <div className="settings-ports-block">{accountsContent}</div>
-
+      <div className="card settings-branding-card">
+        <h2 className="card-title">{t('Workspace branding', 'แบรนด์พื้นที่ทำงาน')}</h2>
+        {brandingContent}
+      </div>
+    </>,
+    keys: <AiAndDataKeysCard uid={firebaseUid} lang={lang} />,
+    accounts: <div className="settings-ports-block">{accountsContent}</div>,
+    sync: <>
+      <div className="card settings-mt5-card">
+        <div>
+          <h2 className="card-title">{t('MT5 Bridge', 'การเชื่อมต่อ MT5')}</h2>
+          <p>{t('Manage read-only connections or import an MT5 statement.', 'จัดการการเชื่อมต่อแบบอ่านอย่างเดียวหรือนำเข้ารายงาน MT5')}</p>
+        </div>
+        <button id="settings-mt5-bridge" type="button" className="btn sm" onClick={onOpenMt5Sync}>
+          <RefreshCw size={15} aria-hidden="true" /> {t('Open MT5 Sync', 'เปิดการซิงก์ MT5')}
+        </button>
+      </div>
       <div className="settings-sync-block">{syncContent}</div>
+    </>,
+  };
+
+  return (
+    <section id="sec-settings" className="settings-page-root" aria-label={ui.pageTitles.settings}>
+      <div className="settings-tabs" role="tablist" aria-label={ui.pageTitles.settings} onKeyDown={navigateDeskTabs}>
+        {SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab}
+            id={`settings-${tab}-tab`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            aria-controls={`settings-${tab}-panel`}
+            tabIndex={activeTab === tab ? 0 : -1}
+            onClick={() => onSelectTab(tab)}
+          >
+            {ui.settingsTabs[tab]}
+          </button>
+        ))}
+      </div>
+      {SETTINGS_TABS.map((tab) => (
+        <div
+          key={tab}
+          id={`settings-${tab}-panel`}
+          className="settings-panel"
+          role="tabpanel"
+          aria-labelledby={`settings-${tab}-tab`}
+          tabIndex={0}
+          hidden={activeTab !== tab}
+        >
+          {activeTab === tab && panels[tab]}
+        </div>
+      ))}
     </section>
   );
 };
