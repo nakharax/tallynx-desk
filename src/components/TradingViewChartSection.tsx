@@ -7,10 +7,12 @@ import { deskText, type DeskLanguage } from '../utils/deskI18n';
 import type { DeskTheme } from '../utils/webHandoff';
 import type { QuantPortfolioInput } from '../utils/quantSupervisionEngine';
 import { AiRiskSupervisionCard } from './AiRiskSupervisionCard';
+import { ComexBridgePanel } from './ComexBridgePanel';
 
 interface TradingViewChartSectionProps {
   state: GhrWorkspaceState;
   lang?: DeskLanguage;
+  uid?: string | null;
   deskTheme?: DeskTheme;
   riskSupervisionPortfolio?: QuantPortfolioInput;
   onUpdateDir: (dir: TradeDirection) => void;
@@ -164,6 +166,7 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
 export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = ({
   state,
   lang = 'en',
+  uid = null,
   deskTheme = 'alabaster',
   riskSupervisionPortfolio,
   onUpdateDir,
@@ -422,6 +425,7 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
         portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
         accountScope={state.activePort}
       />
+      <ComexBridgePanel lang={lang} uid={uid} onCopyText={onCopyText} />
     </section>
   );
 };

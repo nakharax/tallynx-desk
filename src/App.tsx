@@ -4205,6 +4205,7 @@ export default function App() {
               <TradingViewChartSection
                 deskTheme={deskTheme}
                 lang={deskLang}
+                uid={firebaseUid}
                 state={state}
                 riskSupervisionPortfolio={riskSupervisionPortfolio}
                 onUpdateDir={(dir: TradeDirection) =>

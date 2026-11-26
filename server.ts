@@ -16,6 +16,7 @@ import { createFundedNextRouter } from './server/fundednext/router.js';
 import { createMallRouter, type MallSnapshotSource } from './server/mall/mallRouter.js';
 import { createRiskSuperviseRouter } from './server/ai/riskSupervise.js';
 import { createByokRouter } from './server/ai/byokRouter.js';
+import { createComexBridgeRouter } from './server/market/comexBridge.js';
 import { resolvePlatformAiPrivilege, type PrivilegeDependencies, type VerifiedAiCaller } from './server/ai/platformPrivilege.js';
 import {
   BYOK_REQUIRED_MESSAGE, aiUpstreamStatus, createDeskAiAccessResolver, createGoogleAiClient,
@@ -2816,6 +2817,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     env: process.env,
   }));
   app.use('/api', createRiskSuperviseRouter({ resolveDeskAiAccess, checkDistributedRateLimit }));
+  app.use('/api', createComexBridgeRouter({ fetchLiveSpotQuote }));
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ ok: false, error: 'API route not found' });
