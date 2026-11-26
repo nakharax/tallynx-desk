@@ -2,7 +2,7 @@
 import "dotenv/config";
 import crypto from "crypto";
 import { EventEmitter } from "events";
-import express2 from "express";
+import express3 from "express";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -2162,6 +2162,573 @@ function createMallRouter(options) {
   return router;
 }
 
+// server/ai/riskSupervise.ts
+import express2 from "express";
+
+// src/utils/quantSupervisionEngine.ts
+import Decimal2 from "decimal.js";
+var D = Decimal2.clone({ precision: 30, rounding: Decimal2.ROUND_HALF_UP });
+var BARS_PER_DAY = { "5m": 288, "15m": 96, "1h": 24, "4h": 6, "1d": 1 };
+var NORMAL_QUANTILE_95 = "1.644853626951472";
+var MAX_MAGNITUDE = 1e15;
+var EMPTY_BOLLINGER = { upper: null, middle: null, lower: null, bandwidthPct: null, zScore: null };
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isBoundedNumber(value, min = 0) {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= MAX_MAGNITUDE;
+}
+function normalizeSupervisionCandles(input) {
+  const byTime = /* @__PURE__ */ new Map();
+  for (const bar of input) {
+    if (!isRecord(bar)) continue;
+    const { ts, open, high, low, close, volume } = bar;
+    if (!isBoundedNumber(ts) || !Number.isSafeInteger(ts) || !isBoundedNumber(open, 1e-12) || !isBoundedNumber(high, 1e-12) || !isBoundedNumber(low, 1e-12) || !isBoundedNumber(close, 1e-12) || low > Math.min(open, close) || high < Math.max(open, close)) continue;
+    byTime.set(ts, {
+      ts,
+      timeLabel: new Date(ts).toISOString().slice(5, 16).replace("T", " "),
+      open,
+      high,
+      low,
+      close,
+      ...isBoundedNumber(volume) ? { volume } : {}
+    });
+  }
+  return [...byTime.values()].sort((left, right) => left.ts - right.ts);
+}
+function sanitizeQuantPortfolioInput(input) {
+  if (!isRecord(input) || !isBoundedNumber(input.equityUsd, -MAX_MAGNITUDE)) return void 0;
+  const portfolio = { equityUsd: input.equityUsd };
+  if (isBoundedNumber(input.balanceUsd, -MAX_MAGNITUDE)) portfolio.balanceUsd = input.balanceUsd;
+  if (isBoundedNumber(input.dailyLossLimitUsd, 1e-6)) portfolio.dailyLossLimitUsd = input.dailyLossLimitUsd;
+  const metrics = ["dailyLossUsedUsd", "openRiskUsd", "exposureLots"];
+  for (const metric of metrics) {
+    if (isBoundedNumber(input[metric])) portfolio[metric] = input[metric];
+  }
+  if (input.accountType === "PROP" || input.accountType === "PERSONAL") portfolio.accountType = input.accountType;
+  return portfolio;
+}
+function mean(values) {
+  return values.reduce((sum, value) => sum.plus(value), new D(0)).div(values.length);
+}
+function standardDeviation(values, center, denominator) {
+  return values.reduce((sum, value) => sum.plus(value.minus(center).pow(2)), new D(0)).div(denominator).sqrt();
+}
+function ema(values, period) {
+  let value = null;
+  const alpha = new D(2).div(period + 1);
+  return values.map((price, index) => {
+    if (index < period - 1) return null;
+    value = value === null ? mean(values.slice(0, period)) : value.plus(price.minus(value).mul(alpha));
+    return value;
+  });
+}
+function wilderAverage(values, period) {
+  if (values.length < period) return null;
+  return values.slice(period).reduce(
+    (average, next) => average.mul(period - 1).plus(next).div(period),
+    mean(values.slice(0, period))
+  );
+}
+function computeRsi14(closes) {
+  const changes = closes.slice(1).map((close, index) => close.minus(closes[index]));
+  const gains = wilderAverage(changes.map((change) => D.max(change, 0)), 14);
+  const losses = wilderAverage(changes.map((change) => D.max(change.neg(), 0)), 14);
+  if (gains === null || losses === null) return null;
+  if (losses.isZero()) return gains.isZero() ? 50 : 100;
+  return gains.div(gains.plus(losses)).mul(100).toNumber();
+}
+function computeMacd(closes) {
+  const fast = ema(closes, 12);
+  const slow = ema(closes, 26);
+  const lines = slow.slice(25).map((value, index) => fast[index + 25].minus(value));
+  const line = lines.at(-1);
+  const signal = ema(lines, 9).at(-1);
+  return {
+    line: line?.toNumber() ?? null,
+    signal: signal?.toNumber() ?? null,
+    histogram: line && signal ? line.minus(signal).toNumber() : null
+  };
+}
+function computeStructuralZones(candles, kind, atr, lastPrice) {
+  const recent = candles.slice(-120);
+  const isSupport = kind === "SUPPORT";
+  const property = isSupport ? "low" : "high";
+  const neighborOffsets = [-2, -1, 1, 2];
+  const clusters = [];
+  const tolerance = D.max(lastPrice.mul("0.0005"), D.min(atr?.mul("0.35") ?? 0, lastPrice.mul("0.008")));
+  for (let index = 2; index < recent.length - 2; index++) {
+    const value = recent[index][property];
+    if (!neighborOffsets.every((offset) => isSupport ? value < recent[index + offset][property] : value > recent[index + offset][property])) continue;
+    const level = new D(value);
+    if (isSupport ? level.gt(lastPrice) : level.lt(lastPrice)) continue;
+    const cluster = clusters.find((candidate) => candidate.total.div(candidate.touches).minus(level).abs().lte(tolerance));
+    if (cluster) {
+      cluster.total = cluster.total.plus(level);
+      cluster.touches++;
+      cluster.lastTouch = index;
+    } else {
+      clusters.push({ total: level, touches: 1, lastTouch: index });
+    }
+  }
+  return clusters.sort((a, b) => b.touches - a.touches || b.lastTouch - a.lastTouch).slice(0, 3).map(({ total, touches }) => {
+    const level = total.div(touches);
+    const band = D.min(tolerance, level.mul("0.02"));
+    return {
+      level: level.toNumber(),
+      bandLow: level.minus(band).toNumber(),
+      bandHigh: level.plus(band).toNumber(),
+      kind,
+      strength: touches >= 3 ? "HIGH" : "MEDIUM",
+      touches,
+      label: isSupport ? "Observed support" : "Observed resistance"
+    };
+  });
+}
+function resolveVolatilityRegime(closes, trueRanges, atr, ema20, barsPerDay) {
+  const price = closes.at(-1);
+  if (!price || closes.length < 2) return "RANGE_BOUND";
+  const lastRange = trueRanges.at(-1);
+  const baseline = mean(trueRanges.slice(-15, -1));
+  const spike = lastRange.gt(baseline.mul(3)) && lastRange.div(price).gte("0.005");
+  if (spike || atr && atr.div(price).mul(new D(barsPerDay).sqrt()).gte("0.08")) return "HIGH_VOLATILITY";
+  const reference = closes.at(-15);
+  if (reference && atr && ema20 !== null) {
+    const change = price.minus(reference);
+    const threshold = D.max(atr.mul("1.5"), price.mul("0.001"));
+    if (change.gt(threshold) && price.gt(ema20)) return "TRENDING_UP";
+    if (change.lt(threshold.neg()) && price.lt(ema20)) return "TRENDING_DOWN";
+  }
+  return "RANGE_BOUND";
+}
+function computePortfolioRisk(closes, barsPerDay, input) {
+  const equity = input ? new D(input.equityUsd) : null;
+  const limit = input?.dailyLossLimitUsd ? new D(input.dailyLossLimitUsd) : null;
+  const loss = input?.dailyLossUsedUsd;
+  const openRisk = input?.openRiskUsd;
+  const remaining = limit && loss !== void 0 ? D.max(limit.minus(loss), 0) : null;
+  const usedPct = limit && loss !== void 0 ? new D(loss).div(limit).mul(100) : null;
+  const returns = closes.slice(1).map((close, index) => close.div(closes[index]).minus(1));
+  const varRatio = returns.length >= 2 ? standardDeviation(returns, mean(returns), returns.length - 1).mul(NORMAL_QUANTILE_95).mul(new D(barsPerDay).sqrt()) : null;
+  const varUsd = equity?.gt(0) && varRatio ? equity.mul(varRatio) : null;
+  const notes = [];
+  if (usedPct === null) notes.push("Daily loss limit or usage is unavailable.");
+  if (varUsd === null) notes.push("Positive equity and at least two observed returns are required for the USD estimate.");
+  else notes.push("One-day VaR scales the selected market\u2019s return volatility by equity. It omits position-level exposure and correlations.");
+  const openRiskExceedsBuffer = remaining !== null && openRisk !== void 0 && openRisk > 0 && remaining.lt(openRisk);
+  if (openRiskExceedsBuffer) notes.push("Reported open risk exceeds the remaining daily drawdown buffer.");
+  let riskPosture = "SAFE";
+  if (usedPct?.gte(100) || equity?.lte(0)) riskPosture = "CRITICAL";
+  else if (usedPct?.gte(75) || openRiskExceedsBuffer || varUsd !== null && varRatio?.gte("0.10")) riskPosture = "ELEVATED";
+  else if (usedPct?.gte(50) || usedPct === null || varUsd === null || varRatio?.gte("0.05")) riskPosture = "CAUTION";
+  return {
+    equityUsd: equity?.toNumber() ?? null,
+    var95Usd: varUsd?.toNumber() ?? null,
+    var95Pct: varRatio?.mul(100).toNumber() ?? null,
+    dailyDdUsedPct: usedPct?.toNumber() ?? null,
+    dailyDdBufferUsd: remaining?.toNumber() ?? null,
+    openRiskUsd: openRisk ?? null,
+    riskPosture,
+    notes
+  };
+}
+function computeQuantSupervisionSnapshot(symbol, timeframe, input, portfolio) {
+  const candles = normalizeSupervisionCandles(input);
+  const closes = candles.map((candle) => new D(candle.close));
+  const last = closes.at(-1);
+  const barsPerDay = Object.hasOwn(BARS_PER_DAY, timeframe) ? BARS_PER_DAY[timeframe] : 1;
+  let cumulativeVolume = new D(0);
+  let cumulativeValue = new D(0);
+  const vwapSeries = candles.map((candle) => {
+    const volume = candle.volume ?? 0;
+    const typical = new D(candle.high).plus(candle.low).plus(candle.close).div(3);
+    cumulativeValue = cumulativeValue.plus(typical.mul(volume));
+    cumulativeVolume = cumulativeVolume.plus(volume);
+    return cumulativeVolume.gt(0) ? cumulativeValue.div(cumulativeVolume).toNumber() : null;
+  });
+  const ema20Series = ema(closes, 20).map((value) => value?.toNumber() ?? null);
+  const sma50Series = closes.map((_, index) => index < 49 ? null : mean(closes.slice(index - 49, index + 1)).toNumber());
+  const bollingerSeries = closes.map((close, index) => {
+    if (index < 19) return null;
+    const window2 = closes.slice(index - 19, index + 1);
+    const middle = mean(window2);
+    const sigma = standardDeviation(window2, middle, 20);
+    return {
+      upper: middle.plus(sigma.mul(2)).toNumber(),
+      middle: middle.toNumber(),
+      lower: middle.minus(sigma.mul(2)).toNumber(),
+      bandwidthPct: sigma.mul(400).div(middle).toNumber(),
+      zScore: sigma.isZero() ? 0 : close.minus(middle).div(sigma).toNumber()
+    };
+  });
+  const trueRanges = candles.map(({ high, low }, index) => {
+    const range = new D(high).minus(low);
+    const previous = closes[index - 1];
+    return previous ? D.max(range, previous.minus(high).abs(), previous.minus(low).abs()) : range;
+  });
+  const atr = wilderAverage(trueRanges, 14);
+  const ema20 = ema20Series.at(-1) ?? null;
+  return {
+    symbol,
+    timeframe,
+    candleCount: candles.length,
+    lastPrice: last?.toNumber() ?? null,
+    vwap: vwapSeries.at(-1) ?? null,
+    vwapSeries,
+    ema20,
+    ema20Series,
+    sma50: sma50Series.at(-1) ?? null,
+    sma50Series,
+    rsi14: computeRsi14(closes),
+    macd: computeMacd(closes),
+    bollinger: bollingerSeries.at(-1) ?? { ...EMPTY_BOLLINGER },
+    bollingerSeries,
+    atr14: atr?.toNumber() ?? null,
+    atrPctOfPrice: last && atr ? atr.div(last).mul(100).toNumber() : null,
+    volatilityRegime: resolveVolatilityRegime(closes, trueRanges, atr, ema20, barsPerDay),
+    structuralSupportZones: last ? computeStructuralZones(candles, "SUPPORT", atr, last) : [],
+    structuralResistanceZones: last ? computeStructuralZones(candles, "RESISTANCE", atr, last) : [],
+    portfolioRiskAudit: computePortfolioRisk(closes, barsPerDay, sanitizeQuantPortfolioInput(portfolio)),
+    hasVolumeData: cumulativeVolume.gt(0)
+  };
+}
+
+// src/utils/deskI18n.ts
+function deskText(lang, english, thai) {
+  return lang === "th" ? thai : english;
+}
+
+// src/utils/liveChartMarkets.ts
+var LIVE_CHART_SYMBOLS = [
+  "XAUUSD",
+  "EURUSD",
+  "GBPUSD",
+  "USDJPY",
+  "NAS100",
+  "US30",
+  "BTCUSD"
+];
+var LIVE_CHART_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
+
+// src/utils/riskSupervisionReport.ts
+var RISK_SUPERVISE_FORBIDDEN_FIELDS = Object.freeze([
+  ["suggested", "Entry"],
+  ["suggested", "Stop", "Loss"],
+  ["suggested", "Take", "Profit"],
+  ["trend", "Verdict"],
+  ["entry", "Price"],
+  ["stop", "Loss"],
+  ["take", "Profit"],
+  ["onApply", "AiOrder"],
+  ["NewOrder", "Modal"]
+].map((parts) => parts.join("")));
+var REGIME_LABELS = {
+  TRENDING_UP: ["Upward structure", "\u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E02\u0E32\u0E02\u0E36\u0E49\u0E19"],
+  TRENDING_DOWN: ["Downward structure", "\u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E02\u0E32\u0E25\u0E07"],
+  RANGE_BOUND: ["Range-bound", "\u0E40\u0E04\u0E25\u0E37\u0E48\u0E2D\u0E19\u0E44\u0E2B\u0E27\u0E43\u0E19\u0E01\u0E23\u0E2D\u0E1A"],
+  HIGH_VOLATILITY: ["High volatility", "\u0E04\u0E27\u0E32\u0E21\u0E1C\u0E31\u0E19\u0E1C\u0E27\u0E19\u0E2A\u0E39\u0E07"]
+};
+function riskSupervisionRegimeLabel(regime, lang) {
+  return deskText(lang, ...REGIME_LABELS[regime]);
+}
+function asRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function parseRiskSuperviseRequest(input) {
+  const body = asRecord(input);
+  if (!body || !Array.isArray(body.candles) || body.candles.length === 0 || body.candles.length > 512) return null;
+  const symbolText = typeof body.symbol === "string" ? body.symbol.trim().toUpperCase() : "";
+  const timeframeText = typeof body.timeframe === "string" ? body.timeframe.trim().toLowerCase() : "";
+  const symbol = LIVE_CHART_SYMBOLS.find((value) => value === symbolText);
+  const timeframe = LIVE_CHART_TIMEFRAMES.find((value) => value === timeframeText);
+  if (!symbol || !timeframe) return null;
+  const candles = normalizeSupervisionCandles(body.candles);
+  if (!candles.length) return null;
+  return {
+    symbol,
+    timeframe,
+    lang: body.lang === "th" ? "th" : "en",
+    candles,
+    portfolio: sanitizeQuantPortfolioInput(body.portfolio)
+  };
+}
+function buildDeterministicSupervisionReport(quantSnapshot, lang, generatedAt, fallbackReason) {
+  const { symbol, timeframe, candleCount, volatilityRegime, hasVolumeData, vwap, rsi14, macd, atr14, atrPctOfPrice, bollinger } = quantSnapshot;
+  const audit = quantSnapshot.portfolioRiskAudit;
+  const t = (en, th) => deskText(lang, en, th);
+  const price = new Intl.NumberFormat(lang, { maximumSignificantDigits: 8 });
+  const metric = new Intl.NumberFormat(lang, { maximumFractionDigits: 2 });
+  const money = new Intl.NumberFormat(lang, { style: "currency", currency: "USD" });
+  const regime = riskSupervisionRegimeLabel(volatilityRegime, lang);
+  const formatZone = (zone) => t(
+    `${price.format(zone.bandLow)}\u2013${price.format(zone.bandHigh)} \xB7 ${zone.touches} confirmed swing ${zone.touches === 1 ? "touch" : "touches"}`,
+    `${price.format(zone.bandLow)}\u2013${price.format(zone.bandHigh)} \xB7 \u0E08\u0E38\u0E14\u0E2A\u0E27\u0E34\u0E07\u0E22\u0E37\u0E19\u0E22\u0E31\u0E19 ${zone.touches} \u0E04\u0E23\u0E31\u0E49\u0E07`
+  );
+  const volatilityRating = volatilityRegime === "HIGH_VOLATILITY" ? (atrPctOfPrice ?? 0) >= 3 || (bollinger.bandwidthPct ?? 0) >= 12 ? "EXTREME" : "HIGH" : atrPctOfPrice === null || atrPctOfPrice >= 0.5 ? "MODERATE" : "LOW";
+  const riskRating = audit.riskPosture === "CRITICAL" || audit.riskPosture === "ELEVATED" ? audit.riskPosture : volatilityRating === "HIGH" || volatilityRating === "EXTREME" ? "ELEVATED" : audit.riskPosture === "CAUTION" ? "MODERATE" : "LOW";
+  const varText = audit.var95Usd !== null ? t(
+    `One-day 95% VaR proxy: ${money.format(audit.var95Usd)}. It scales this market\u2019s volatility by account equity and omits position-level exposure and correlations.`,
+    `\u0E04\u0E48\u0E32\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13 VaR 95% \u0E2B\u0E19\u0E36\u0E48\u0E07\u0E27\u0E31\u0E19 ${money.format(audit.var95Usd)} \u0E04\u0E33\u0E19\u0E27\u0E13\u0E08\u0E32\u0E01\u0E04\u0E27\u0E32\u0E21\u0E1C\u0E31\u0E19\u0E1C\u0E27\u0E19\u0E02\u0E2D\u0E07\u0E2A\u0E34\u0E19\u0E17\u0E23\u0E31\u0E1E\u0E22\u0E4C\u0E19\u0E35\u0E49\u0E01\u0E31\u0E1A\u0E21\u0E39\u0E25\u0E04\u0E48\u0E32\u0E2A\u0E38\u0E17\u0E18\u0E34\u0E02\u0E2D\u0E07\u0E1A\u0E31\u0E0D\u0E0A\u0E35 \u0E42\u0E14\u0E22\u0E44\u0E21\u0E48\u0E23\u0E27\u0E21\u0E04\u0E27\u0E32\u0E21\u0E40\u0E2A\u0E35\u0E48\u0E22\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E2A\u0E16\u0E32\u0E19\u0E30\u0E41\u0E25\u0E30\u0E04\u0E27\u0E32\u0E21\u0E2A\u0E31\u0E21\u0E1E\u0E31\u0E19\u0E18\u0E4C\u0E23\u0E30\u0E2B\u0E27\u0E48\u0E32\u0E07\u0E2A\u0E34\u0E19\u0E17\u0E23\u0E31\u0E1E\u0E22\u0E4C`
+  ) : t("The equity-scaled VaR estimate is unavailable.", "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E1E\u0E35\u0E22\u0E07\u0E1E\u0E2D\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E04\u0E33\u0E19\u0E27\u0E13 VaR \u0E08\u0E32\u0E01\u0E21\u0E39\u0E25\u0E04\u0E48\u0E32\u0E2A\u0E38\u0E17\u0E18\u0E34\u0E02\u0E2D\u0E07\u0E1A\u0E31\u0E0D\u0E0A\u0E35");
+  const drawdownText = audit.dailyDdUsedPct !== null && audit.dailyDdBufferUsd !== null ? t(
+    `Daily drawdown has used ${metric.format(audit.dailyDdUsedPct)}% of the tracked limit. Remaining buffer: ${money.format(audit.dailyDdBufferUsd)}.`,
+    `\u0E43\u0E0A\u0E49\u0E27\u0E07\u0E40\u0E07\u0E34\u0E19\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19\u0E44\u0E1B ${metric.format(audit.dailyDdUsedPct)}% \u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E27\u0E07\u0E40\u0E07\u0E34\u0E19 ${money.format(audit.dailyDdBufferUsd)}`
+  ) : t("Daily drawdown data is unavailable.", "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E27\u0E07\u0E40\u0E07\u0E34\u0E19\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19");
+  const openRiskText = audit.openRiskUsd !== null ? t(`Reported open risk: ${money.format(audit.openRiskUsd)}.`, `\u0E04\u0E27\u0E32\u0E21\u0E40\u0E2A\u0E35\u0E48\u0E22\u0E07\u0E02\u0E2D\u0E07\u0E2A\u0E16\u0E32\u0E19\u0E30\u0E40\u0E1B\u0E34\u0E14\u0E17\u0E35\u0E48\u0E23\u0E32\u0E22\u0E07\u0E32\u0E19 ${money.format(audit.openRiskUsd)}`) : "";
+  const deskBrief = candleCount >= 20 ? t(
+    `${symbol} \xB7 ${timeframe} shows ${regime.toLowerCase()} across ${candleCount} observed candles.`,
+    `${symbol} \xB7 ${timeframe} \u0E21\u0E35${regime}\u0E08\u0E32\u0E01\u0E41\u0E17\u0E48\u0E07\u0E23\u0E32\u0E04\u0E32\u0E17\u0E35\u0E48\u0E2A\u0E31\u0E07\u0E40\u0E01\u0E15\u0E44\u0E14\u0E49 ${candleCount} \u0E41\u0E17\u0E48\u0E07`
+  ) : t(
+    `${symbol} \xB7 ${timeframe} has ${candleCount} observed candles. Market structure is provisional while indicators accumulate history.`,
+    `${symbol} \xB7 ${timeframe} \u0E21\u0E35\u0E41\u0E17\u0E48\u0E07\u0E23\u0E32\u0E04\u0E32\u0E17\u0E35\u0E48\u0E2A\u0E31\u0E07\u0E40\u0E01\u0E15\u0E44\u0E14\u0E49 ${candleCount} \u0E41\u0E17\u0E48\u0E07 \u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E15\u0E25\u0E32\u0E14\u0E22\u0E31\u0E07\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E1A\u0E37\u0E49\u0E2D\u0E07\u0E15\u0E49\u0E19\u0E23\u0E30\u0E2B\u0E27\u0E48\u0E32\u0E07\u0E2A\u0E30\u0E2A\u0E21\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25`
+  );
+  return {
+    structureRegime: volatilityRegime,
+    volatilityRating,
+    riskRating,
+    deskBrief,
+    quantitativeInsight: [
+      vwap === null ? null : `VWAP ${price.format(vwap)}`,
+      rsi14 === null ? null : `RSI14 ${metric.format(rsi14)}`,
+      macd.histogram === null ? null : t(`MACD histogram ${price.format(macd.histogram)}`, `\u0E2E\u0E34\u0E2A\u0E42\u0E15\u0E41\u0E01\u0E23\u0E21 MACD ${price.format(macd.histogram)}`),
+      atr14 === null ? null : `ATR14 ${price.format(atr14)}`,
+      bollinger.bandwidthPct === null ? null : t(`BB width ${metric.format(bollinger.bandwidthPct)}%`, `\u0E04\u0E27\u0E32\u0E21\u0E01\u0E27\u0E49\u0E32\u0E07 BB ${metric.format(bollinger.bandwidthPct)}%`)
+    ].filter(Boolean).join(" \xB7 ") || t("Indicators are accumulating candle history.", "\u0E15\u0E31\u0E27\u0E0A\u0E35\u0E49\u0E27\u0E31\u0E14\u0E01\u0E33\u0E25\u0E31\u0E07\u0E2A\u0E30\u0E2A\u0E21\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E17\u0E48\u0E07\u0E23\u0E32\u0E04\u0E32"),
+    liquidityNote: hasVolumeData ? t(
+      "VWAP uses volume reported by the chart feed over the displayed history. Candle volume alone cannot measure order-book depth.",
+      "VWAP \u0E43\u0E0A\u0E49\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E08\u0E32\u0E01\u0E41\u0E2B\u0E25\u0E48\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E23\u0E32\u0E1F\u0E43\u0E19\u0E0A\u0E48\u0E27\u0E07\u0E17\u0E35\u0E48\u0E41\u0E2A\u0E14\u0E07 \u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E23\u0E32\u0E22\u0E41\u0E17\u0E48\u0E07\u0E40\u0E1E\u0E35\u0E22\u0E07\u0E2D\u0E22\u0E48\u0E32\u0E07\u0E40\u0E14\u0E35\u0E22\u0E27\u0E27\u0E31\u0E14\u0E04\u0E27\u0E32\u0E21\u0E25\u0E36\u0E01\u0E02\u0E2D\u0E07\u0E2A\u0E21\u0E38\u0E14\u0E04\u0E33\u0E2A\u0E31\u0E48\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49"
+    ) : t(
+      "The feed provides no positive candle volume. VWAP and volume-based observations are unavailable.",
+      "\u0E41\u0E2B\u0E25\u0E48\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E44\u0E21\u0E48\u0E21\u0E35\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E23\u0E32\u0E22\u0E41\u0E17\u0E48\u0E07\u0E17\u0E35\u0E48\u0E21\u0E32\u0E01\u0E01\u0E27\u0E48\u0E32\u0E28\u0E39\u0E19\u0E22\u0E4C \u0E08\u0E36\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E48\u0E32 VWAP \u0E41\u0E25\u0E30\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E27\u0E34\u0E40\u0E04\u0E23\u0E32\u0E30\u0E2B\u0E4C\u0E08\u0E32\u0E01\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13"
+    ),
+    portfolioRiskAudit: [varText, drawdownText, openRiskText].filter(Boolean).join(" "),
+    structuralSupportZones: quantSnapshot.structuralSupportZones.map(formatZone),
+    structuralResistanceZones: quantSnapshot.structuralResistanceZones.map(formatZone),
+    riskGuardrailNote: t(
+      "Treat structural bands as descriptions of observed swings. Verify daily drawdown against the account provider\u2019s active rules.",
+      "\u0E2D\u0E48\u0E32\u0E19\u0E42\u0E0B\u0E19\u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E38\u0E14\u0E2A\u0E27\u0E34\u0E07\u0E43\u0E19\u0E2D\u0E14\u0E35\u0E15 \u0E41\u0E25\u0E30\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E27\u0E07\u0E40\u0E07\u0E34\u0E19\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19\u0E01\u0E31\u0E1A\u0E01\u0E0E\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19\u0E02\u0E2D\u0E07\u0E1C\u0E39\u0E49\u0E43\u0E2B\u0E49\u0E1A\u0E23\u0E34\u0E01\u0E32\u0E23\u0E1A\u0E31\u0E0D\u0E0A\u0E35"
+    ),
+    disciplineChecklist: [
+      t("Verify the chart feed, timeframe and timestamp.", "\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E41\u0E2B\u0E25\u0E48\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25 \u0E01\u0E23\u0E2D\u0E1A\u0E40\u0E27\u0E25\u0E32 \u0E41\u0E25\u0E30\u0E40\u0E27\u0E25\u0E32\u0E17\u0E35\u0E48\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15"),
+      t("Reconcile daily drawdown with the account\u2019s records.", "\u0E40\u0E17\u0E35\u0E22\u0E1A\u0E22\u0E2D\u0E14\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19\u0E01\u0E31\u0E1A\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E02\u0E2D\u0E07\u0E1A\u0E31\u0E0D\u0E0A\u0E35"),
+      t("Record missing data and model assumptions in the review.", "\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E02\u0E32\u0E14\u0E41\u0E25\u0E30\u0E2A\u0E21\u0E21\u0E15\u0E34\u0E10\u0E32\u0E19\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E43\u0E19\u0E01\u0E32\u0E23\u0E17\u0E1A\u0E17\u0E27\u0E19")
+    ],
+    symbol,
+    timeframe,
+    lang,
+    generatedAt,
+    quantSnapshot,
+    source: "deterministic",
+    model: null,
+    fallbackUsed: true,
+    ...fallbackReason ? { fallbackReason } : {}
+  };
+}
+var SCALAR_FIELDS = [
+  "structureRegime",
+  "volatilityRating",
+  "riskRating",
+  "deskBrief",
+  "quantitativeInsight",
+  "liquidityNote",
+  "portfolioRiskAudit",
+  "riskGuardrailNote"
+];
+var ARRAY_FIELDS = ["structuralSupportZones", "structuralResistanceZones", "disciplineChecklist"];
+function reportWording(report) {
+  const t = (en, th) => deskText(report.lang, en, th);
+  const highVolatility = report.structureRegime === "HIGH_VOLATILITY";
+  const hasVolume = report.quantSnapshot?.hasVolumeData === true;
+  return {
+    structureRegime: [report.structureRegime],
+    volatilityRating: [report.volatilityRating],
+    riskRating: [report.riskRating],
+    deskBrief: [
+      report.deskBrief,
+      report.deskBrief + " " + (highVolatility ? t(
+        "The observed range expansion increases uncertainty in recent structure.",
+        "\u0E0A\u0E48\u0E27\u0E07\u0E23\u0E32\u0E04\u0E32\u0E17\u0E35\u0E48\u0E02\u0E22\u0E32\u0E22\u0E15\u0E31\u0E27\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E04\u0E27\u0E32\u0E21\u0E44\u0E21\u0E48\u0E41\u0E19\u0E48\u0E19\u0E2D\u0E19\u0E02\u0E2D\u0E07\u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14"
+      ) : t(
+        "The structure label summarizes the observed window and can change as new candles arrive.",
+        "\u0E1B\u0E49\u0E32\u0E22\u0E42\u0E04\u0E23\u0E07\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E2A\u0E23\u0E38\u0E1B\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E0A\u0E48\u0E27\u0E07\u0E17\u0E35\u0E48\u0E2A\u0E31\u0E07\u0E40\u0E01\u0E15\u0E41\u0E25\u0E30\u0E2D\u0E32\u0E08\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E21\u0E35\u0E41\u0E17\u0E48\u0E07\u0E23\u0E32\u0E04\u0E32\u0E43\u0E2B\u0E21\u0E48"
+      ))
+    ],
+    quantitativeInsight: [
+      report.quantitativeInsight,
+      report.quantitativeInsight + " " + t(
+        "ATR describes price range. Bollinger width describes dispersion around the moving average.",
+        "ATR \u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E0A\u0E48\u0E27\u0E07\u0E01\u0E32\u0E23\u0E40\u0E04\u0E25\u0E37\u0E48\u0E2D\u0E19\u0E44\u0E2B\u0E27\u0E02\u0E2D\u0E07\u0E23\u0E32\u0E04\u0E32 \u0E2A\u0E48\u0E27\u0E19\u0E04\u0E27\u0E32\u0E21\u0E01\u0E27\u0E49\u0E32\u0E07 Bollinger \u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E01\u0E32\u0E23\u0E01\u0E23\u0E30\u0E08\u0E32\u0E22\u0E23\u0E2D\u0E1A\u0E04\u0E48\u0E32\u0E40\u0E09\u0E25\u0E35\u0E48\u0E22\u0E40\u0E04\u0E25\u0E37\u0E48\u0E2D\u0E19\u0E17\u0E35\u0E48"
+      )
+    ],
+    liquidityNote: [
+      report.liquidityNote,
+      report.liquidityNote + " " + (hasVolume ? t("Volume can reflect proxy activity depending on the data source.", "\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E2D\u0E32\u0E08\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E27\u0E41\u0E17\u0E19\u0E15\u0E32\u0E21\u0E41\u0E2B\u0E25\u0E48\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49") : t("Observed candle ranges describe price dispersion only.", "\u0E0A\u0E48\u0E27\u0E07\u0E23\u0E32\u0E04\u0E32\u0E41\u0E15\u0E48\u0E25\u0E30\u0E41\u0E17\u0E48\u0E07\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E01\u0E32\u0E23\u0E01\u0E23\u0E30\u0E08\u0E32\u0E22\u0E02\u0E2D\u0E07\u0E23\u0E32\u0E04\u0E32\u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19"))
+    ],
+    portfolioRiskAudit: [
+      report.portfolioRiskAudit,
+      report.portfolioRiskAudit + " " + t(
+        "A 95% VaR estimate leaves a loss tail outside the modeled threshold.",
+        "\u0E04\u0E48\u0E32 VaR 95% \u0E22\u0E31\u0E07\u0E21\u0E35\u0E42\u0E2D\u0E01\u0E32\u0E2A\u0E40\u0E01\u0E34\u0E14\u0E01\u0E32\u0E23\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E17\u0E35\u0E48\u0E2A\u0E39\u0E07\u0E01\u0E27\u0E48\u0E32\u0E40\u0E01\u0E13\u0E11\u0E4C\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13\u0E01\u0E32\u0E23"
+      )
+    ],
+    structuralSupportZones: report.structuralSupportZones,
+    structuralResistanceZones: report.structuralResistanceZones,
+    riskGuardrailNote: [
+      report.riskGuardrailNote,
+      report.riskGuardrailNote + " " + t(
+        "Review the account reset time when interpreting daily loss figures.",
+        "\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E40\u0E27\u0E25\u0E32\u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E23\u0E2D\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E2D\u0E48\u0E32\u0E19\u0E22\u0E2D\u0E14\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19"
+      )
+    ],
+    disciplineChecklist: [
+      ...report.disciplineChecklist,
+      t("Confirm the daily loss reset time.", "\u0E22\u0E37\u0E19\u0E22\u0E31\u0E19\u0E40\u0E27\u0E25\u0E32\u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E27\u0E07\u0E40\u0E07\u0E34\u0E19\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19\u0E23\u0E32\u0E22\u0E27\u0E31\u0E19"),
+      t("Check whether the feed reports actual or proxy volume.", "\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E27\u0E48\u0E32\u0E41\u0E2B\u0E25\u0E48\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E23\u0E32\u0E22\u0E07\u0E32\u0E19\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E08\u0E23\u0E34\u0E07\u0E2B\u0E23\u0E37\u0E2D\u0E1B\u0E23\u0E34\u0E21\u0E32\u0E13\u0E15\u0E31\u0E27\u0E41\u0E17\u0E19"),
+      t("Note the limits of a single-market VaR estimate.", "\u0E23\u0E30\u0E1A\u0E38\u0E02\u0E49\u0E2D\u0E08\u0E33\u0E01\u0E31\u0E14\u0E02\u0E2D\u0E07 VaR \u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2A\u0E34\u0E19\u0E17\u0E23\u0E31\u0E1E\u0E22\u0E4C\u0E40\u0E14\u0E35\u0E22\u0E27")
+    ]
+  };
+}
+function buildRiskSupervisionResponseSchema(report) {
+  const wording = reportWording(report);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [...SCALAR_FIELDS, ...ARRAY_FIELDS],
+    properties: {
+      ...Object.fromEntries(SCALAR_FIELDS.map((key) => [key, { type: "string", enum: wording[key] }])),
+      ...Object.fromEntries(ARRAY_FIELDS.map((key) => [key, {
+        type: "array",
+        minItems: report[key].length,
+        maxItems: report[key].length,
+        items: wording[key].length ? { type: "string", enum: wording[key] } : { type: "string" }
+      }]))
+    }
+  };
+}
+function containsForbiddenField(input) {
+  const forbidden = new Set(RISK_SUPERVISE_FORBIDDEN_FIELDS.map((key) => key.toLowerCase()));
+  const pending = [input];
+  const visited = /* @__PURE__ */ new Set();
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    const entries = Object.entries(value);
+    if (entries.some(([key]) => forbidden.has(key.toLowerCase().replace(/[^a-z]/g, "")))) return true;
+    for (const [, child] of entries) pending.push(child);
+  }
+  return false;
+}
+function sanitizeAiRiskSupervisionReport(input, deterministicReport, model) {
+  const parsed = asRecord(input);
+  if (!parsed || containsForbiddenField(parsed)) return null;
+  const wording = reportWording(deterministicReport);
+  const { fallbackReason: _fallbackReason, ...base } = deterministicReport;
+  const clean = { ...base, model, source: "gemini", fallbackUsed: false };
+  for (const key of SCALAR_FIELDS) {
+    const value = parsed[key];
+    if (typeof value !== "string" || !wording[key].includes(value)) return null;
+    if (key !== "structureRegime" && key !== "volatilityRating" && key !== "riskRating") clean[key] = value;
+  }
+  for (const key of ARRAY_FIELDS) {
+    const value = parsed[key];
+    if (!Array.isArray(value) || value.length !== base[key].length) return null;
+    const items = value;
+    if (!items.every((item) => typeof item === "string" && wording[key].includes(item)) || new Set(items).size !== items.length) return null;
+    clean[key] = items;
+  }
+  return clean;
+}
+
+// server/ai/riskSupervise.ts
+function parseModelJson(response) {
+  try {
+    return JSON.parse(response);
+  } catch {
+    return null;
+  }
+}
+function createRiskSuperviseRouter(deps) {
+  const router = express2.Router();
+  router.post("/ai/risk-supervise", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const request = parseRiskSuperviseRequest(req.body);
+    if (!request) {
+      res.status(400).json({ ok: false, code: "INVALID_MARKET_SNAPSHOT", error: "Provide a supported symbol and timeframe with valid OHLC candles." });
+      return;
+    }
+    const { symbol, timeframe, candles, portfolio, lang } = request;
+    const snapshot = computeQuantSupervisionSnapshot(symbol, timeframe, candles, portfolio);
+    const deterministic = buildDeterministicSupervisionReport(snapshot, lang, (/* @__PURE__ */ new Date()).toISOString());
+    function sendFallback(reason, status = 200) {
+      const report = { ...deterministic, fallbackReason: reason };
+      const payload = { fallbackUsed: true, fallbackReason: reason };
+      if (status === 401) {
+        res.status(status).json({ ok: false, code: "AUTH_REQUIRED", ...payload, deterministicReport: report });
+      } else {
+        res.status(status).json({ ok: status === 200, ...payload, report });
+      }
+    }
+    const caller = await deps.verifyFirebaseBearerToken(req.headers.authorization).catch(() => null);
+    if (!caller) {
+      sendFallback("AUTH_REQUIRED", 401);
+      return;
+    }
+    try {
+      if (!deps.isGeminiConfigured()) {
+        sendFallback("GEMINI_API_KEY_MISSING");
+        return;
+      }
+      const rate = await deps.checkDistributedRateLimit(`risk-supervise:${caller.uid}`);
+      if (!rate.allowed) {
+        res.set("Retry-After", String(rate.retryAfterSec));
+        sendFallback("RATE_LIMITED", 429);
+        return;
+      }
+      const prompt = "Select the most relevant approved analysis and review checklist for this observed market and account context.";
+      const routePlan = await planModelRoute({ prompt, hasRichContext: true });
+      const candidateModels = routePlan.candidateModels.filter((candidate) => !isOpenWeightGemmaModel(candidate));
+      const ai = deps.getGenAIClient();
+      const schema = buildRiskSupervisionResponseSchema(deterministic);
+      const abortSignal = AbortSignal.timeout(12e3);
+      const result = await executeWithModelFailover({ ...routePlan, candidateModels }, async (model) => {
+        const response = await ai.models.generateContent({
+          model,
+          contents: JSON.stringify({
+            task: prompt,
+            language: lang === "th" ? "Thai" : "English",
+            candleCount: snapshot.candleCount,
+            observedMarket: deterministic.deskBrief,
+            indicators: deterministic.quantitativeInsight,
+            feedVolume: snapshot.hasVolumeData,
+            support: deterministic.structuralSupportZones,
+            resistance: deterministic.structuralResistanceZones,
+            accountRisk: deterministic.portfolioRiskAudit
+          }),
+          config: {
+            systemInstruction: "Analytical & Risk Supervision Only. Describe observed market structure, data quality, and measured risk. Use only wording allowed by the schema. Include distinct checklist items and each reported structural band. Keep all content educational and descriptive.",
+            responseMimeType: "application/json",
+            responseJsonSchema: schema,
+            temperature: 0,
+            maxOutputTokens: 3e3,
+            abortSignal
+          }
+        });
+        return response.text ?? "";
+      });
+      const report = sanitizeAiRiskSupervisionReport(parseModelJson(result.reply), deterministic, result.model);
+      if (!report) {
+        sendFallback("GEMINI_REPORT_INVALID");
+        return;
+      }
+      res.json({ ok: true, fallbackUsed: false, report });
+    } catch {
+      sendFallback("GEMINI_UNAVAILABLE");
+    }
+  });
+  return router;
+}
+
 // src/utils/marketplaceUtils.ts
 function computeEmaSeries(closes, period) {
   if (closes.length === 0) return [];
@@ -2172,7 +2739,7 @@ function computeEmaSeries(closes, period) {
   }
   return out;
 }
-function computeRsi14(closes, period = 14) {
+function computeRsi142(closes, period = 14) {
   if (closes.length <= period) return 50;
   let gainSum = 0;
   let lossSum = 0;
@@ -2276,7 +2843,7 @@ function computeLiveChartTelemetryFromCandles(symbol, timeframe, candles, source
   const ema50Arr = computeEmaSeries(closes, 50);
   const ema20 = +(ema20Arr[ema20Arr.length - 1] ?? latest.close).toFixed(4);
   const ema50 = +(ema50Arr[ema50Arr.length - 1] ?? latest.close).toFixed(4);
-  const rsi14 = computeRsi14(closes, 14);
+  const rsi14 = computeRsi142(closes, 14);
   const atr14 = computeAtr14(valid, 14);
   const recentStart = Math.max(0, valid.length - 24);
   let highMax = -Infinity;
@@ -3023,8 +3590,8 @@ async function probeSinglePropFirm(firm, forceRefresh = false) {
   return result;
 }
 function createApp() {
-  const app2 = express2();
-  app2.use(express2.json({ limit: "8mb" }));
+  const app2 = express3();
+  app2.use(express3.json({ limit: "8mb" }));
   const sovereignMt5BaseUrl = (process.env.MT5_SOVEREIGN_BASE_URL || process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || "").trim().replace(/\/+$/, "");
   const fundedNextVpsBaseUrl = (process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || sovereignMt5BaseUrl).trim().replace(/\/+$/, "");
   let fundedNext;
@@ -4972,6 +5539,12 @@ ${safeChart}` : ""}`;
       probes
     });
   });
+  app2.use("/api", createRiskSuperviseRouter({
+    verifyFirebaseBearerToken,
+    checkDistributedRateLimit,
+    getGenAIClient,
+    isGeminiConfigured: () => Boolean(process.env.GEMINI_API_KEY?.trim())
+  }));
   app2.all("/api/*", (_req, res) => {
     res.status(404).json({ ok: false, error: "API route not found" });
   });
@@ -4990,7 +5563,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(
-      express2.static(distPath, {
+      express3.static(distPath, {
         etag: true,
         lastModified: true,
         setHeaders(res, filePath) {

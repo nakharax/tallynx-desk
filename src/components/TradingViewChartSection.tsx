@@ -5,11 +5,14 @@ import { fmtUSD, formatCalculatorLot, getActiveCalculator } from '../utils/ghrRu
 import { useLiveChartFeed } from '../utils/useLiveChartFeed';
 import { deskText, type DeskLanguage } from '../utils/deskI18n';
 import type { DeskTheme } from '../utils/webHandoff';
+import type { QuantPortfolioInput } from '../utils/quantSupervisionEngine';
+import { AiRiskSupervisionCard } from './AiRiskSupervisionCard';
 
 interface TradingViewChartSectionProps {
   state: GhrWorkspaceState;
   lang?: DeskLanguage;
   deskTheme?: DeskTheme;
+  riskSupervisionPortfolio?: QuantPortfolioInput;
   onUpdateDir: (dir: TradeDirection) => void;
   onUpdateEntry: (raw: string, num: number) => void;
   onCopyText: (text: string, label: string) => void;
@@ -162,6 +165,7 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
   state,
   lang = 'en',
   deskTheme = 'alabaster',
+  riskSupervisionPortfolio,
   onUpdateDir,
   onUpdateEntry,
   onCopyText,
@@ -411,6 +415,13 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
           )}
         </div>
       </div>
+      <AiRiskSupervisionCard
+        key={timeframe ?? '1m'}
+        lang={lang}
+        initialTimeframe={timeframe ?? '5m'}
+        portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
+        accountScope={state.activePort}
+      />
     </section>
   );
 };

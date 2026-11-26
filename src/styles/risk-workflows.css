@@ -862,3 +862,345 @@ button.news-status-chip:hover,
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+#tv-chart-root > .risk-supervision {
+  --risk-sv-up: var(--emerald-ink);
+  --risk-sv-down: var(--rose-ink);
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  container-type: inline-size;
+  gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+  padding: clamp(10px, 2vw, 18px);
+  border-block-start: 3px solid var(--accent);
+  background: var(--bg-surface-solid);
+}
+
+.risk-sv-header,
+.risk-sv-audit-head,
+.risk-sv-chart-readout,
+.risk-sv-provenance,
+.risk-sv-market,
+.risk-sv-overlays,
+.risk-sv-tooltip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.risk-sv-header,
+.risk-sv-audit-head,
+.risk-sv-chart-readout {
+  justify-content: space-between;
+}
+
+.risk-sv-header h2 {
+  min-width: 0;
+  font-size: 16px;
+}
+
+.risk-sv-market label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.risk-sv-market select {
+  min-height: 30px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.risk-sv-feed,
+.risk-sv-status,
+.risk-sv-provenance time {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.risk-sv-chart {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: clamp(7px, 1.5vw, 12px);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.risk-sv-overlays {
+  gap: 5px;
+}
+
+.risk-sv-overlays .btn {
+  min-height: 29px;
+  white-space: normal;
+}
+
+.risk-sv-overlays .btn[aria-pressed='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.risk-sv-overlays i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--risk-sv-overlay, var(--text-muted));
+}
+
+.risk-supervision [data-overlay='vwap'] { --risk-sv-overlay: var(--accent-ink); }
+.risk-supervision [data-overlay='ema'] { --risk-sv-overlay: #c78419; }
+.risk-supervision [data-overlay='sma'] { --risk-sv-overlay: var(--emerald-ink); }
+.risk-supervision [data-overlay='bollinger'] { --risk-sv-overlay: var(--rose-ink); }
+
+.risk-sv-chart-readout {
+  min-height: 34px;
+  padding: 2px 0;
+}
+
+.risk-sv-chart-readout > div:first-child {
+  display: grid;
+  gap: 1px;
+  line-height: 1.2;
+}
+
+.risk-sv-chart-readout small,
+.risk-sv-tooltip,
+.risk-sv-price-axis,
+.risk-sv-activity-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.risk-sv-chart-readout strong {
+  color: var(--text-primary);
+  font-size: 17px;
+}
+
+.risk-sv-tooltip {
+  font-variant-numeric: tabular-nums;
+  column-gap: 8px;
+}
+
+.risk-sv-tooltip time {
+  color: var(--accent-ink);
+}
+
+.risk-sv-plot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
+  column-gap: 6px;
+  min-width: 0;
+  padding: 5px 5px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface-solid);
+}
+
+.risk-sv-plot:focus-visible {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+
+.risk-sv-price-plot,
+.risk-sv-activity-plot {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.risk-sv-price-plot { height: clamp(146px, 26vw, 238px); cursor: crosshair; }
+.risk-sv-activity-plot { height: 48px; border-top: 1px solid var(--border-color); cursor: crosshair; }
+
+.risk-sv-price-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 2px;
+  line-height: 1;
+  padding-bottom: 1px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-sv-activity-label {
+  align-self: center;
+  max-width: 75px;
+  text-align: right;
+}
+
+.risk-sv-gridline,
+.risk-sv-candle line,
+.risk-sv-overlay-line,
+.risk-sv-crosshair {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1px;
+}
+
+.risk-sv-gridline { stroke: var(--border-color); }
+.risk-sv-crosshair { stroke: var(--text-muted); stroke-dasharray: 3 3; }
+.risk-sv-candle { color: var(--risk-sv-down); }
+.risk-sv-candle[data-rising='true'] { color: var(--risk-sv-up); }
+.risk-sv-candle line { stroke: currentColor; }
+.risk-sv-candle rect { fill: currentColor; }
+.risk-sv-overlay-line { stroke: var(--risk-sv-overlay); stroke-width: 1.4px; fill: none; }
+.risk-sv-overlay-line[data-overlay='bollinger'] { stroke-dasharray: 4 3; }
+.risk-sv-zone[data-kind='SUPPORT'] { fill: color-mix(in srgb, var(--risk-sv-up) 13%, transparent); }
+.risk-sv-zone[data-kind='RESISTANCE'] { fill: color-mix(in srgb, var(--risk-sv-down) 13%, transparent); }
+.risk-sv-volume-bar { fill: color-mix(in srgb, var(--accent-ink) 37%, transparent); }
+.risk-sv-volume-bar[data-active='true'] { fill: var(--accent-ink); }
+
+.risk-sv-telemetry,
+.risk-sv-report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--border-color);
+  overflow: hidden;
+}
+
+.risk-sv-telemetry > div,
+.risk-sv-report-grid > div {
+  min-width: 0;
+  padding: 8px 9px;
+  background: var(--bg-surface-solid);
+  overflow-wrap: anywhere;
+}
+
+.risk-sv-telemetry dt,
+.risk-sv-metric-detail {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.risk-sv-telemetry dd {
+  margin: 2px 0 0;
+}
+
+.risk-sv-telemetry dd.mono {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.risk-sv-badge {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.risk-sv-badge[data-source='gemini'] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.risk-sv-badge[data-regime='HIGH_VOLATILITY'] {
+  border-color: var(--amber-border);
+  background: var(--amber-soft);
+  color: var(--accent-ink);
+}
+
+.risk-sv-audit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.risk-sv-audit-head .btn {
+  white-space: normal;
+  text-align: start;
+}
+
+.risk-sv-report-grid .risk-sv-brief {
+  grid-column: 1 / -1;
+  border-inline-start: 2px solid var(--accent);
+}
+
+.risk-sv-report-grid h3,
+.risk-sv-checklist legend {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.risk-sv-report-grid p,
+.risk-sv-zone-list,
+.risk-sv-checklist label {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.risk-sv-zone-list {
+  display: grid;
+  gap: 3px;
+  padding-inline-start: 1rem;
+}
+
+.risk-sv-checklist {
+  display: grid;
+  gap: 5px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 4px 9px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.risk-sv-checklist legend { padding-inline: 4px; }
+.risk-sv-checklist label { display: flex; align-items: flex-start; gap: 7px; cursor: pointer; }
+.risk-sv-checklist input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--accent); }
+
+.risk-sv-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.risk-sv-footer svg { flex: 0 0 auto; color: var(--accent-ink); }
+
+@container (width >= 640px) {
+  .risk-sv-telemetry { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@container (width < 440px) {
+  .risk-sv-report-grid { grid-template-columns: minmax(0, 1fr); }
+  .risk-sv-price-axis, .risk-sv-activity-label { font-size: 10px; }
+}
