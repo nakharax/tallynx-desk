@@ -14,6 +14,7 @@ import {
 import { createRemoteVpsPilotServices } from './server/fundednext/vpsClient.js';
 import { createFundedNextRouter } from './server/fundednext/router.js';
 import { createMallRouter, type MallSnapshotSource } from './server/mall/mallRouter.js';
+import { createRiskSuperviseRouter } from './server/ai/riskSupervise.js';
 import {
   calibrateCandlesToLiveSpot,
   computeLiveChartTelemetryFromCandles,
@@ -2802,6 +2803,13 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
       probes,
     });
   });
+
+  app.use('/api', createRiskSuperviseRouter({
+    verifyFirebaseBearerToken,
+    checkDistributedRateLimit,
+    getGenAIClient,
+    isGeminiConfigured: () => Boolean(process.env.GEMINI_API_KEY?.trim()),
+  }));
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ ok: false, error: 'API route not found' });

@@ -205,6 +205,7 @@ import {
   detectBehavioralGuardrails,
   resolveTelemetryStreamMode,
 } from './utils/realtimeGuardrails';
+import type { QuantPortfolioInput } from './utils/quantSupervisionEngine';
 import { findMatchingPropFirm } from './utils/propFirmCatalog';
 import {
   DESK_I18N,
@@ -3192,6 +3193,20 @@ export default function App() {
     updatePilotPorts,
   ]);
 
+  const showRiskSupervisionPortfolio = Boolean(activePort) && !state.privacyMasked &&
+    canFallbackToUsdWorkspace(liveMonitorState.currency) && canFallbackToUsdWorkspace(shieldCurrency);
+  const riskSupervisionPortfolio = useMemo<QuantPortfolioInput | undefined>(() => {
+    if (!showRiskSupervisionPortfolio) return undefined;
+    return {
+      accountType: acc.accountType,
+      balanceUsd: liveMonitorState.balance ?? acc.balance,
+      equityUsd: liveMonitorState.equity ?? telemetry.equity,
+      dailyLossLimitUsd: liveMonitorState.provider === 'NONE'
+        ? telemetry.dailyDrawdownLimitUsd : liveMonitorState.dailyLossLimitUsd,
+      dailyLossUsedUsd: liveMonitorState.dailyLossUsedUsd ?? telemetry.dailyDrawdownUsedUsd,
+    };
+  }, [acc.accountType, acc.balance, liveMonitorState, showRiskSupervisionPortfolio, telemetry]);
+
   const activePageSnapshot = useMemo<DeskPageSnapshot>(() => {
     const filteredCount = filteredJournal.length;
     const filteredPnl = +filteredJournal
@@ -4191,6 +4206,7 @@ export default function App() {
                 deskTheme={deskTheme}
                 lang={deskLang}
                 state={state}
+                riskSupervisionPortfolio={riskSupervisionPortfolio}
                 onUpdateDir={(dir: TradeDirection) =>
                   commitWorkspaceChange((prev) => ({ ...prev, calcDir: dir }))
                 }

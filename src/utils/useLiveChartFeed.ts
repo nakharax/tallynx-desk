@@ -1,18 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LiveChartTelemetry } from '../types/ghr';
 import { formatLiveChartTelemetryForPrompt } from './marketplaceUtils';
 
-export const LIVE_CHART_SYMBOLS = [
-  'XAUUSD',
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'NAS100',
-  'US30',
-  'BTCUSD',
-] as const;
-
-export const LIVE_CHART_TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d'] as const;
+export { LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES } from './liveChartMarkets';
 
 export function formatChartPrice(price: number, symbol: string): string {
   const decimals =
@@ -81,12 +71,14 @@ export function useLiveChartFeed({
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
   const [autoPoll, setAutoPoll] = useState<boolean>(true);
+  const requestId = useRef(0);
 
   const refreshTelemetry = useCallback(
     async (
       sym: string = chartSymbol,
       tf: string = chartTimeframe
     ): Promise<LiveChartTelemetry | null> => {
+      const id = ++requestId.current;
       setChartLoading(true);
       setChartError(null);
       try {
@@ -97,23 +89,29 @@ export function useLiveChartFeed({
             ? fetchLiveChartTelemetryApi(sym, structureTf).catch(() => null)
             : Promise.resolve(null),
         ]);
-        setLiveTelemetry(primaryResult);
-        setStructureTelemetry(structureResult);
+        if (id === requestId.current) {
+          setLiveTelemetry(primaryResult);
+          setStructureTelemetry(structureResult);
+        }
         return primaryResult;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'ดึงข้อมูลกราฟสดไม่สำเร็จ';
-        setChartError(msg);
+        if (id === requestId.current) setChartError(msg);
         return null;
       } finally {
-        setChartLoading(false);
+        if (id === requestId.current) setChartLoading(false);
       }
     },
     [chartSymbol, chartTimeframe, fetchStructureTf]
   );
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setChartLoading(false);
+      return;
+    }
     void refreshTelemetry(chartSymbol, chartTimeframe);
+    return () => { requestId.current++; };
   }, [enabled, chartSymbol, chartTimeframe, refreshTelemetry]);
 
   useEffect(() => {
