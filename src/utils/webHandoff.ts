@@ -64,6 +64,10 @@ export function resolveDeskSection(search: string, hash = '', pathname = ''): De
     ?? sectionByAlias.get(pathKey);
 }
 
+export function resolveDeskHistorySection({ search, hash, pathname, hostname }: Pick<Location, 'search' | 'hash' | 'pathname' | 'hostname'>): DeskSectionId {
+  return resolveDeskSection(search, hash, pathname) ?? resolveBrandHomeSection(hostname);
+}
+
 export function resolveDeskTheme(search: string): DeskTheme | undefined {
   const theme = new URLSearchParams(search).get('theme')?.trim().toLowerCase();
   if (theme === 'light' || theme === 'alabaster') return 'alabaster';

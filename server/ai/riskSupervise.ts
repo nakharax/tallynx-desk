@@ -9,7 +9,7 @@ import {
 } from '../../src/utils/riskSupervisionReport.js';
 import {
   BYOK_REQUIRED_MESSAGE, generateStructuredRiskSupervision, isAiCredentialError, isGoogleConnection,
-  type createDeskAiAccessResolver,
+  type AiConnection, type createDeskAiAccessResolver,
 } from './byokProvider.js';
 
 interface RiskSuperviseDependencies {
@@ -40,6 +40,7 @@ export function createRiskSuperviseRouter(deps: RiskSuperviseDependencies) {
     const snapshot = computeQuantSupervisionSnapshot(symbol, timeframe, candles, portfolio);
     const deterministic = buildDeterministicSupervisionReport(snapshot, lang, new Date().toISOString());
     function sendFallback(reason: RiskSupervisionFallbackReason, status = 200, error?: string) {
+      if (res.destroyed) return;
       const report = { ...deterministic, fallbackReason: reason };
       const payload = { fallbackUsed: true, fallbackReason: reason };
       if (status === 403) {
@@ -49,15 +50,19 @@ export function createRiskSuperviseRouter(deps: RiskSuperviseDependencies) {
       }
     }
 
-    const access = await deps.resolveDeskAiAccess(req, 'text');
-    if (!access.ok) {
-      if (access.code === 'MISSING_API_KEY') sendFallback('GEMINI_API_KEY_MISSING');
-      else sendFallback(access.code, access.status, access.error);
-      return;
-    }
-    const { connection } = access;
-    const provider = isGoogleConnection(connection) ? 'gemini' : connection.provider;
+    const disconnected = new AbortController();
+    const onClose = () => disconnected.abort();
+    res.once('close', onClose);
+    let connection: AiConnection | undefined;
     try {
+      const access = await deps.resolveDeskAiAccess(req, 'text');
+      if (!access.ok) {
+        if (access.code === 'MISSING_API_KEY') sendFallback('GEMINI_API_KEY_MISSING');
+        else sendFallback(access.code, access.status, access.error);
+        return;
+      }
+      connection = access.connection;
+      const provider = isGoogleConnection(connection) ? 'gemini' : connection.provider;
       const rate = await deps.checkDistributedRateLimit(`risk-supervise:${access.rateSubject}`);
       if (!rate.allowed) {
         res.set('Retry-After', String(rate.retryAfterSec));
@@ -78,19 +83,21 @@ export function createRiskSuperviseRouter(deps: RiskSuperviseDependencies) {
         }),
         system: 'Analytical & Risk Supervision Only. Describe observed market structure, data quality, and measured risk. Use only wording allowed by the schema. Include distinct checklist items and each reported structural band. Keep all content educational and descriptive.',
         schema: buildRiskSupervisionResponseSchema(deterministic),
-      }, AbortSignal.timeout(28_000));
+      }, AbortSignal.any([disconnected.signal, AbortSignal.timeout(28_000)]));
       const report = sanitizeAiRiskSupervisionReport(parseModelJson(result.reply), deterministic, result.model, provider);
       if (!report) {
         sendFallback(provider === 'gemini' ? 'GEMINI_REPORT_INVALID' : 'AI_REPORT_INVALID');
         return;
       }
-      res.json({ ok: true, fallbackUsed: false, report });
+      if (!res.destroyed) res.json({ ok: true, fallbackUsed: false, report });
     } catch (error) {
-      if (connection.provider !== 'platform' && isAiCredentialError(error)) {
+      if (connection && connection.provider !== 'platform' && isAiCredentialError(error)) {
         sendFallback('BYOK_REQUIRED', 403, BYOK_REQUIRED_MESSAGE);
       } else {
-        sendFallback(provider === 'gemini' ? 'GEMINI_UNAVAILABLE' : 'AI_PROVIDER_UNAVAILABLE');
+        sendFallback(connection && isGoogleConnection(connection) ? 'GEMINI_UNAVAILABLE' : 'AI_PROVIDER_UNAVAILABLE');
       }
+    } finally {
+      res.off('close', onClose);
     }
   });
   return router;

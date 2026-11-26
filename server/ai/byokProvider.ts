@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import { GoogleGenAI } from '@google/genai';
+import { FinishReason, GoogleGenAI } from '@google/genai';
+import { isEventStream, readServerSentEvents } from '../../src/utils/serverSentEvents.js';
 import {
   AI_HEADERS, AI_MODEL_CATALOG, asRecord, decodeCodexJwtMetadata, isByokKeyFormat, isOpenAiApiKey,
   normalizeAiModel, normalizeAiProvider, normalizeCodexAccountId, normalizeHeaderSecret,
@@ -32,7 +33,7 @@ interface AccessDependencies {
   getPlatformKey: () => string | undefined;
 }
 
-type AccessFailure = { ok: false; status: 400 | 403 | 503; code: 'INVALID_AI_MODEL' | 'BYOK_REQUIRED' | 'MISSING_API_KEY'; error: string };
+type AccessFailure = { ok: false; status: 400 | 401 | 403 | 503; code: 'AUTH_REQUIRED' | 'INVALID_AI_MODEL' | 'BYOK_REQUIRED' | 'MISSING_API_KEY'; error: string };
 type AccessSuccess<Connection> = { ok: true; connection: Connection; rateSubject: string };
 
 export function isGoogleConnection(connection: AiConnection): connection is GoogleAiConnection {
@@ -71,12 +72,19 @@ export function createDeskAiAccessResolver(deps: AccessDependencies) {
     if (rawProvider === undefined || provider === 'platform') {
       if (req.get(AI_HEADERS.key) !== undefined) return byokRequired;
       const privilege = await deps.resolvePlatformAiPrivilege(authorization);
+      if (authorization && !privilege.uid) {
+        return { ok: false, status: 401, code: 'AUTH_REQUIRED', error: 'Sign in again to use Platform Gemini.' };
+      }
       if (!privilege.eligible || !privilege.uid) return byokRequired;
+      const model = normalizeAiModel('platform', rawModel);
+      if (rawModel !== undefined && !model) {
+        return { ok: false, status: 400, code: 'INVALID_AI_MODEL', error: 'Choose a valid Platform Gemini model in Settings.' };
+      }
       const key = deps.getPlatformKey()?.trim();
       if (!key) return { ok: false, status: 503, code: 'MISSING_API_KEY', error: 'Platform Gemini is unavailable. Connect your own provider key in Settings.' };
       return {
         ok: true,
-        connection: { provider: 'platform', key, model: normalizeAiModel('platform', rawModel) },
+        connection: { provider: 'platform', key, model },
         rateSubject: aiRateSubject(req, privilege.uid),
       };
     }
@@ -99,12 +107,14 @@ export function createDeskAiAccessResolver(deps: AccessDependencies) {
   return resolveDeskAiAccess;
 }
 
-export function createGoogleAiClient(key: string, apiVersion?: 'v1alpha' | 'v1beta') {
+export function createGoogleAiClient(key: string, apiVersion?: 'v1alpha' | 'v1beta', fetcher?: typeof fetch) {
   return new GoogleGenAI({
     apiKey: key,
     vertexai: false,
     httpOptions: {
       ...(apiVersion ? { apiVersion } : {}),
+      timeout: 25_000,
+      ...(fetcher ? { fetch: fetcher } : {}),
       headers: { 'User-Agent': 'aistudio-build' },
     },
   });
@@ -126,6 +136,12 @@ export function aiUpstreamStatus(error: unknown): number | undefined {
 export function isAiCredentialError(error: unknown): boolean {
   const status = aiUpstreamStatus(error);
   return status === 401 || status === 403;
+}
+
+export function assertCompleteGoogleReply(finishReason?: FinishReason): void {
+  if (finishReason && finishReason !== FinishReason.STOP && finishReason !== FinishReason.FINISH_REASON_UNSPECIFIED) {
+    throw new AiUpstreamError(502);
+  }
 }
 
 export const CODEX_ORIGINATOR = 'codex_cli_rs';
@@ -191,94 +207,85 @@ function textFromResponse(payload: unknown, codex: boolean): string {
   return typeof message?.content === 'string' ? message.content : '';
 }
 
-async function readProviderStream(response: Response, codex: boolean, onText?: CoachStream['onText']): Promise<string> {
-  if (!response.body) throw new AiUpstreamError(502);
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let lines: string[] = [];
-  let eventSize = 0;
-  let accumulated = '';
-  let completed = false;
-  let terminal = false;
-
-  function consumeEvent() {
-    if (!lines.length) return;
-    const data = lines.join('\n');
-    lines = [];
-    eventSize = 0;
-    if (data === '[DONE]') { completed = true; terminal = true; return; }
+function parseProviderPayload(data: string): Record<string, unknown> {
+  try {
     const value = asRecord(JSON.parse(data));
-    if (!value) throw new AiUpstreamError(502);
-    const error = asRecord(value.error) ?? asRecord(asRecord(value.response)?.error);
-    if (error || value.type === 'response.failed' || value.type === 'response.incomplete' || value.type === 'error') {
-      const code = error?.code ?? value.code;
-      throw new AiUpstreamError(typeof code === 'number' ? code : code === 'invalid_api_key' ? 401 : 502);
+    if (value) return value;
+  } catch {
+    // Fall through to the standard upstream error.
+  }
+  throw new AiUpstreamError(502);
+}
+
+function assertProviderSuccess(value: Record<string, unknown>) {
+  const response = asRecord(value.response) ?? value;
+  const error = asRecord(value.error) ?? asRecord(response.error);
+  if (error || value.type === 'error' || value.type === 'response.failed' ||
+      value.type === 'response.incomplete' || response.status === 'failed' || response.status === 'incomplete') {
+    const code = error?.code ?? value.code;
+    throw new AiUpstreamError(typeof code === 'number' && code >= 400 && code <= 599
+      ? code : code === 'invalid_api_key' || code === 'token_expired' ? 401
+        : code === 'rate_limit_exceeded' ? 429 : 502);
+  }
+  const choice = firstChoice(value);
+  if (choice?.finish_reason === 'error' || choice?.finish_reason === 'length' || choice?.finish_reason === 'content_filter') {
+    throw new AiUpstreamError(502);
+  }
+}
+
+function firstChoice(value: Record<string, unknown>) {
+  return asRecord(Array.isArray(value.choices) ? value.choices[0] : undefined);
+}
+
+const MAX_PROVIDER_TEXT = 256_000;
+
+async function readProviderStream(response: Response, connection: TextConnection, onText?: CoachStream['onText']) {
+  if (!response.body) throw new AiUpstreamError(502);
+  const codex = usesCodexBackend(connection);
+  let model = connection.model;
+  let reply = '';
+  let finished = false;
+  let outputItems = '';
+
+  function append(delta: string) {
+    reply += delta;
+    if (reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
+    if (delta) onText?.(delta);
+  }
+
+  for await (const { data } of readServerSentEvents(response.body)) {
+    if (data === '[DONE]') {
+      if (!codex) finished = true;
+      break;
     }
-    const choices: unknown[] = Array.isArray(value.choices) ? value.choices : [];
-    const choice = asRecord(choices[0]);
-    if (choice?.finish_reason === 'error') throw new AiUpstreamError(502);
+    const value = parseProviderPayload(data);
+    assertProviderSuccess(value);
+    const choice = firstChoice(value);
+    const codexResponse = asRecord(value.response);
+    model = normalizeAiModel(connection.provider, codex ? codexResponse?.model : value.model) ?? model;
     const delta = codex
       ? value.type === 'response.output_text.delta' ? value.delta : undefined
       : asRecord(choice?.delta)?.content;
-    if (typeof delta === 'string' && delta) {
-      accumulated += delta;
-      if (accumulated.length > 256_000) throw new AiUpstreamError(502);
-      onText?.(delta);
+    if (typeof delta === 'string') append(delta);
+    if (codex && value.type === 'response.output_item.done') {
+      outputItems += textFromResponse({ output: [value.item] }, true);
+      if (outputItems.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
     }
     if (codex && value.type === 'response.completed') {
-      if (!accumulated) {
-        accumulated = textFromResponse(value.response, true);
-        if (accumulated) onText?.(accumulated);
-      }
-      completed = true;
-      terminal = true;
+      if (!reply.trim()) append(textFromResponse(codexResponse, true) || outputItems);
+      finished = true;
+      break;
     }
-    if (!codex && typeof choice?.finish_reason === 'string') {
-      if (choice.finish_reason === 'length' || choice.finish_reason === 'content_filter') throw new AiUpstreamError(502);
-      completed = true;
-    }
+    if (!codex && choice?.finish_reason === 'stop') finished = true;
   }
-
-  function consumeLine(line: string) {
-    if (line.endsWith('\r')) line = line.slice(0, -1);
-    if (line === '') consumeEvent();
-    else if (line.startsWith('data:')) {
-      const data = line.slice(5).trimStart();
-      eventSize += data.length;
-      if (eventSize > 512_000) throw new AiUpstreamError(502);
-      lines.push(data);
-    }
-  }
-
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      if (buffer.length > 512_000) throw new AiUpstreamError(502);
-      let newline: number;
-      while (!terminal && (newline = buffer.indexOf('\n')) !== -1) {
-        consumeLine(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-      }
-      if (terminal) break;
-      if (done) {
-        if (buffer) consumeLine(buffer);
-        consumeEvent();
-        break;
-      }
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-  if (!completed || !accumulated.trim()) throw new AiUpstreamError(502);
-  return accumulated;
+  if (!finished || !reply.trim()) throw new AiUpstreamError(502);
+  return { reply, model };
 }
 
 async function requestTextProvider(
   connection: TextConnection, input: CoachPrompt, signal: AbortSignal, schema?: ReportSchema, stream?: CoachStream,
   fetcher: typeof fetch = fetch,
-): Promise<string> {
+): Promise<{ reply: string; model: string }> {
   const codex = usesCodexBackend(connection);
   const openrouter = connection.provider === 'openrouter';
   const url = codex ? `${CODEX_API}/codex/responses` : `${openrouter ? OPENROUTER_API : OPENAI_API}/chat/completions`;
@@ -319,13 +326,13 @@ async function requestTextProvider(
     await response.body?.cancel();
     throw new AiUpstreamError(response.status);
   }
-  if (response.headers.get('content-type')?.includes('text/event-stream')) {
-    return readProviderStream(response, codex, stream?.onText);
-  }
-  const reply = textFromResponse(await response.json(), codex);
-  if (!reply.trim()) throw new AiUpstreamError(502);
+  if (isEventStream(response)) return readProviderStream(response, connection, stream?.onText);
+  const value = parseProviderPayload(await response.text());
+  assertProviderSuccess(value);
+  const reply = textFromResponse(value, codex);
+  if (!reply.trim() || reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
   stream?.onText(reply);
-  return reply;
+  return { reply, model: normalizeAiModel(connection.provider, value.model) ?? connection.model };
 }
 
 export async function streamOrGenerateCoachReply(
@@ -334,11 +341,11 @@ export async function streamOrGenerateCoachReply(
   options: { signal: AbortSignal; stream?: CoachStream; fetcher?: typeof fetch },
 ): Promise<{ reply: string; model: string; sources: Array<{ title: string; uri: string }> }> {
   if (!isGoogleConnection(connection)) {
-    const reply = await requestTextProvider(connection, input, options.signal, undefined, options.stream, options.fetcher);
-    return { reply, model: connection.model, sources: [] };
+    const result = await requestTextProvider(connection, input, options.signal, undefined, options.stream, options.fetcher);
+    return { ...result, sources: [] };
   }
   const model = connection.model ?? AI_MODEL_CATALOG.google[0];
-  const ai = createGoogleAiClient(connection.key);
+  const ai = createGoogleAiClient(connection.key, undefined, options.fetcher);
   const request = {
     model,
     contents: [
@@ -363,17 +370,20 @@ export async function streamOrGenerateCoachReply(
   if (options.stream) {
     const response = await ai.models.generateContentStream(request);
     for await (const chunk of response) {
+      assertCompleteGoogleReply(chunk.candidates?.[0]?.finishReason);
       const text = chunk.text ?? '';
       reply += text;
+      if (reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
       if (text) options.stream.onText(text);
       collectSources(chunk.candidates?.[0]?.groundingMetadata?.groundingChunks);
     }
   } else {
     const response = await ai.models.generateContent(request);
+    assertCompleteGoogleReply(response.candidates?.[0]?.finishReason);
     reply = response.text ?? '';
     collectSources(response.candidates?.[0]?.groundingMetadata?.groundingChunks);
   }
-  if (!reply.trim()) throw new AiUpstreamError(502);
+  if (!reply.trim() || reply.length > MAX_PROVIDER_TEXT) throw new AiUpstreamError(502);
   return { reply, model, sources: [...sourceMap.values()] };
 }
 
@@ -385,15 +395,13 @@ export async function generateStructuredRiskSupervision(
       ...input,
       system: `${input.system}\nReturn one JSON object matching this schema:\n${JSON.stringify(input.schema)}`,
     };
-    let reply: string;
     try {
-      reply = await requestTextProvider(connection, structuredInput, signal, input.schema);
+      return await requestTextProvider(connection, structuredInput, signal, input.schema);
     } catch (error) {
       if (![400, 422].includes(aiUpstreamStatus(error) ?? 0)) throw error;
       // Some custom models accept a JSON prompt but reject the structured output parameter.
-      reply = await requestTextProvider(connection, structuredInput, signal);
+      return requestTextProvider(connection, structuredInput, signal);
     }
-    return { reply, model: connection.model };
   }
   const ai = createGoogleAiClient(connection.key);
   const generate = async (model: string) => (await ai.models.generateContent({

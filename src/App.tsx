@@ -95,6 +95,7 @@ import {
   appendLiveTelemetryPoint,
   computeLivePositionMetrics,
   formatTelemetryTimeLabel,
+  resolveNextLivePollAt,
   type AnyLivePositionInput,
   type LiveTelemetryPoint,
 } from './utils/liveTelemetryBuffer';
@@ -222,6 +223,7 @@ import {
   parseWebHandoff,
   resolveBrandHomeSection,
   resolveDeskSection,
+  resolveDeskHistorySection,
   resolveDeskTheme,
   stripWebHandoffParams,
   updateDeskPageUrl,
@@ -452,19 +454,17 @@ export default function App() {
     window.addEventListener('keydown', onGlobalKey);
     return () => window.removeEventListener('keydown', onGlobalKey);
   }, []);
-  const [manualFloatingPnlUsd, setFloatingPnlUsd] = useState(0);
   const [liveMonitorPaused, setLiveMonitorPaused] = useState(false);
-  const liveMonitorPausedRef = useRef(liveMonitorPaused);
-  liveMonitorPausedRef.current = liveMonitorPaused;
   const [liveTabVisible, setLiveTabVisible] = useState(() =>
     typeof document === 'undefined' ? true : document.visibilityState === 'visible'
   );
-  const [liveBridgeByPort, setLiveBridgeByPort] = useState<Record<string, LiveBridgeTelemetryResponse>>({});
-  const [liveTelemetrySeriesByPort, setLiveTelemetrySeriesByPort] = useState<Record<string, LiveTelemetryPoint[]>>({});
+  const [liveBridgeByPort, setLiveBridgeByPort] = useState<Record<string, { scope: string; data: LiveBridgeTelemetryResponse }>>({});
+  const [liveTelemetrySeriesByPort, setLiveTelemetrySeriesByPort] = useState<Record<string, { scope: string; points: LiveTelemetryPoint[] }>>({});
   const [liveSyncMetaByPort, setLiveSyncMetaByPort] = useState<
     Record<
       string,
       {
+        scope: string;
         syncing: boolean;
         lastSyncAt: string | null;
         latencyMs: number | null;
@@ -1147,12 +1147,18 @@ export default function App() {
     commitWorkspaceChange((prev) => ({ ...prev, cooldownUntil: null }));
   }, [commitWorkspaceChange]);
 
-  const handleSwitchPage = useCallback((pageId: string) => {
+  const showWorkspacePage = useCallback((pageId: string) => {
     const normalizedId = toWorkspacePage(pageId as DeskSectionId) || pageId;
     setActiveNavSection(normalizedId);
     if (normalizedId === 'sec-mall') setShowRightDock(false);
     if (normalizedId !== 'sec-marketplace') setMarketListingId(undefined);
     if (normalizedId !== 'journal-root') setPrintRequested(false);
+    mainRef.current?.scrollTo({ top: 0, behavior: 'instant' });
+    return normalizedId;
+  }, []);
+
+  const handleSwitchPage = useCallback((pageId: string) => {
+    const normalizedId = showWorkspacePage(pageId);
     try {
       const { pathname, search, hash } = window.location;
       const currentPath = pathname + search + hash;
@@ -1163,8 +1169,7 @@ export default function App() {
     } catch {
       // ignore history restrictions
     }
-    mainRef.current?.scrollTo({ top: 0, behavior: 'instant' });
-  }, []);
+  }, [showWorkspacePage]);
 
   const openMall = useCallback((zoneId: MallZoneId = 'lounge-general', listing?: Pick<MarketplaceDeskSetup, 'id' | 'title'> & { blueprint: { primarySymbol: string } }) => {
     setMallEntry({
@@ -1209,18 +1214,7 @@ export default function App() {
 
   useEffect(() => {
     const syncUrlPage = () => {
-      const { pathname, search, hash, hostname } = window.location;
-      const section =
-        resolveDeskSection(search, hash, pathname) ??
-        (pathname === '/' ? (hostname === 'mall.tallynx.com' ? 'sec-mall' : 'sec-accounts') : undefined);
-      if (section) {
-        const pageId = toWorkspacePage(section);
-        setActiveNavSection(pageId);
-        if (pageId === 'sec-mall') setShowRightDock(false);
-        if (pageId !== 'sec-marketplace') setMarketListingId(undefined);
-        if (pageId !== 'journal-root') setPrintRequested(false);
-        mainRef.current?.scrollTo({ top: 0, behavior: 'instant' });
-      }
+      showWorkspacePage(resolveDeskHistorySection(window.location));
     };
     window.addEventListener('hashchange', syncUrlPage);
     window.addEventListener('popstate', syncUrlPage);
@@ -1228,7 +1222,7 @@ export default function App() {
       window.removeEventListener('hashchange', syncUrlPage);
       window.removeEventListener('popstate', syncUrlPage);
     };
-  }, []);
+  }, [showWorkspacePage]);
 
   // Filtered Journal Memo (deferred search keeps input typing responsive on large ledgers)
   const deferredJournalSearch = useDeferredValue(state.journalSearch);
@@ -2306,7 +2300,6 @@ export default function App() {
   const activePilotAutoSync = activeIsPilot && activePort.autoSyncRealtime === true;
   const activePilotCandidate = activeIsPilot ? pilotFeeds[state.activePort] : undefined;
   const activePilotFeed =
-    activePilotAutoSync &&
     activePilotCandidate?.uid === firebaseUid &&
     activePilotCandidate.portId === state.activePort &&
     activePilotCandidate.accountId === activePilotAccountId
@@ -2351,7 +2344,8 @@ export default function App() {
               const data = await readPilotAccount(getPilotIdToken, accountId, controller.signal, {
                 previous: previousData,
               });
-              if (!controller.signal.aborted && activeUidRef.current === firebaseUid) {
+              if (!controller.signal.aborted && activeUidRef.current === firebaseUid &&
+                  !(live3sHandlesActivePilotRef.current && portId === activePortRef.current)) {
                 errorStreakByPort.set(portId, 0);
                 const interval = portId === activePortRef.current ? FUNDEDNEXT_POLL_MS : INACTIVE_POLL_MS;
                 nextPollAtByPort.set(portId, Date.now() + interval);
@@ -2362,7 +2356,8 @@ export default function App() {
                 await reconcilePilotExecutionsIntoWorkspace({ ...scope, data });
               }
             } catch (error) {
-              if (controller.signal.aborted || activeUidRef.current !== firebaseUid) return;
+              if (controller.signal.aborted || activeUidRef.current !== firebaseUid ||
+                  (live3sHandlesActivePilotRef.current && portId === activePortRef.current)) return;
               const isRec = isPilotReconnect(error);
               if (isRec) blockedReconnect.add(portId);
               const streak = Math.min((errorStreakByPort.get(portId) ?? 0) + 1, 5);
@@ -2414,6 +2409,9 @@ export default function App() {
   }, [state.activePort]);
 
   const activeBridgeKey = activePort?.syncProvider === 'LIVE_BRIDGE' ? (activePort.tredynApiKey || '').trim() : '';
+  const liveScopeKey = JSON.stringify([firebaseUid, activePort?.syncProvider, activePilotAccountId, activeBridgeKey]);
+  const activeBridgeEntry = liveBridgeByPort[state.activePort];
+  const activeLiveBridge = activeBridgeEntry?.scope === liveScopeKey ? activeBridgeEntry.data : undefined;
 
   useEffect(() => {
     const portId = state.activePort;
@@ -2429,7 +2427,7 @@ export default function App() {
       !liveMonitorPaused &&
       ((isPilotLive && activePilotAutoSync) || isBridgeLive);
 
-    live3sHandlesActivePilotRef.current = Boolean(canAutoPoll && isPilotLive);
+    live3sHandlesActivePilotRef.current = Boolean(isPilotLive && activePilotAutoSync);
 
     if (!isPilotLive && !isBridgeLive) {
       triggerLive3sPollRef.current = null;
@@ -2438,6 +2436,25 @@ export default function App() {
 
     const controller = new AbortController();
     let inFlight = false;
+    let timer: number | undefined;
+    let nextPollAt = 0;
+    let reconnectRequired = false;
+
+    const updateSyncMeta = (patch: Partial<(typeof liveSyncMetaByPort)[string]>) => {
+      setLiveSyncMetaByPort(prev => ({
+        ...prev,
+        [portId]: {
+          scope: liveScopeKey,
+          syncing: false,
+          lastSyncAt: null,
+          latencyMs: null,
+          nextPollAt: null,
+          error: null,
+          ...(prev[portId]?.scope === liveScopeKey ? prev[portId] : {}),
+          ...patch,
+        },
+      }));
+    };
 
     const appendSeriesPoint = (
       balanceVal: number,
@@ -2453,7 +2470,8 @@ export default function App() {
       const todayRealized = (curState.journal || [])
         .filter((item) => item.port === portId && item.date === todayIso)
         .reduce((sum, item) => sum + (Number(item.pnlUsd) || 0), 0);
-      const initialCap = Math.max(100, Number(targetPort?.initial || 10000));
+      const rawInitial = Number(targetPort?.initial);
+      const initialCap = Number.isFinite(rawInitial) && rawInitial > 0 ? Math.max(100, rawInitial) : 10_000;
       const dailyLimit =
         dailyLimitOverride != null && Number.isFinite(dailyLimitOverride) && dailyLimitOverride > 0
           ? dailyLimitOverride
@@ -2474,35 +2492,41 @@ export default function App() {
       const ts = Date.now();
       setLiveTelemetrySeriesByPort((prev) => ({
         ...prev,
-        [portId]: appendLiveTelemetryPoint(prev[portId] ?? [], {
-          ts,
-          timeLabel: formatTelemetryTimeLabel(ts, 'Asia/Bangkok'),
-          balance: balanceVal,
-          equity: equityVal,
-          floatingPnl: floatingVal,
-          dailyFloorBalance: metricsForFloor.summary.dailyFloorBalance,
-          openPositionsCount: openCount,
-        }),
+        [portId]: {
+          scope: liveScopeKey,
+          points: appendLiveTelemetryPoint(prev[portId]?.scope === liveScopeKey ? prev[portId].points : [], {
+            ts,
+            timeLabel: formatTelemetryTimeLabel(ts, 'Asia/Bangkok'),
+            balance: balanceVal,
+            equity: equityVal,
+            floatingPnl: floatingVal,
+            dailyFloorBalance: metricsForFloor.summary.dailyFloorBalance,
+            openPositionsCount: openCount,
+          }),
+        },
       }));
     };
 
+    function scheduleNext() {
+      window.clearTimeout(timer);
+      if (controller.signal.aborted || !canAutoPoll || reconnectRequired || document.visibilityState !== 'visible') return;
+      timer = window.setTimeout(() => void pollLiveNow(), Math.max(0, nextPollAt - Date.now()));
+    }
+
     const pollLiveNow = async (force = false) => {
       if (controller.signal.aborted || !isOnline || inFlight) return;
-      if (!force && (liveMonitorPausedRef.current || document.visibilityState !== 'visible')) return;
-      if (!force && isPilotLive && !activePilotAutoSync) return;
+      if (!force && (!canAutoPoll || reconnectRequired || document.visibilityState !== 'visible')) return;
+      if (!force && nextPollAt > Date.now()) {
+        scheduleNext();
+        return;
+      }
 
+      window.clearTimeout(timer);
       inFlight = true;
-      setLiveSyncMetaByPort((prev) => ({
-        ...prev,
-        [portId]: {
-          syncing: true,
-          lastSyncAt: prev[portId]?.lastSyncAt ?? null,
-          latencyMs: prev[portId]?.latencyMs ?? null,
-          nextPollAt: prev[portId]?.nextPollAt ?? null,
-          error: prev[portId]?.error ?? null,
-        },
-      }));
+      nextPollAt = 0;
+      updateSyncMeta({ syncing: true, nextPollAt: null });
 
+      const requestedAt = Date.now();
       const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
       try {
         if (isPilotLive && firebaseUid && activePilotAccountId) {
@@ -2519,6 +2543,7 @@ export default function App() {
             requireVisible: !force,
           });
           if (!data || controller.signal.aborted || activeUidRef.current !== firebaseUid) return;
+          reconnectRequired = false;
           const elapsedMs = Math.max(
             1,
             Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)
@@ -2550,39 +2575,25 @@ export default function App() {
           }
 
           const syncAt = snap?.lastCheckedAt || snap?.fetchedAt || new Date().toISOString();
-          const nextDelay = live?.rateFloorMs && live.rateFloorMs > LIVE_TELEMETRY_POLL_MS
-            ? live.rateFloorMs
-            : LIVE_TELEMETRY_POLL_MS;
-          setLiveSyncMetaByPort((prev) => ({
-            ...prev,
-            [portId]: {
-              syncing: false,
-              lastSyncAt: syncAt,
-              latencyMs: elapsedMs,
-              nextPollAt: canAutoPoll ? Date.now() + nextDelay : null,
-              error: snap?.blockedReason ?? null,
-            },
-          }));
+          nextPollAt = resolveNextLivePollAt(requestedAt, live?.rateFloorMs, live?.nextSafeSyncAt);
+          updateSyncMeta({ syncing: false, lastSyncAt: syncAt, latencyMs: elapsedMs, error: snap?.blockedReason ?? null });
         } else if (isBridgeLive) {
           const idToken = await getPilotIdToken();
           const res = await readLiveBridgeTelemetry(
             { tredynApiKey: activeBridgeKey, idToken, requireVisible: !force },
             controller.signal
           );
-          if (!res || controller.signal.aborted) return;
+          if (!res || controller.signal.aborted || activeUidRef.current !== firebaseUid) return;
+          nextPollAt = resolveNextLivePollAt(requestedAt);
           const elapsedMs = Math.max(
             1,
             Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)
           );
-          setLiveBridgeByPort((prev) => ({ ...prev, [portId]: res }));
-          if (res.live.floatingPnl != null && Number.isFinite(res.live.floatingPnl)) {
-            setFloatingPnlUsd(Number(res.live.floatingPnl));
-          }
-          const fallbackBal = Number(stateRef.current.accounts?.[portId]?.initial || 0);
-          const rawBal = res.live.balance ?? fallbackBal;
-          const rawEq = res.live.equity ?? rawBal + Number(res.live.floatingPnl ?? 0);
-          const rawFloat = res.live.floatingPnl ?? rawEq - rawBal;
-          if (Number.isFinite(rawBal)) {
+          setLiveBridgeByPort((prev) => ({ ...prev, [portId]: { scope: liveScopeKey, data: res } }));
+          const rawBal = res.live.balance;
+          if (rawBal != null && Number.isFinite(rawBal)) {
+            const rawEq = res.live.equity ?? rawBal + (res.live.floatingPnl ?? 0);
+            const rawFloat = res.live.floatingPnl ?? rawEq - rawBal;
             appendSeriesPoint(
               rawBal,
               Number.isFinite(rawEq) ? rawEq : rawBal,
@@ -2592,74 +2603,55 @@ export default function App() {
               res.live.dailyLossUsedUsd ?? null
             );
           }
-          setLiveSyncMetaByPort((prev) => ({
-            ...prev,
-            [portId]: {
-              syncing: false,
-              lastSyncAt: res.syncedAt || new Date().toISOString(),
-              latencyMs: elapsedMs,
-              nextPollAt: canAutoPoll ? Date.now() + LIVE_TELEMETRY_POLL_MS : null,
-              error: null,
-            },
-          }));
+          updateSyncMeta({
+            syncing: false, lastSyncAt: res.syncedAt || new Date().toISOString(), latencyMs: elapsedMs, error: null,
+          });
         }
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || activeUidRef.current !== firebaseUid) return;
         const msg = error instanceof Error ? error.message : 'Live telemetry sync error';
         if (isPilotLive && isPilotReconnect(error) && firebaseUid && activePilotAccountId) {
+          reconnectRequired = true;
           setPilotFeeds((prev) => ({
             ...prev,
             [portId]: {
               uid: firebaseUid,
               portId,
               accountId: activePilotAccountId,
-              data: prev[portId]?.data ?? null,
+              data: null,
               error: msg,
               reconnect: true,
             },
           }));
         }
-        setLiveSyncMetaByPort((prev) => ({
-          ...prev,
-          [portId]: {
-            syncing: false,
-            lastSyncAt: prev[portId]?.lastSyncAt ?? null,
-            latencyMs: prev[portId]?.latencyMs ?? null,
-            nextPollAt: canAutoPoll ? Date.now() + LIVE_TELEMETRY_POLL_MS : null,
-            error: msg,
-          },
-        }));
+        updateSyncMeta({ error: msg });
       } finally {
         inFlight = false;
+        if (!controller.signal.aborted) {
+          nextPollAt ||= resolveNextLivePollAt(Date.now());
+          updateSyncMeta({ syncing: false, nextPollAt: canAutoPoll && !reconnectRequired ? nextPollAt : null });
+          scheduleNext();
+        }
       }
     };
 
     const onVisible = () => {
       const visible = document.visibilityState === 'visible';
       setLiveTabVisible(visible);
-      if (visible && canAutoPoll) {
-        void pollLiveNow(false);
-      }
+      if (!visible) window.clearTimeout(timer);
+      else if (canAutoPoll && !inFlight) void pollLiveNow();
     };
 
-    triggerLive3sPollRef.current = () => {
-      void pollLiveNow(true);
-    };
-
-    if (canAutoPoll && document.visibilityState === 'visible') {
-      void pollLiveNow(false);
-    }
-
-    const timer = canAutoPoll
-      ? window.setInterval(() => void pollLiveNow(false), LIVE_TELEMETRY_POLL_MS)
-      : null;
+    triggerLive3sPollRef.current = () => { void pollLiveNow(true); };
+    updateSyncMeta({ syncing: false, nextPollAt: null });
+    onVisible();
     document.addEventListener('visibilitychange', onVisible);
 
     return () => {
       live3sHandlesActivePilotRef.current = false;
       triggerLive3sPollRef.current = null;
       controller.abort();
-      if (timer !== null) window.clearInterval(timer);
+      window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [
@@ -2668,6 +2660,7 @@ export default function App() {
     activePilotAccountId,
     activePilotAutoSync,
     activeBridgeKey,
+    liveScopeKey,
     firebaseUid,
     isOnline,
     liveMonitorPaused,
@@ -2728,7 +2721,7 @@ export default function App() {
     : undefined;
   const floatingPnlUsd = activeIsPilot
     ? pilotSnapshot?.currency === 'USD' ? Number(pilotSnapshot.floatingPnl ?? 0) : 0
-    : manualFloatingPnlUsd;
+    : activeLiveBridge?.live.floatingPnl ?? 0;
   const displayBalance = activeIsPilot
     ? effectivePilotSnapshot?.balance != null
       ? formatPilotAmount(effectivePilotSnapshot.balance, effectivePilotSnapshot.currency)
@@ -3023,7 +3016,6 @@ export default function App() {
     ]
   );
 
-  const activeLiveBridge = activePort?.syncProvider === 'LIVE_BRIDGE' ? liveBridgeByPort[state.activePort] : undefined;
   const activeLivePositions = useMemo<AnyLivePositionInput[]>(() => {
     if (activeIsPilot) {
       return (
@@ -3045,12 +3037,16 @@ export default function App() {
   ]);
 
   const activeTelemetrySeries = useMemo<LiveTelemetryPoint[]>(
-    () => liveTelemetrySeriesByPort[state.activePort] ?? [],
-    [liveTelemetrySeriesByPort, state.activePort]
+    () => {
+      const entry = liveTelemetrySeriesByPort[state.activePort];
+      return entry?.scope === liveScopeKey ? entry.points : [];
+    },
+    [liveTelemetrySeriesByPort, state.activePort, liveScopeKey]
   );
 
   const liveMonitorState = useMemo<LiveMonitorControlState>(() => {
-    const meta = liveSyncMetaByPort[state.activePort];
+    const syncMeta = liveSyncMetaByPort[state.activePort];
+    const meta = syncMeta?.scope === liveScopeKey ? syncMeta : undefined;
     const provider = activeIsPilot
       ? 'FUNDEDNEXT_MCP'
       : activePort?.syncProvider === 'LIVE_BRIDGE'
@@ -3094,13 +3090,13 @@ export default function App() {
       provider === 'FUNDEDNEXT_MCP'
         ? pilotEq
         : provider === 'LIVE_BRIDGE'
-          ? bridgeLive?.equity ?? (balance !== null ? balance + Number(bridgeLive?.floatingPnl ?? manualFloatingPnlUsd) : null)
+          ? bridgeLive?.equity ?? (balance !== null ? balance + Number(bridgeLive?.floatingPnl ?? 0) : null)
           : null;
     const floatingPnl =
       provider === 'FUNDEDNEXT_MCP'
         ? pilotFloat
         : provider === 'LIVE_BRIDGE'
-          ? bridgeLive?.floatingPnl ?? manualFloatingPnlUsd
+          ? bridgeLive?.floatingPnl ?? null
           : null;
     const currency =
       provider === 'FUNDEDNEXT_MCP'
@@ -3122,7 +3118,7 @@ export default function App() {
     return {
       provider,
       connected,
-      paused: liveMonitorPaused || (provider === 'FUNDEDNEXT_MCP' && !activePilotAutoSync),
+      paused: liveMonitorPaused || !isOnline || (provider === 'FUNDEDNEXT_MCP' && !activePilotAutoSync),
       tabVisible: liveTabVisible,
       syncing: Boolean(meta?.syncing),
       reconnectRequired: Boolean(pilotReconnect),
@@ -3151,7 +3147,6 @@ export default function App() {
       hasConsistencyCap: cycleRuleStatus.consistency.hasConsistencyCap,
       privacyMasked: state.privacyMasked,
       rateFloorMs: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.rateFloorMs ?? null : null,
-      nextSafeSyncAt: provider === 'FUNDEDNEXT_MCP' ? pilotLive?.nextSafeSyncAt ?? null : null,
       onTogglePause: () => {
         if (provider === 'FUNDEDNEXT_MCP' && !activePilotAutoSync && firebaseUid) {
           void updatePilotPorts(firebaseUid, { type: 'autoSync', portId: state.activePort, enabled: true });
@@ -3165,6 +3160,8 @@ export default function App() {
     };
   }, [
     liveSyncMetaByPort,
+    liveScopeKey,
+    isOnline,
     state.activePort,
     state.journal,
     state.privacyMasked,
@@ -3182,7 +3179,6 @@ export default function App() {
     acc.balance,
     acc.initial,
     acc.profit,
-    manualFloatingPnlUsd,
     liveMonitorPaused,
     activePilotAutoSync,
     liveTabVisible,

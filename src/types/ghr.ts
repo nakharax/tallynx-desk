@@ -277,6 +277,7 @@ export interface LiveChartTelemetry {
   timeframe: string;
   source: string;
   fetchedAt: string;
+  staleCache?: boolean;
   currentPrice: number;
   prevClose: number;
   changeAbs: number;

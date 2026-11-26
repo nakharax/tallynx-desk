@@ -63,7 +63,6 @@ export interface LiveMonitorControlState {
   hasConsistencyCap: boolean;
   privacyMasked?: boolean;
   rateFloorMs?: number | null;
-  nextSafeSyncAt?: string | null;
   onTogglePause: () => void;
   onForceRefresh: () => void;
   onOpenSyncModal?: () => void;
@@ -155,7 +154,7 @@ function computeChartDomain(
   }
   const span = Math.max(10, maxVal - minVal);
   const pad = Math.max(5, Math.round(span * 0.12));
-  return [Math.max(0, Math.floor(minVal - pad)), Math.ceil(maxVal + pad)];
+  return [Math.floor(minVal - pad), Math.ceil(maxVal + pad)];
 }
 
 export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = React.memo(({
@@ -171,21 +170,20 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
   const gradientId = useId().replace(/:/g, '');
   const t = (en: string, th: string) => deskText(lang, en, th);
   const [windowMode, setWindowMode] = useState<LiveTelemetryWindow>('ALL');
-  const [countdownSec, setCountdownSec] = useState<number>(() =>
-    Math.max(1, Math.round((liveMonitor.pollIntervalMs || 3000) / 1000))
-  );
+  const [countdownSec, setCountdownSec] = useState<number | null>(null);
 
   const openSync = onOpenSyncModal ?? liveMonitor.onOpenSyncModal;
   const masked = Boolean(liveMonitor.privacyMasked);
   const currency = liveMonitor.currency || 'USD';
 
   useEffect(() => {
-    if (!liveMonitor.connected || liveMonitor.paused || !liveMonitor.tabVisible || !liveMonitor.nextPollAt) {
-      setCountdownSec(Math.max(1, Math.round((liveMonitor.pollIntervalMs || 3000) / 1000)));
+    const deadline = liveMonitor.nextPollAt;
+    if (!liveMonitor.connected || liveMonitor.paused || !liveMonitor.tabVisible || deadline == null || !Number.isFinite(deadline)) {
+      setCountdownSec(null);
       return;
     }
     const updateCountdown = () => {
-      const remaining = Math.max(0, Math.ceil(((liveMonitor.nextPollAt ?? Date.now()) - Date.now()) / 1000));
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       setCountdownSec(remaining);
     };
     updateCountdown();
@@ -248,15 +246,14 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
         ...pt,
         ddRemainingUsd: Math.max(
           0,
-          Math.round(((pt.equity - (pt.dailyFloorBalance || summary.dailyFloorBalance)) + Number.EPSILON) * 100) / 100
+          Math.round(((pt.equity - pt.dailyFloorBalance) + Number.EPSILON) * 100) / 100
         ),
       })),
-    [visibleSeries, summary.dailyFloorBalance]
+    [visibleSeries]
   );
 
   const dailyFloorValue = useMemo(() => {
-    const latestPointFloor = visibleSeries.length > 0 ? visibleSeries[visibleSeries.length - 1].dailyFloorBalance : 0;
-    return latestPointFloor > 0 ? latestPointFloor : summary.dailyFloorBalance;
+    return visibleSeries.at(-1)?.dailyFloorBalance ?? summary.dailyFloorBalance;
   }, [visibleSeries, summary.dailyFloorBalance]);
 
   const yDomain = useMemo(
@@ -292,12 +289,15 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
         ? t('Paused', 'หยุดชั่วคราว')
         : liveMonitor.syncing
           ? t('Syncing…', 'กำลังซิงก์…')
-          : liveMonitor.rateFloorMs && liveMonitor.rateFloorMs > liveMonitor.pollIntervalMs
+          : liveMonitor.rateFloorMs && Number.isFinite(liveMonitor.rateFloorMs) && liveMonitor.rateFloorMs > liveMonitor.pollIntervalMs
             ? t(
-                `Quiet · ${Math.round(liveMonitor.rateFloorMs / 1000)}s floor (${countdownSec}s)`,
-                `ตลาดนิ่ง · รอบ ${Math.round(liveMonitor.rateFloorMs / 1000)}วิ (${countdownSec}วิ)`
+                `Quiet · ${Math.round(liveMonitor.rateFloorMs / 1000)}s floor`,
+                `ตลาดนิ่ง · รอบ ${Math.round(liveMonitor.rateFloorMs / 1000)}วิ`
               )
-            : t(`Live · 3s (${countdownSec}s)`, `สด · 3วิ (${countdownSec}วิ)`);
+            : t('Live · 3s', 'สด · 3วิ');
+  const countdownLabel = countdownSec != null && liveMonitor.nextPollAt != null && !liveMonitor.syncing &&
+    liveMonitor.connected && !liveMonitor.paused && liveMonitor.tabVisible
+    ? t(` (${countdownSec}s)`, ` (${countdownSec}วิ)`) : '';
 
   // Non-intrusive prompt when disconnected or reconnect required (never fabricates live telemetry!)
   if (!liveMonitor.connected || liveMonitor.provider === 'NONE' || liveMonitor.reconnectRequired) {
@@ -396,7 +396,7 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
             }
           >
             <Activity size={13} aria-hidden="true" />
-            <span>{heartbeatLabel}</span>
+            <span>{heartbeatLabel}{countdownLabel}</span>
           </span>
           <button
             type="button"
@@ -614,7 +614,8 @@ export const LivePositionMonitorCard: React.FC<LivePositionMonitorCardProps> = R
                   tick={{ fontSize: 10, fill: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(v: number) => (masked ? '•••' : `$${Math.round(v).toLocaleString('en-US')}`)}
+                  tickFormatter={(v: number) => masked ? '•••' : currency === 'USD'
+                    ? `$${Math.round(v).toLocaleString('en-US')}` : Math.round(v).toLocaleString('en-US')}
                 />
                 {dailyFloorValue > 0 && (
                   <ReferenceLine

@@ -270,6 +270,10 @@ export function heuristicRouteTier(
 }
 
 export function isRetryableQuotaOrTransientError(error: unknown): boolean {
+  if (error instanceof Error && 'status' in error && typeof error.status === 'number') {
+    if ([401, 403].includes(error.status)) return false;
+    if ([404, 429, 500, 502, 503, 504].includes(error.status)) return true;
+  }
   const msg = error instanceof Error ? error.message : String(error ?? '');
   if (!msg) return true;
   if (/API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|\b401\b|\b403\b/i.test(msg)) {
@@ -486,6 +490,7 @@ export function createDecisionGenAIClient(apiKey: string): GoogleGenAI {
     vertexai: false,
     httpOptions: {
       apiVersion: 'v1beta',
+      timeout: 7_000,
       headers: {
         'User-Agent': 'aistudio-build',
       },

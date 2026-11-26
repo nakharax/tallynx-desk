@@ -1,33 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LiveChartTelemetry } from '../types/ghr';
 import { formatLiveChartTelemetryForPrompt } from './marketplaceUtils';
+import { fetchLiveChartTelemetryApi } from './liveChartMarkets';
 
-export { LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES } from './liveChartMarkets';
-
-export function formatChartPrice(price: number, symbol: string): string {
-  const decimals =
-    symbol.includes('JPY') || (symbol.includes('USD') && price < 20) ? 4 : 2;
-  return Number.isFinite(price)
-    ? price.toLocaleString('en-US', {
-        minimumFractionDigits: decimals,
-        maximumFractionDigits: decimals,
-      })
-    : '0.00';
-}
-
-export async function fetchLiveChartTelemetryApi(
-  symbol: string,
-  timeframe: string
-): Promise<LiveChartTelemetry> {
-  const res = await fetch(
-    `/api/market/live-chart?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`
-  );
-  const data = await res.json();
-  if (!res.ok || !data?.ok || !data?.telemetry) {
-    throw new Error(data?.error || 'ไม่สามารถดึงราคาตลาดสดได้ในขณะนี้');
-  }
-  return data.telemetry as LiveChartTelemetry;
-}
+export { LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES, fetchLiveChartTelemetryApi, formatChartPrice } from './liveChartMarkets';
 
 export function resolveStructureTimeframe(primaryTf: string): string {
   const tf = primaryTf.toLowerCase();
@@ -71,38 +47,44 @@ export function useLiveChartFeed({
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
   const [autoPoll, setAutoPoll] = useState<boolean>(true);
-  const requestId = useRef(0);
+  const activeRequest = useRef<AbortController | null>(null);
 
   const refreshTelemetry = useCallback(
     async (
       sym: string = chartSymbol,
       tf: string = chartTimeframe
     ): Promise<LiveChartTelemetry | null> => {
-      const id = ++requestId.current;
+      if (!enabled || sym !== chartSymbol || tf !== chartTimeframe) return null;
+      activeRequest.current?.abort();
+      const controller = new AbortController();
+      activeRequest.current = controller;
       setChartLoading(true);
-      setChartError(null);
       try {
         const structureTf = resolveStructureTimeframe(tf);
         const [primaryResult, structureResult] = await Promise.all([
-          fetchLiveChartTelemetryApi(sym, tf),
+          fetchLiveChartTelemetryApi(sym, tf, controller.signal),
           fetchStructureTf && structureTf !== tf
-            ? fetchLiveChartTelemetryApi(sym, structureTf).catch(() => null)
+            ? fetchLiveChartTelemetryApi(sym, structureTf, controller.signal).catch(() => null)
             : Promise.resolve(null),
         ]);
-        if (id === requestId.current) {
-          setLiveTelemetry(primaryResult);
-          setStructureTelemetry(structureResult);
-        }
+        if (activeRequest.current !== controller) return null;
+        setLiveTelemetry(primaryResult);
+        setStructureTelemetry(structureResult);
+        setChartError(null);
         return primaryResult;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'ดึงข้อมูลกราฟสดไม่สำเร็จ';
-        if (id === requestId.current) setChartError(msg);
+        if (activeRequest.current === controller) setChartError(msg);
         return null;
       } finally {
-        if (id === requestId.current) setChartLoading(false);
+        if (activeRequest.current === controller) {
+          activeRequest.current = null;
+          controller.abort();
+          setChartLoading(false);
+        }
       }
     },
-    [chartSymbol, chartTimeframe, fetchStructureTf]
+    [chartSymbol, chartTimeframe, enabled, fetchStructureTf]
   );
 
   useEffect(() => {
@@ -110,14 +92,19 @@ export function useLiveChartFeed({
       setChartLoading(false);
       return;
     }
+    setChartError(null);
     void refreshTelemetry(chartSymbol, chartTimeframe);
-    return () => { requestId.current++; };
+    return () => {
+      const request = activeRequest.current;
+      activeRequest.current = null;
+      request?.abort();
+    };
   }, [enabled, chartSymbol, chartTimeframe, refreshTelemetry]);
 
   useEffect(() => {
     if (!enabled || !autoPoll || pollIntervalMs <= 0) return;
     const timer = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (activeRequest.current || document.visibilityState !== 'visible') return;
       void refreshTelemetry(chartSymbol, chartTimeframe);
     }, pollIntervalMs);
     return () => window.clearInterval(timer);
@@ -128,8 +115,9 @@ export function useLiveChartFeed({
     setChartSymbol,
     chartTimeframe,
     setChartTimeframe,
-    liveTelemetry,
-    structureTelemetry,
+    liveTelemetry: enabled && liveTelemetry?.symbol === chartSymbol && liveTelemetry.timeframe === chartTimeframe ? liveTelemetry : null,
+    structureTelemetry: enabled && structureTelemetry?.symbol === chartSymbol &&
+      structureTelemetry.timeframe === resolveStructureTimeframe(chartTimeframe) ? structureTelemetry : null,
     chartLoading,
     chartError,
     autoPoll,

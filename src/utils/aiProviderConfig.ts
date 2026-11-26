@@ -162,8 +162,8 @@ export function readCodexOauthCredential(value: unknown): CodexOauthCredential |
   const accessToken = normalizeHeaderSecret(source.accessToken ?? source.access_token);
   const idMetadata = decodeCodexJwtMetadata(source.id_token);
   const accessMetadata = decodeCodexJwtMetadata(accessToken);
-  const chatgptAccountId = accessMetadata.chatgptAccountId
-    ?? normalizeCodexAccountId(source.chatgptAccountId ?? source.account_id) ?? idMetadata.chatgptAccountId;
+  const chatgptAccountId = accessMetadata.chatgptAccountId ?? idMetadata.chatgptAccountId
+    ?? normalizeCodexAccountId(source.chatgptAccountId ?? source.account_id);
   if (!accessToken || isOpenAiApiKey(accessToken) || !isByokKeyFormat('codex_oauth', accessToken, chatgptAccountId)) return undefined;
   const refreshToken = normalizeHeaderSecret(source.refreshToken ?? source.refresh_token);
   const expiry = source.expiresAt;

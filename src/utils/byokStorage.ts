@@ -138,7 +138,10 @@ export async function refreshCodexOauthIfNeeded(uid: Scope): Promise<ByokCredent
     try {
       const response = await fetch('/api/ai/codex-oauth/refresh', {
         method: 'POST',
-        headers: { [AI_HEADERS.key]: codex.refreshToken },
+        headers: {
+          [AI_HEADERS.key]: codex.refreshToken,
+          ...(codex.chatgptAccountId ? { [AI_HEADERS.account]: codex.chatgptAccountId } : {}),
+        },
         signal: AbortSignal.timeout(15_000),
         redirect: 'error',
         cache: 'no-store',
@@ -165,8 +168,11 @@ export async function refreshCodexOauthIfNeeded(uid: Scope): Promise<ByokCredent
   }
 
   // Refresh tokens can rotate, so tabs on the same browser use one refresh at a time.
-  const refreshPromise = (globalThis.navigator?.locks
-    ? navigator.locks.request(`${scope}:codex-refresh`, refresh) : refresh())
+  const refreshPromise = Promise.resolve().then(() => {
+    const locks = globalThis.navigator?.locks;
+    return locks ? locks.request(`${scope}:codex-refresh`, { signal: AbortSignal.timeout(16_000) }, refresh) : refresh();
+  })
+    .catch(() => loadByokCredentials(uid))
     .finally(() => refreshes.delete(scope));
   refreshes.set(scope, refreshPromise);
   return refreshPromise;

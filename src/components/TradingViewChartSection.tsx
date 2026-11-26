@@ -57,7 +57,8 @@ function ChartTelemetryTape({ timeframe, lang }: { timeframe: string | null; lan
   const feed = liveTelemetry?.timeframe === timeframe ? liveTelemetry : null;
   const bias = feed?.trendBias;
   const source = !timeframe ? t('M1 indicators unavailable', 'ไม่มีข้อมูลตัวชี้วัด M1')
-    : chartError ? t('Feed unavailable', 'แหล่งข้อมูลไม่พร้อมใช้งาน')
+    : feed && (chartError || feed.staleCache) ? t('Showing the last available feed', 'แสดงข้อมูลล่าสุดที่มี')
+      : chartError ? t('Feed unavailable', 'แหล่งข้อมูลไม่พร้อมใช้งาน')
     : feed ? feed.source : t('Loading indicators…', 'กำลังโหลดตัวชี้วัด…');
   return (
     <div className="chart-tape">
@@ -92,12 +93,14 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
   titleBadge,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [embedError, setEmbedError] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     container.innerHTML = '';
+    setEmbedError(false);
 
     const widgetWrap = document.createElement('div');
     widgetWrap.className = 'tradingview-widget-container';
@@ -116,6 +119,7 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
     script.type = 'text/javascript';
     script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
     script.async = true;
+    script.onerror = () => setEmbedError(true);
     script.innerHTML = JSON.stringify({
       autosize: true,
       symbol,
@@ -142,9 +146,8 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
     container.appendChild(widgetWrap);
 
     return () => {
-      if (container) {
-        container.innerHTML = '';
-      }
+      script.onerror = null;
+      widgetWrap.remove();
     };
   }, [symbol, interval, theme, lang]);
 
@@ -159,6 +162,7 @@ const SingleTradingViewEmbed: React.FC<SingleTradingViewEmbedProps> = ({
         </div>
       )}
       <div ref={containerRef} className="tv-embed-canvas" />
+      {embedError && <p className="tv-embed-error" role="status">{deskText(lang, 'TradingView could not load.', 'ไม่สามารถโหลด TradingView ได้')}</p>}
     </div>
   );
 };
@@ -419,7 +423,6 @@ export const TradingViewChartSection: React.FC<TradingViewChartSectionProps> = (
         </div>
       </div>
       <AiRiskSupervisionCard
-        key={timeframe ?? '1m'}
         lang={lang}
         initialTimeframe={timeframe ?? '5m'}
         portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
