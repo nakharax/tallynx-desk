@@ -361,12 +361,12 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
   );
 }
 
-export function AiAndDataKeysDialogButton({ uid, lang }: CardProps) {
+export function AiAndDataKeysDialogButton({ uid, lang, buttonLabel }: CardProps & { buttonLabel?: string }) {
   const [open, setOpen] = useState(false);
   const label = deskText(lang, 'API Keys / Codex OAuth', 'คีย์ API / Codex OAuth');
   return <>
     <button type="button" className="btn xs" onClick={() => setOpen(true)}>
-      <KeyRound size={13} aria-hidden="true" /> {label}
+      <KeyRound size={13} aria-hidden="true" /> {buttonLabel ?? label}
     </button>
     {open && <DeskDialog label={label} onClose={() => setOpen(false)} panelClassName="byok-dialog">
       <button type="button" className="btn xs byok-close" aria-label={deskText(lang, 'Close', 'ปิด')} onClick={() => setOpen(false)}>

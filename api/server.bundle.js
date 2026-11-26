@@ -3363,6 +3363,567 @@ function createByokRouter(deps) {
   return router;
 }
 
+// server/market/comexBridge.ts
+import { Router as Router2 } from "express";
+
+// src/utils/comexBridgeEngine.ts
+import Decimal3 from "decimal.js";
+var COMEX_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"];
+function computeSmoothedBasis(gcPrices, xauPrices, alpha = 0.25) {
+  const weight = new Decimal3(Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.25);
+  const size = Math.min(gcPrices.length, xauPrices.length);
+  let raw = new Decimal3(0);
+  let ema2 = raw;
+  let spot = raw;
+  let basisSampleCount = 0;
+  for (let i = 0; i < size; i++) {
+    const gc = gcPrices[gcPrices.length - size + i];
+    const xau = xauPrices[xauPrices.length - size + i];
+    if (!Number.isFinite(gc) || !Number.isFinite(xau) || gc <= 0 || xau <= 0) continue;
+    spot = new Decimal3(xau);
+    raw = new Decimal3(gc).minus(spot);
+    ema2 = basisSampleCount === 0 ? raw : ema2.plus(raw.minus(ema2).times(weight));
+    basisSampleCount++;
+  }
+  return {
+    rawBasis: raw.toNumber(),
+    smoothedBasis: ema2.toNumber(),
+    basisPct: spot.isZero() ? 0 : raw.div(spot).times(100).toNumber(),
+    basisSampleCount
+  };
+}
+function computeVolumeProfile(candles, { bins = 24, valueAreaPct = 0.7, basisOffset = 0 } = {}) {
+  const offset = new Decimal3(Number.isFinite(basisOffset) ? basisOffset : 0);
+  const valid = candles.filter(({ low, high }) => Number.isFinite(low) && Number.isFinite(high) && high >= low);
+  let min = Infinity;
+  let max = -Infinity;
+  for (const candle of valid) {
+    min = Math.min(min, candle.low);
+    max = Math.max(max, candle.high);
+  }
+  const count = !valid.length ? 0 : min === max ? 1 : Math.max(1, Math.min(48, Number.isFinite(bins) ? Math.trunc(bins) : 24));
+  const bottom = new Decimal3(count ? min : 0);
+  const top = new Decimal3(count ? max : 0);
+  const width = count ? top.minus(bottom).div(count) : new Decimal3(0);
+  const edges = Array.from({ length: count + 1 }, (_, index) => index === count ? top : bottom.plus(width.times(index)));
+  const upperEdges = edges.slice(1);
+  const volumes = Array.from({ length: count }, () => new Decimal3(0));
+  let total = new Decimal3(0);
+  for (const candle of valid) {
+    const volume = candle.volume ?? 0;
+    if (!Number.isFinite(volume) || volume <= 0) continue;
+    const amount = new Decimal3(volume);
+    total = total.plus(amount);
+    if (width.isZero()) {
+      volumes[0] = volumes[0].plus(amount);
+      continue;
+    }
+    const low = new Decimal3(candle.low);
+    const high = new Decimal3(candle.high);
+    const first = low.eq(top) ? count - 1 : upperEdges.findIndex((edge) => edge.gt(low));
+    if (low.eq(high)) {
+      volumes[first] = volumes[first].plus(amount);
+      continue;
+    }
+    const last = upperEdges.findIndex((edge) => edge.gte(high));
+    const range = high.minus(low);
+    let allocated = new Decimal3(0);
+    for (let index = first; index <= last; index++) {
+      const cumulative = index === last ? amount : upperEdges[index].minus(low).div(range).times(amount);
+      volumes[index] = volumes[index].plus(cumulative.minus(allocated));
+      allocated = cumulative;
+    }
+  }
+  let poc = -1;
+  let lower = -1;
+  let upper = -1;
+  const hvn = /* @__PURE__ */ new Set();
+  if (total.gt(0)) {
+    poc = volumes.reduce((best, volume, index) => volume.gt(volumes[best]) ? index : best, 0);
+    lower = upper = poc;
+    let cumulative = volumes[poc];
+    const fraction = Number.isFinite(valueAreaPct) ? Math.max(0, Math.min(1, valueAreaPct)) : 0.7;
+    const target = total.times(fraction);
+    while (cumulative.lt(target) && (lower > 0 || upper < count - 1)) {
+      if (upper === count - 1 || lower > 0 && volumes[lower - 1].gte(volumes[upper + 1])) {
+        cumulative = cumulative.plus(volumes[--lower]);
+      } else {
+        cumulative = cumulative.plus(volumes[++upper]);
+      }
+    }
+    const peaks = volumes.map((volume, index) => ({ volume, index })).filter(({ volume, index }) => index !== poc && volume.gt(volumes[index - 1] ?? 0) && volume.gte(volumes[index + 1] ?? 0)).sort((a, b) => b.volume.cmp(a.volume) || a.index - b.index);
+    for (const { index } of peaks.slice(0, 3)) hvn.add(index);
+  }
+  const profileBins = volumes.map((volume, index) => {
+    const priceLow = edges[index];
+    const priceHigh = edges[index + 1];
+    const mid = priceLow.plus(priceHigh).div(2);
+    return {
+      priceLow: priceLow.toNumber(),
+      priceHigh: priceHigh.toNumber(),
+      midPrice: mid.toNumber(),
+      mappedXauPrice: mid.minus(offset).toNumber(),
+      volume: volume.toNumber(),
+      volumePct: total.isZero() ? 0 : volume.div(total).times(100).toNumber(),
+      isPoc: index === poc,
+      isInValueArea: index >= lower && index <= upper,
+      isHvn: hvn.has(index)
+    };
+  });
+  return {
+    bins: profileBins,
+    pocGc: profileBins[poc]?.midPrice ?? null,
+    vahGc: upper < 0 ? null : edges[upper + 1].toNumber(),
+    valGc: lower < 0 ? null : edges[lower].toNumber(),
+    pocXau: profileBins[poc]?.mappedXauPrice ?? null,
+    vahXau: upper < 0 ? null : edges[upper + 1].minus(offset).toNumber(),
+    valXau: lower < 0 ? null : edges[lower].minus(offset).toNumber(),
+    hvnZones: Array.from(hvn, (index) => profileBins[index]),
+    totalVolume: total.toNumber(),
+    hasVolumeData: total.gt(0)
+  };
+}
+function buildComexBridgeSnapshot(input) {
+  const basis = computeSmoothedBasis(input.gcPrices, input.xauPrices);
+  const lastBar = new Date(input.candles.at(-1)?.ts ?? NaN);
+  const gcPrice = input.gcPrices.at(-1);
+  const xauSpotPrice = input.xauPrices.at(-1);
+  const data = {
+    ...basis,
+    timeframe: input.timeframe,
+    fetchedAt: input.fetchedAt,
+    gcCandleAt: Number.isFinite(lastBar.getTime()) ? lastBar.toISOString() : null,
+    gcPrice: gcPrice !== void 0 && Number.isFinite(gcPrice) && gcPrice > 0 ? gcPrice : null,
+    xauSpotPrice: xauSpotPrice !== void 0 && Number.isFinite(xauSpotPrice) && xauSpotPrice > 0 ? xauSpotPrice : null,
+    profile: computeVolumeProfile(input.candles, { bins: input.bins, basisOffset: basis.smoothedBasis }),
+    dataSource: input.dataSource,
+    databentoUsed: input.databentoUsed,
+    databentoStatus: input.databentoStatus ?? (input.databentoUsed ? "used" : "public"),
+    databentoNote: input.databentoNote ?? null
+  };
+  return {
+    ...data,
+    exports: {
+      mql5: generateMql5ReadOnlyIndicator(data),
+      json: generateBridgeJsonExport(data),
+      pineScript: generatePineScriptV5Indicator(data),
+      python: generatePythonDatabentoScript(data)
+    }
+  };
+}
+function mappedLevels(profile) {
+  const levels = [
+    { name: "POC", price: profile.pocXau },
+    { name: "VAH", price: profile.vahXau },
+    { name: "VAL", price: profile.valXau },
+    ...profile.hvnZones.map((zone, index) => ({ name: `HVN ${index + 1}`, price: zone.mappedXauPrice }))
+  ];
+  return levels.flatMap(({ name, price }) => price !== null && Number.isFinite(price) ? [{ name, price: new Decimal3(price).toDecimalPlaces(8).toFixed() }] : []);
+}
+function generateMql5ReadOnlyIndicator(snapshot) {
+  const lines = mappedLevels(snapshot.profile).map(({ name, price }) => `   if (!AddLevel("${name}", ${price})) return(INIT_FAILED);`).join("\n");
+  return `// TallyNX COMEX-to-Spot snapshot. Read-only analytical levels for XAUUSD.
+#property indicator_chart_window
+#property indicator_plots 0
+
+string prefix;
+
+bool AddLevel(const string label, const double price)
+{
+   string name = prefix + label;
+   if (!ObjectCreate(0, name, OBJ_HLINE, 0, 0, price)) return(false);
+   ObjectSetString(0, name, OBJPROP_TEXT, label);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, label == "POC" ? clrGold : clrSteelBlue);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   return(true);
+}
+
+int OnInit()
+{
+   if (StringFind(_Symbol, "XAUUSD") < 0) return(INIT_FAILED);
+   prefix = "TallyNX_COMEX_" + IntegerToString(GetMicrosecondCount()) + "_";
+${lines ? lines + "\n" : ""}   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   if (prefix != "") ObjectsDeleteAll(0, prefix, 0, OBJ_HLINE);
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const int begin, const double &price[])
+{
+   return(rates_total);
+}
+`;
+}
+function generateBridgeJsonExport(snapshot) {
+  const {
+    timeframe,
+    fetchedAt,
+    gcCandleAt,
+    gcPrice,
+    xauSpotPrice,
+    rawBasis,
+    smoothedBasis,
+    basisPct,
+    basisSampleCount,
+    profile,
+    dataSource,
+    databentoUsed,
+    databentoStatus,
+    databentoNote
+  } = snapshot;
+  return JSON.stringify({
+    readOnly: true,
+    kind: "comex-to-spot-analytical-levels",
+    sourceInstrument: "COMEX GC",
+    mappedInstrument: "XAU/USD",
+    timeframe,
+    fetchedAt,
+    gcCandleAt,
+    gcPrice,
+    xauSpotPrice,
+    rawBasis,
+    smoothedBasis,
+    basisPct,
+    basisSampleCount,
+    profile,
+    dataSource,
+    databentoUsed,
+    databentoStatus,
+    databentoNote
+  }, null, 2);
+}
+function generatePineScriptV5Indicator(snapshot) {
+  const lines = mappedLevels(snapshot.profile).map(({ name, price }) => `hline(${price}, title="${name}", color=color.${name === "POC" ? "orange" : "blue"})`);
+  return `//@version=5
+indicator("TallyNX COMEX-to-Spot \xB7 Read-only", overlay=true)
+// Static analytical levels mapped to XAUUSD at the time of the snapshot.
+if not str.contains(str.upper(syminfo.ticker), "XAUUSD")
+    runtime.error("Use an XAUUSD chart")
+${lines.length ? lines.join("\n") : 'plot(float(na), title="No volume data")'}
+`;
+}
+function generatePythonDatabentoScript(snapshot) {
+  return `# Read-only Databento GC bars mapped using the fixed snapshot basis.
+# Run without arguments for historical bars, or with --live for streaming bars.
+import argparse
+import os
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import databento as db
+
+DATASET = "GLBX.MDP3"
+SYMBOL = "GC.c.0"
+SCHEMA = "ohlcv-1m"
+BASIS = Decimal("${new Decimal3(snapshot.smoothedBasis).toFixed()}")
+
+
+def show_bar(record):
+    if isinstance(record, db.OHLCVMsg):
+        gc_close = Decimal(record.close).scaleb(-9)
+        print(record.ts_event, gc_close, gc_close - BASIS, record.volume)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read-only GC-to-XAU analytical mapping")
+    parser.add_argument("--live", action="store_true")
+    args = parser.parse_args()
+    key = os.environ["DATABENTO_API_KEY"]
+    print("timestamp_ns gc_close mapped_xau_close volume", flush=True)
+
+    if args.live:
+        live = db.Live(key=key)
+        live.subscribe(dataset=DATASET, symbols=[SYMBOL], stype_in="continuous", schema=SCHEMA)
+        live.add_callback(show_bar)
+        live.start()
+        try:
+            live.block_for_close()
+        except KeyboardInterrupt:
+            live.stop()
+        return
+
+    historical = db.Historical(key=key)
+    available = historical.metadata.get_dataset_range(dataset=DATASET)
+    end = datetime.fromisoformat(available["schema"][SCHEMA]["end"].replace("Z", "+00:00"))
+    end = min(end, datetime.now(timezone.utc))
+    bars = historical.timeseries.get_range(
+        dataset=DATASET, symbols=[SYMBOL], stype_in="continuous", schema=SCHEMA,
+        start=end - timedelta(days=1), end=end,
+    )
+    bars.replay(callback=show_bar)
+
+
+if __name__ == "__main__":
+    main()
+`;
+}
+
+// server/market/comexBridge.ts
+var MINUTE = 6e4;
+var HOUR = 60 * MINUTE;
+var DAY = 24 * HOUR;
+var PUBLIC_TTL = 15e3;
+var DATABENTO_BASE = "https://hist.databento.com/v0/";
+var DATASET = "GLBX.MDP3";
+var TIMEFRAME_CONFIG = {
+  "5m": { interval: "5m", range: "5d", ms: 5 * MINUTE, schema: "ohlcv-1m", sourceMs: MINUTE, days: 5 },
+  "15m": { interval: "15m", range: "5d", ms: 15 * MINUTE, schema: "ohlcv-1m", sourceMs: MINUTE, days: 7 },
+  "1h": { interval: "60m", range: "1mo", ms: HOUR, schema: "ohlcv-1h", sourceMs: HOUR, days: 30 },
+  "4h": { interval: "60m", range: "3mo", ms: 4 * HOUR, schema: "ohlcv-1h", sourceMs: HOUR, days: 90 },
+  "1d": { interval: "1d", range: "6mo", ms: DAY, schema: "ohlcv-1d", sourceMs: DAY, days: 180 }
+};
+var DATABENTO_NOTES = {
+  public: null,
+  used: "GC bars are from your Databento historical feed. The spot quote is fetched separately.",
+  "invalid-key": "The Databento key format is invalid. Using public Yahoo Finance GC=F bars.",
+  "access-denied": "Databento denied access to GC history. Using public Yahoo Finance GC=F bars.",
+  empty: "Databento returned no usable GC bars. Using public Yahoo Finance GC=F bars.",
+  timeout: "The Databento request timed out. Using public Yahoo Finance GC=F bars.",
+  unavailable: "Databento is currently unavailable. Using public Yahoo Finance GC=F bars."
+};
+function createPublicCache(load) {
+  const entries = /* @__PURE__ */ new Map();
+  const pending = /* @__PURE__ */ new Map();
+  return (key) => {
+    const entry = entries.get(key);
+    if (entry && Date.now() < entry.expires) return Promise.resolve(entry.value);
+    const inFlight = pending.get(key);
+    if (inFlight) return inFlight;
+    const request = load(key).then((value) => {
+      if (value !== null) entries.set(key, { value, expires: Date.now() + PUBLIC_TTL });
+      return value;
+    }).finally(() => pending.delete(key));
+    pending.set(key, request);
+    return request;
+  };
+}
+function positiveNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+function makeCandle(ts, open, high, low, close, volume) {
+  if (!positiveNumber(ts) || ts > 864e13 || !positiveNumber(open) || !positiveNumber(high) || !positiveNumber(low) || !positiveNumber(close) || low > Math.min(open, close) || high < Math.max(open, close)) {
+    return null;
+  }
+  return {
+    ts,
+    timeLabel: new Date(ts).toISOString(),
+    open,
+    high,
+    low,
+    close,
+    volume: positiveNumber(volume) ? volume : 0
+  };
+}
+function bucketStart(ts, ms) {
+  return Math.floor(ts / ms) * ms;
+}
+function aggregateBars(candles, ms) {
+  const buckets = /* @__PURE__ */ new Map();
+  for (const candle of candles) {
+    const ts = bucketStart(candle.ts, ms);
+    const prior = buckets.get(ts);
+    if (!prior) {
+      buckets.set(ts, { ...candle, ts, timeLabel: new Date(ts).toISOString() });
+      continue;
+    }
+    prior.high = Math.max(prior.high, candle.high);
+    prior.low = Math.min(prior.low, candle.low);
+    prior.close = candle.close;
+    prior.volume = (prior.volume ?? 0) + (candle.volume ?? 0);
+  }
+  return [...buckets.values()];
+}
+function array(value) {
+  return Array.isArray(value) ? value : [];
+}
+async function loadYahooBars(symbol, timeframe) {
+  try {
+    const { interval, range, ms } = TIMEFRAME_CONFIG[timeframe];
+    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+    url.search = new URLSearchParams({ interval, range }).toString();
+    const response = await fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0 (TallyNXDesk/3.2)" },
+      signal: AbortSignal.timeout(symbol === "GC=F" ? 7e3 : 4e3)
+    });
+    if (!response.ok) return null;
+    const payload = asRecord2(await response.json());
+    const result = asRecord2(array(asRecord2(payload?.chart)?.result)[0]);
+    const quote = asRecord2(array(asRecord2(result?.indicators)?.quote)[0]);
+    const timestamps = array(result?.timestamp);
+    const open = array(quote?.open);
+    const high = array(quote?.high);
+    const low = array(quote?.low);
+    const close = array(quote?.close);
+    const volume = array(quote?.volume);
+    const candles = [];
+    timestamps.forEach((timestamp, index) => {
+      if (!positiveNumber(timestamp)) return;
+      const candle = makeCandle(timestamp * 1e3, open[index], high[index], low[index], close[index], volume[index]);
+      if (candle) candles.push(candle);
+    });
+    if (!candles.length) return null;
+    candles.sort((a, b) => a.ts - b.ts);
+    return timeframe === "4h" ? aggregateBars(candles, ms) : candles;
+  } catch {
+    return null;
+  }
+}
+function upstreamStatus(status) {
+  return [401, 402, 403].includes(status) ? "access-denied" : "unavailable";
+}
+function decimalField(value) {
+  if (typeof value === "number") return value;
+  return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+}
+async function loadDatabentoBars(key, timeframe) {
+  const signal = AbortSignal.timeout(5e3);
+  const headers = { Authorization: `Basic ${Buffer.from(`${key}:`).toString("base64")}` };
+  const { schema, sourceMs, days, ms } = TIMEFRAME_CONFIG[timeframe];
+  try {
+    const metadata = await fetch(`${DATABENTO_BASE}metadata.get_dataset_range?dataset=${DATASET}`, {
+      headers,
+      signal,
+      cache: "no-store",
+      redirect: "error"
+    });
+    if (!metadata.ok) {
+      await metadata.body?.cancel();
+      return { status: upstreamStatus(metadata.status), candles: null };
+    }
+    const range = asRecord2(await metadata.json());
+    const schemaRange = asRecord2(asRecord2(range?.schema)?.[schema]);
+    const availableFrom = schemaRange?.start ?? range?.start;
+    const availableTo = schemaRange?.end ?? range?.end;
+    if (typeof availableFrom !== "string" || typeof availableTo !== "string") return { status: "empty", candles: null };
+    const end = bucketStart(Math.min(Date.parse(availableTo), Date.now()), sourceMs);
+    const start = Math.max(Date.parse(availableFrom), end - days * DAY);
+    if (!Number.isFinite(start) || !(start < end)) return { status: "empty", candles: null };
+    const response = await fetch(`${DATABENTO_BASE}timeseries.get_range`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({
+        dataset: DATASET,
+        symbols: "GC.c.0",
+        stype_in: "continuous",
+        schema,
+        start: new Date(start).toISOString(),
+        end: new Date(end).toISOString(),
+        encoding: "json",
+        compression: "none",
+        pretty_px: "true",
+        pretty_ts: "true"
+      }),
+      signal,
+      cache: "no-store",
+      redirect: "error"
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { status: upstreamStatus(response.status), candles: null };
+    }
+    const candles = [];
+    for (const line of (await response.text()).split("\n")) {
+      if (!line.trim()) continue;
+      const row = asRecord2(JSON.parse(line));
+      const timestamp = asRecord2(row?.hd)?.ts_event;
+      const ts = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+      if (!(ts >= start && ts < end)) continue;
+      const candle = makeCandle(
+        ts,
+        decimalField(row?.open),
+        decimalField(row?.high),
+        decimalField(row?.low),
+        decimalField(row?.close),
+        decimalField(row?.volume)
+      );
+      if (candle) candles.push(candle);
+    }
+    if (!candles.length) return { status: "empty", candles: null };
+    candles.sort((a, b) => a.ts - b.ts);
+    return { status: "used", candles: sourceMs === ms ? candles : aggregateBars(candles, ms) };
+  } catch {
+    return { status: signal.aborted ? "timeout" : "unavailable", candles: null };
+  }
+}
+function createComexBridgeRouter({ fetchLiveSpotQuote }) {
+  const router = Router2();
+  const getPublicGc = createPublicCache((timeframe) => loadYahooBars("GC=F", timeframe));
+  const getSpotHistory = createPublicCache((timeframe) => loadYahooBars("XAUUSD=X", timeframe));
+  const getSpotQuote = createPublicCache(async (symbol) => {
+    try {
+      const quote = await fetchLiveSpotQuote(symbol);
+      return positiveNumber(quote?.price) ? quote.price : null;
+    } catch {
+      return null;
+    }
+  });
+  router.get("/bridge/comex-gold", async (req, res) => {
+    const header = req.get(AI_HEADERS.databento);
+    res.set("Cache-Control", header === void 0 ? "no-store" : "private, no-store");
+    const timeframe = COMEX_TIMEFRAMES.find((tf) => tf === (req.query.timeframe ?? "15m"));
+    if (!timeframe) {
+      res.status(400).json({ error: "Unsupported COMEX bridge timeframe." });
+      return;
+    }
+    const binsQuery = typeof req.query.bins === "string" ? Number(req.query.bins) : NaN;
+    const bins = Number.isFinite(binsQuery) ? Math.min(48, Math.max(10, Math.trunc(binsQuery))) : 24;
+    const key = buildDatabentoRequestHeaders(header)[AI_HEADERS.databento];
+    try {
+      const futures = async () => {
+        const databento = key ? await loadDatabentoBars(key, timeframe) : null;
+        return {
+          status: databento?.status ?? (header === void 0 ? "public" : "invalid-key"),
+          candles: databento?.candles ?? await getPublicGc(timeframe)
+        };
+      };
+      const [spotPrice, spotHistory, { status, candles }] = await Promise.all([
+        getSpotQuote("XAUUSD"),
+        getSpotHistory(timeframe),
+        futures()
+      ]);
+      const last = candles?.at(-1);
+      if (!candles || !last || spotPrice === null) {
+        res.status(502).json({ error: "COMEX futures or the XAU/USD spot quote is unavailable." });
+        return;
+      }
+      const { ms } = TIMEFRAME_CONFIG[timeframe];
+      const historicalSpot = new Map(spotHistory?.map((bar) => [bucketStart(bar.ts, ms), bar.close]));
+      const gcPrices = [];
+      const xauPrices = [];
+      const latestBucket = bucketStart(last.ts, ms);
+      for (const candle of candles) {
+        const bucket = bucketStart(candle.ts, ms);
+        if (bucket >= latestBucket) break;
+        const spotClose = historicalSpot.get(bucket);
+        if (spotClose === void 0) continue;
+        gcPrices.push(candle.close);
+        xauPrices.push(spotClose);
+      }
+      gcPrices.push(last.close);
+      xauPrices.push(spotPrice);
+      const databentoUsed = status === "used";
+      res.json(buildComexBridgeSnapshot({
+        timeframe,
+        bins,
+        candles,
+        gcPrices,
+        xauPrices,
+        fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        databentoUsed,
+        databentoStatus: status,
+        databentoNote: DATABENTO_NOTES[status],
+        dataSource: databentoUsed ? "Databento GLBX.MDP3 (BYOK) + Live XAU Spot" : "Yahoo Finance GC=F + Live XAU Spot"
+      }));
+    } catch {
+      res.status(502).json({ error: "COMEX bridge data is currently unavailable." });
+    }
+  });
+  return router;
+}
+
 // server/ai/platformPrivilege.ts
 var caches = /* @__PURE__ */ new WeakMap();
 function listed(value, list, ignoreCase = false) {
@@ -6270,6 +6831,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
     env: process.env
   }));
   app2.use("/api", createRiskSuperviseRouter({ resolveDeskAiAccess, checkDistributedRateLimit }));
+  app2.use("/api", createComexBridgeRouter({ fetchLiveSpotQuote }));
   app2.all("/api/*", (_req, res) => {
     res.status(404).json({ ok: false, error: "API route not found" });
   });
