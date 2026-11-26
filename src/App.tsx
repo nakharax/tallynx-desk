@@ -4824,6 +4824,7 @@ export default function App() {
             {/* ===================================================================== */}
             {activeNavSection === 'sec-settings' && (
               <SettingsPageSection
+                firebaseUid={currentUser?.uid ?? null}
                 lang={deskLang}
                 deskTheme={deskTheme}
                 roomMode={deskRoomMode}
@@ -4903,7 +4904,6 @@ export default function App() {
                 workspaceState={state}
                 pageSnapshot={activePageSnapshot}
                 isOnline={isOnline}
-                hasProAccess={isProOrHigher(currentUser, entitlement, isClaimAdmin)}
                 alerts={behavioralAlerts}
                 analytics={realtimeAnalytics}
                 currentUserUid={currentUser?.uid ?? null}
@@ -4916,17 +4916,6 @@ export default function App() {
                 pendingCoachPrompt={coachPendingPrompt}
                 onClearPendingCoachPrompt={() => setCoachPendingPrompt(null)}
                 focusCoachTick={rightDockFocusTick}
-                onOpenLicenseModal={() => {
-                  setShowAccountsDrawer(false);
-                  commitWorkspaceChange((prev) => ({
-                    ...prev,
-                    showLicenseModal: true,
-                    showHelpGuide: false,
-                    showDbManager: false,
-                    showAddPortForm: false,
-                    editingPortId: null,
-                  }));
-                }}
                 onUpdateCoachMessages={(chatMessages) =>
                   commitWorkspaceChange(
                     (prev) => ({ ...prev, chatMessages }),

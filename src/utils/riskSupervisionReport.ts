@@ -28,7 +28,8 @@ interface ReportContent {
 }
 
 export const RISK_SUPERVISION_FALLBACK_REASONS = [
-  'AUTH_REQUIRED', 'GEMINI_API_KEY_MISSING', 'GEMINI_UNAVAILABLE', 'GEMINI_REPORT_INVALID',
+  'AUTH_REQUIRED', 'BYOK_REQUIRED', 'GEMINI_API_KEY_MISSING', 'GEMINI_UNAVAILABLE', 'GEMINI_REPORT_INVALID',
+  'AI_PROVIDER_UNAVAILABLE', 'AI_REPORT_INVALID', 'INVALID_AI_MODEL',
   'RATE_LIMITED', 'REQUEST_UNAVAILABLE',
 ] as const;
 export type RiskSupervisionFallbackReason = (typeof RISK_SUPERVISION_FALLBACK_REASONS)[number];
@@ -38,7 +39,7 @@ export interface AiRiskSupervisionReport extends ReportContent {
   timeframe: string;
   lang: DeskLanguage;
   model: string | null;
-  source: 'deterministic' | 'gemini';
+  source: 'deterministic' | 'gemini' | 'openrouter' | 'codex_oauth';
   generatedAt: string;
   fallbackUsed: boolean;
   fallbackReason?: RiskSupervisionFallbackReason;
@@ -268,12 +269,13 @@ export function sanitizeAiRiskSupervisionReport(
   input: unknown,
   deterministicReport: AiRiskSupervisionReport,
   model: string,
+  source: Exclude<AiRiskSupervisionReport['source'], 'deterministic'> = 'gemini',
 ): AiRiskSupervisionReport | null {
   const parsed = asRecord(input);
   if (!parsed || containsForbiddenField(parsed)) return null;
   const wording = reportWording(deterministicReport);
   const { fallbackReason: _fallbackReason, ...base } = deterministicReport;
-  const clean: AiRiskSupervisionReport = { ...base, model, source: 'gemini', fallbackUsed: false };
+  const clean: AiRiskSupervisionReport = { ...base, model, source, fallbackUsed: false };
   for (const key of SCALAR_FIELDS) {
     const value = parsed[key];
     if (typeof value !== 'string' || !wording[key].includes(value)) return null;

@@ -37,7 +37,6 @@ interface RightDockPanelProps {
   workspaceState: GhrWorkspaceState;
   pageSnapshot: DeskPageSnapshot;
   isOnline: boolean;
-  hasProAccess: boolean;
   alerts: GuardrailAlert[];
   analytics: RealtimeAnalyticsSummary;
   currentUserUid?: string | null;
@@ -50,7 +49,6 @@ interface RightDockPanelProps {
   pendingCoachPrompt?: string | null;
   onClearPendingCoachPrompt?: () => void;
   focusCoachTick?: number;
-  onOpenLicenseModal: () => void;
   onUpdateCoachMessages: (messages: ChatMessage[]) => void;
   onUpdateCoachModel: (model: ChatModelId) => void;
   onResetCoachChat: () => void;
@@ -106,7 +104,6 @@ export const RightDockPanel: React.FC<RightDockPanelProps> = ({
   workspaceState,
   pageSnapshot,
   isOnline,
-  hasProAccess,
   alerts,
   analytics,
   currentUserUid,
@@ -119,7 +116,6 @@ export const RightDockPanel: React.FC<RightDockPanelProps> = ({
   pendingCoachPrompt,
   onClearPendingCoachPrompt,
   focusCoachTick,
-  onOpenLicenseModal,
   onUpdateCoachMessages,
   onUpdateCoachModel,
   onResetCoachChat,
@@ -502,8 +498,6 @@ export const RightDockPanel: React.FC<RightDockPanelProps> = ({
               state={workspaceState}
               pageSnapshot={pageSnapshot}
               isOnline={isOnline}
-              hasProAccess={hasProAccess}
-              onOpenLicenseModal={onOpenLicenseModal}
               onUpdateMessages={onUpdateCoachMessages}
               onUpdateModel={onUpdateCoachModel}
               onResetChat={onResetCoachChat}

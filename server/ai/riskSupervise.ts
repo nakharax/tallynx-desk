@@ -1,10 +1,4 @@
-import type { GoogleGenAI } from '@google/genai';
-import express, { type Request, type Response } from 'express';
-import {
-  executeWithModelFailover,
-  isOpenWeightGemmaModel,
-  planModelRoute,
-} from '../../src/utils/geminiOrchestrator.js';
+import express, { type Request } from 'express';
 import { computeQuantSupervisionSnapshot } from '../../src/utils/quantSupervisionEngine.js';
 import {
   buildDeterministicSupervisionReport,
@@ -13,17 +7,20 @@ import {
   sanitizeAiRiskSupervisionReport,
   type RiskSupervisionFallbackReason,
 } from '../../src/utils/riskSupervisionReport.js';
+import {
+  BYOK_REQUIRED_MESSAGE, generateStructuredRiskSupervision, isAiCredentialError, isGoogleConnection,
+  type createDeskAiAccessResolver,
+} from './byokProvider.js';
 
 interface RiskSuperviseDependencies {
-  verifyFirebaseBearerToken: (authorization: string | undefined) => Promise<{ uid: string } | null>;
+  resolveDeskAiAccess: ReturnType<typeof createDeskAiAccessResolver>;
   checkDistributedRateLimit: (key: string) => Promise<{ allowed: boolean; retryAfterSec: number }>;
-  getGenAIClient: () => Pick<GoogleGenAI, 'models'>;
-  isGeminiConfigured: () => boolean;
 }
 
 function parseModelJson(response: string): unknown {
   try {
-    return JSON.parse(response);
+    const text = response.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
+    return JSON.parse(text);
   } catch {
     return null;
   }
@@ -31,7 +28,7 @@ function parseModelJson(response: string): unknown {
 
 export function createRiskSuperviseRouter(deps: RiskSuperviseDependencies) {
   const router = express.Router();
-  router.post('/ai/risk-supervise', async (req: Request<object, unknown, unknown>, res: Response) => {
+  router.post('/ai/risk-supervise', async (req: Request<object, unknown, unknown>, res) => {
     res.set('Cache-Control', 'no-store');
     const request = parseRiskSuperviseRequest(req.body);
     if (!request) {
@@ -42,71 +39,58 @@ export function createRiskSuperviseRouter(deps: RiskSuperviseDependencies) {
     const { symbol, timeframe, candles, portfolio, lang } = request;
     const snapshot = computeQuantSupervisionSnapshot(symbol, timeframe, candles, portfolio);
     const deterministic = buildDeterministicSupervisionReport(snapshot, lang, new Date().toISOString());
-    function sendFallback(reason: RiskSupervisionFallbackReason, status = 200) {
+    function sendFallback(reason: RiskSupervisionFallbackReason, status = 200, error?: string) {
       const report = { ...deterministic, fallbackReason: reason };
       const payload = { fallbackUsed: true, fallbackReason: reason };
-      if (status === 401) {
-        res.status(status).json({ ok: false, code: 'AUTH_REQUIRED', ...payload, deterministicReport: report });
+      if (status === 403) {
+        res.status(status).json({ ok: false, code: reason, error, ...payload, deterministicReport: report });
       } else {
-        res.status(status).json({ ok: status === 200, ...payload, report });
+        res.status(status).json({ ok: status === 200, ...(status !== 200 ? { code: reason, error } : {}), ...payload, report });
       }
     }
 
-    const caller = await deps.verifyFirebaseBearerToken(req.headers.authorization).catch(() => null);
-    if (!caller) {
-      sendFallback('AUTH_REQUIRED', 401);
+    const access = await deps.resolveDeskAiAccess(req, 'text');
+    if (!access.ok) {
+      if (access.code === 'MISSING_API_KEY') sendFallback('GEMINI_API_KEY_MISSING');
+      else sendFallback(access.code, access.status, access.error);
       return;
     }
+    const { connection } = access;
+    const provider = isGoogleConnection(connection) ? 'gemini' : connection.provider;
     try {
-      if (!deps.isGeminiConfigured()) {
-        sendFallback('GEMINI_API_KEY_MISSING');
-        return;
-      }
-      const rate = await deps.checkDistributedRateLimit(`risk-supervise:${caller.uid}`);
+      const rate = await deps.checkDistributedRateLimit(`risk-supervise:${access.rateSubject}`);
       if (!rate.allowed) {
         res.set('Retry-After', String(rate.retryAfterSec));
         sendFallback('RATE_LIMITED', 429);
         return;
       }
-      const prompt = 'Select the most relevant approved analysis and review checklist for this observed market and account context.';
-      const routePlan = await planModelRoute({ prompt, hasRichContext: true });
-      const candidateModels = routePlan.candidateModels.filter(candidate => !isOpenWeightGemmaModel(candidate));
-      const ai = deps.getGenAIClient();
-      const schema = buildRiskSupervisionResponseSchema(deterministic);
-      const abortSignal = AbortSignal.timeout(12_000);
-      const result = await executeWithModelFailover({ ...routePlan, candidateModels }, async model => {
-        const response = await ai.models.generateContent({
-          model,
-          contents: JSON.stringify({
-            task: prompt,
-            language: lang === 'th' ? 'Thai' : 'English',
-            candleCount: snapshot.candleCount,
-            observedMarket: deterministic.deskBrief,
-            indicators: deterministic.quantitativeInsight,
-            feedVolume: snapshot.hasVolumeData,
-            support: deterministic.structuralSupportZones,
-            resistance: deterministic.structuralResistanceZones,
-            accountRisk: deterministic.portfolioRiskAudit,
-          }),
-          config: {
-            systemInstruction: 'Analytical & Risk Supervision Only. Describe observed market structure, data quality, and measured risk. Use only wording allowed by the schema. Include distinct checklist items and each reported structural band. Keep all content educational and descriptive.',
-            responseMimeType: 'application/json',
-            responseJsonSchema: schema,
-            temperature: 0,
-            maxOutputTokens: 3_000,
-            abortSignal,
-          },
-        });
-        return response.text ?? '';
-      });
-      const report = sanitizeAiRiskSupervisionReport(parseModelJson(result.reply), deterministic, result.model);
+      const result = await generateStructuredRiskSupervision(connection, {
+        prompt: JSON.stringify({
+          task: 'Select the most relevant approved analysis and review checklist for this observed market and account context.',
+          language: lang === 'th' ? 'Thai' : 'English',
+          candleCount: snapshot.candleCount,
+          observedMarket: deterministic.deskBrief,
+          indicators: deterministic.quantitativeInsight,
+          feedVolume: snapshot.hasVolumeData,
+          support: deterministic.structuralSupportZones,
+          resistance: deterministic.structuralResistanceZones,
+          accountRisk: deterministic.portfolioRiskAudit,
+        }),
+        system: 'Analytical & Risk Supervision Only. Describe observed market structure, data quality, and measured risk. Use only wording allowed by the schema. Include distinct checklist items and each reported structural band. Keep all content educational and descriptive.',
+        schema: buildRiskSupervisionResponseSchema(deterministic),
+      }, AbortSignal.timeout(28_000));
+      const report = sanitizeAiRiskSupervisionReport(parseModelJson(result.reply), deterministic, result.model, provider);
       if (!report) {
-        sendFallback('GEMINI_REPORT_INVALID');
+        sendFallback(provider === 'gemini' ? 'GEMINI_REPORT_INVALID' : 'AI_REPORT_INVALID');
         return;
       }
       res.json({ ok: true, fallbackUsed: false, report });
-    } catch {
-      sendFallback('GEMINI_UNAVAILABLE');
+    } catch (error) {
+      if (connection.provider !== 'platform' && isAiCredentialError(error)) {
+        sendFallback('BYOK_REQUIRED', 403, BYOK_REQUIRED_MESSAGE);
+      } else {
+        sendFallback(provider === 'gemini' ? 'GEMINI_UNAVAILABLE' : 'AI_PROVIDER_UNAVAILABLE');
+      }
     }
   });
   return router;

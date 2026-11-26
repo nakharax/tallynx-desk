@@ -5,7 +5,7 @@ import express from 'express';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { GoogleGenAI, GenerateContentResponse, Modality } from '@google/genai';
+import { type GenerateContentResponse, Modality } from '@google/genai';
 import {
   normalizeBridgePositionsToMt5Records,
   normalizeMt5TimeOffsetSetting,
@@ -15,6 +15,12 @@ import { createRemoteVpsPilotServices } from './server/fundednext/vpsClient.js';
 import { createFundedNextRouter } from './server/fundednext/router.js';
 import { createMallRouter, type MallSnapshotSource } from './server/mall/mallRouter.js';
 import { createRiskSuperviseRouter } from './server/ai/riskSupervise.js';
+import { createByokRouter } from './server/ai/byokRouter.js';
+import { resolvePlatformAiPrivilege, type PrivilegeDependencies, type VerifiedAiCaller } from './server/ai/platformPrivilege.js';
+import {
+  BYOK_REQUIRED_MESSAGE, aiUpstreamStatus, createDeskAiAccessResolver, createGoogleAiClient,
+  isAiCredentialError, streamOrGenerateCoachReply,
+} from './server/ai/byokProvider.js';
 import {
   calibrateCandlesToLiveSpot,
   computeLiveChartTelemetryFromCandles,
@@ -49,6 +55,7 @@ import {
   planModelRoute,
 } from './src/utils/geminiOrchestrator.js';
 import { stripMarkdownForSpeech } from './src/utils/liveAudioUtils.js';
+import { asRecord } from './src/utils/aiProviderConfig.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
@@ -71,6 +78,7 @@ function loadFirebaseClientConfig(): FirebaseClientConfig {
 
 const FIREBASE_CFG = loadFirebaseClientConfig();
 const rateBucket = new Map<string, number[]>();
+let nextRateBucketSweep = 0;
 const telemetryBus = new EventEmitter();
 telemetryBus.setMaxListeners(100);
 
@@ -80,6 +88,12 @@ export function checkChatRateLimit(
   maxRequests: number = RATE_MAX_REQUESTS
 ): { allowed: boolean; retryAfterSec: number } {
   const windowStart = nowMs - RATE_WINDOW_MS;
+  if (nowMs >= nextRateBucketSweep) {
+    for (const [bucket, timestamps] of rateBucket) {
+      if ((timestamps.at(-1) ?? 0) <= windowStart) rateBucket.delete(bucket);
+    }
+    nextRateBucketSweep = nowMs + RATE_WINDOW_MS;
+  }
   const timestamps = (rateBucket.get(key) || []).filter((ts) => ts > windowStart);
   if (timestamps.length >= maxRequests) {
     const oldest = timestamps[0] || nowMs;
@@ -92,12 +106,7 @@ export function checkChatRateLimit(
   return { allowed: true, retryAfterSec: 0 };
 }
 
-interface VerifiedCaller {
-  uid: string;
-  email: string;
-}
-
-async function verifyFirebaseBearerToken(authHeader: string | undefined, requireVerifiedEmail = true): Promise<VerifiedCaller | null> {
+async function verifyFirebaseBearerToken(authHeader: string | undefined, requireVerifiedEmail = true): Promise<VerifiedAiCaller | null> {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const idToken = authHeader.slice('Bearer '.length).trim();
   if (!idToken || idToken.length < 20) return null;
@@ -110,10 +119,12 @@ async function verifyFirebaseBearerToken(authHeader: string | undefined, require
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ idToken }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(4_000),
     });
     if (!resp.ok) return null;
     const data = (await resp.json()) as {
-      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean; disabled?: boolean }>;
+      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean; disabled?: boolean; customAttributes?: string }>;
     };
     const user = data.users && data.users[0];
     if (!user || !user.localId || user.disabled || (requireVerifiedEmail && user.emailVerified !== true)) {
@@ -122,11 +133,28 @@ async function verifyFirebaseBearerToken(authHeader: string | undefined, require
     return {
       uid: user.localId,
       email: user.email || '',
+      emailVerified: user.emailVerified === true,
+      customAttributes: user.customAttributes,
     };
   } catch {
     return null;
   }
 }
+
+const platformPrivilegeDeps: PrivilegeDependencies = {
+  verifyFirebaseBearerToken: authorization => verifyFirebaseBearerToken(authorization, false),
+  projectId: FIREBASE_CFG.projectId,
+  databaseId: FIREBASE_CFG.firestoreDatabaseId,
+  env: process.env,
+};
+const resolveCallerPlatformAiPrivilege = (authorization: string | undefined) => resolvePlatformAiPrivilege(authorization, platformPrivilegeDeps);
+
+const getPlatformGeminiKey = () => process.env.GEMINI_API_KEY?.trim();
+const resolveDeskAiAccess = createDeskAiAccessResolver({
+  resolvePlatformAiPrivilege: resolveCallerPlatformAiPrivilege,
+  verifyFirebaseBearerToken: authorization => verifyFirebaseBearerToken(authorization, false),
+  getPlatformKey: getPlatformGeminiKey,
+});
 
 interface LiveBridgeOpenPosition {
   ticket: string;
@@ -328,29 +356,6 @@ function getLiveBridgeFeed(apiKey: string): LiveBridgeFeedEntry | null {
     return disk[keyHash];
   }
   return null;
-}
-
-function getGenAIClient(): GoogleGenAI {
-  return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-}
-
-function getLiveTokenGenAIClient(): GoogleGenAI {
-  return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      apiVersion: 'v1alpha',
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
 }
 
 const BASE_GHR_SYSTEM_INSTRUCTION = `คุณคือ "TallyNX AI Live Desk · GHR v3.2" โค้ชวางแผนการเทรดทองคำ (XAUUSD) และผู้เชี่ยวชาญระบบ Golden Horizon (GHR v3.2) ประจำโต๊ะเทรด
@@ -1913,18 +1918,31 @@ export function createApp() {
 
   app.post('/api/chat', async (req, res) => {
     let isSseStarted = false;
-    try {
-      const caller = await verifyFirebaseBearerToken(req.headers.authorization);
-      if (!caller) {
-        res.status(401).json({
-          error:
-            'กรุณาเข้าสู่ระบบบัญชี Google เพื่อใช้งาน Cloud AI Coach (หรือกดปุ่ม "สรุปแผน GHR ทันที" เพื่อวิเคราะห์จากข้อมูลในเครื่องฟรี)',
-          code: 'AUTH_REQUIRED',
+    let usingPersonalKey = false;
+    res.set('Cache-Control', 'no-store');
+    const emitSse = (event: string, data: unknown) => {
+      if (res.writableEnded || res.destroyed) return;
+      if (!isSseStarted) {
+        isSseStarted = true;
+        res.set({
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store, no-transform',
+          'X-Accel-Buffering': 'no',
         });
+        res.flushHeaders();
+      }
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    try {
+      const access = await resolveDeskAiAccess(req, 'text');
+      if (!access.ok) {
+        res.status(access.status).json({ error: access.error, code: access.code });
         return;
       }
+      const { connection } = access;
+      usingPersonalKey = connection.provider !== 'platform';
 
-      const rate = await checkDistributedRateLimit(`chat:${caller.uid}`, 35);
+      const rate = await checkDistributedRateLimit(`chat:${access.rateSubject}`, 35);
       if (!rate.allowed) {
         res.status(429).json({
           error: `ใช้งาน AI โค้ชครบโควตาชั่วคราว (35 ครั้ง / 15 นาที) กรุณารอ ${rate.retryAfterSec} วินาที หรือใช้ปุ่มสรุปแผนจากเครื่อง`,
@@ -1944,7 +1962,7 @@ export function createApp() {
         attachments,
         enableWebSearch,
         stream,
-      } = req.body || {};
+      } = asRecord(req.body) ?? {};
 
       if (!message || typeof message !== 'string' || !message.trim()) {
         res.status(400).json({ error: 'กรุณาพิมพ์ข้อความที่ต้องการถามโค้ชเทรด' });
@@ -1952,15 +1970,6 @@ export function createApp() {
       }
       if (message.length > 4000) {
         res.status(400).json({ error: 'ข้อความยาวเกิน 4,000 ตัวอักษร กรุณาย่อคำถามให้กระชับขึ้น' });
-        return;
-      }
-
-      if (!process.env.GEMINI_API_KEY) {
-        res.status(503).json({
-          error:
-            'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์ กรุณาตรวจสอบในแผง Settings > Secrets หรือใช้ปุ่มวิเคราะห์แผนจากข้อมูลในเครื่อง',
-          code: 'MISSING_API_KEY',
-        });
         return;
       }
 
@@ -1972,12 +1981,14 @@ export function createApp() {
       let hasPdfAttachment = false;
       let hasVisualAttachment = false;
 
-      if (Array.isArray(attachments)) {
-        for (const item of attachments.slice(0, 3)) {
-          if (!item || typeof item !== 'object') continue;
-          const mime = String((item as Record<string, unknown>).mimeType || '').toLowerCase().trim();
-          const name = String((item as Record<string, unknown>).name || 'attachment').slice(0, 80);
-          const rawB64 = String((item as Record<string, unknown>).base64 || '');
+      const attachmentList: unknown[] = Array.isArray(attachments) ? attachments : [];
+      if (attachmentList.length) {
+        for (const input of attachmentList.slice(0, 3)) {
+          const item = asRecord(input);
+          if (!item) continue;
+          const mime = String(item.mimeType || '').toLowerCase().trim();
+          const name = String(item.name || 'attachment').slice(0, 80);
+          const rawB64 = String(item.base64 || '');
           const cleanB64 = rawB64.replace(/^data:[^;]+;base64,/, '');
           if (!cleanB64 || cleanB64.length > 3_500_000) continue;
 
@@ -2020,28 +2031,15 @@ export function createApp() {
         }`;
       }
 
-      const routePlan = await planModelRoute({
-        prompt: message.trim(),
-        hasRichContext: Boolean(safeContext || safeChartContext || attachedDocsText),
-        hasVisualOrPdf: hasVisualAttachment || hasPdfAttachment,
-        hasPdfAttachment,
-        forceWebSearch: Boolean(enableWebSearch),
-        preference: model,
-        decisionClient: createDecisionGenAIClient(),
-      });
-
       const formattedHistory = Array.isArray(history)
         ? history
-            .filter(
-              (item) =>
-                item &&
-                (item.role === 'user' || item.role === 'model') &&
-                typeof item.text === 'string' &&
-                item.text.trim() !== ''
-            )
+            .filter((item: unknown): item is { role: 'user' | 'model'; text: string } => {
+              if (!item || typeof item !== 'object' || !('role' in item) || !('text' in item)) return false;
+              return (item.role === 'user' || item.role === 'model') && typeof item.text === 'string' && item.text.trim() !== '';
+            })
             .slice(-20)
-            .map((item) => ({
-              role: item.role as 'user' | 'model',
+            .map((item: { role: 'user' | 'model'; text: string }) => ({
+              role: item.role,
               parts: [{ text: item.text.slice(0, 4000) }],
             }))
         : [];
@@ -2049,6 +2047,56 @@ export function createApp() {
       const userPromptText = attachedDocsText
         ? `${attachedDocsText}\n\nคำถามของผู้ใช้:\n${message.trim()}`
         : message.trim();
+
+      if (connection.provider !== 'platform') {
+        if (connection.provider !== 'google' && binaryParts.length > 0) {
+          res.status(400).json({ code: 'TEXT_ONLY_PROVIDER', error: 'Use Google Gemini for images and PDFs, or remove the attachment.' });
+          return;
+        }
+        const disconnected = new AbortController();
+        const onClose = () => disconnected.abort();
+        res.once('close', onClose);
+        const search = connection.provider === 'google' && Boolean(enableWebSearch);
+        const route = { model: connection.model, failoverUsed: false, webSearchUsed: search, router: { routedBy: 'manual' } };
+        try {
+          const reply = await streamOrGenerateCoachReply(connection, {
+            system: baseSystemInstruction + SAFE_HARBOR_REMINDER,
+            history: formattedHistory.map(item => ({
+              role: item.role === 'model' ? 'assistant' : 'user', content: item.parts[0].text,
+            })),
+            prompt: userPromptText,
+            attachments: binaryParts,
+            webSearch: search,
+          }, {
+            signal: AbortSignal.any([disconnected.signal, AbortSignal.timeout(50_000)]),
+            ...(stream === true ? { stream: { onText: (delta: string) => {
+              if (!isSseStarted) emitSse('route', route);
+              emitSse('delta', { text: delta });
+            } } } : {}),
+          });
+          if (res.destroyed) return;
+          const payload = { ...route, ...reply, timestamp: new Date().toISOString() };
+          if (stream === true) {
+            emitSse('done', payload);
+            res.end();
+          } else {
+            res.json(payload);
+          }
+        } finally {
+          res.off('close', onClose);
+        }
+        return;
+      }
+
+      const routePlan = await planModelRoute({
+        prompt: message.trim(),
+        hasRichContext: Boolean(safeContext || safeChartContext || attachedDocsText),
+        hasVisualOrPdf: hasVisualAttachment || hasPdfAttachment,
+        hasPdfAttachment,
+        forceWebSearch: Boolean(enableWebSearch),
+        preference: connection.model ?? model,
+        decisionClient: createDecisionGenAIClient(connection.key),
+      });
 
       const buildContentsForModel = (candidateModel: (typeof routePlan.candidateModels)[number], suffix: string) => {
         const allowPdf = modelSupportsPdf(candidateModel);
@@ -2058,7 +2106,7 @@ export function createApp() {
           userParts.push({ inlineData: { mimeType: bin.mimeType, data: bin.data } });
         }
 
-        const fullSys = `${baseSystemInstruction}${suffix}`;
+        const fullSys = baseSystemInstruction + (suffix || SAFE_HARBOR_REMINDER);
         if (isOpenWeightGemmaModel(candidateModel)) {
           return {
             systemInstruction: undefined as string | undefined,
@@ -2085,22 +2133,10 @@ export function createApp() {
         };
       };
 
-      const ai = getGenAIClient();
+      const ai = createGoogleAiClient(connection.key);
       const useWebSearch = Boolean(enableWebSearch || routePlan.needsWebSearch);
 
       if (stream === true) {
-        isSseStarted = true;
-        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders?.();
-
-        const emitSse = (event: string, data: unknown) => {
-          if (res.writableEnded) return;
-          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-        };
-
         const suffix = routePlan.asksForTradeSignal ? SAFE_HARBOR_REMINDER : '';
         let completed = false;
         let lastErr: unknown;
@@ -2245,16 +2281,12 @@ export function createApp() {
         timestamp: new Date().toISOString(),
       });
     } catch (err: unknown) {
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      let code = 'gemini_request_failed';
-      let errorMsg = 'เกิดข้อผิดพลาดในการเชื่อมต่อ Gemini API กรุณาลองใหม่อีกครั้ง';
-      if (/PERMISSION_DENIED|API_KEY_INVALID|\b(?:403|401)\b/i.test(rawMessage)) {
-        code = 'gemini_permission_denied';
-        errorMsg = 'ไม่สามารถยืนยันสิทธิ์ API Key ได้ กรุณาตรวจสอบการตั้งค่าคีย์ในแผง Settings > Secrets';
-      } else if (/RESOURCE_EXHAUSTED|\b429\b/i.test(rawMessage)) {
-        code = 'gemini_quota_exhausted';
-        errorMsg = 'โควต้าการใช้งาน Gemini API เต็มชั่วคราว (429) กรุณารอสักครู่หรือตรวจสอบคีย์ใน Settings > Secrets';
-      }
+      if (res.destroyed) return;
+      const byokRequired = usingPersonalKey && isAiCredentialError(err);
+      const quota = aiUpstreamStatus(err) === 429;
+      const code = byokRequired ? 'BYOK_REQUIRED' : quota ? 'RATE_LIMITED' : 'AI_PROVIDER_UNAVAILABLE';
+      const errorMsg = byokRequired ? BYOK_REQUIRED_MESSAGE : quota
+        ? 'The provider limit has been reached. Try again later.' : 'The AI provider could not complete the request.';
       if (isSseStarted && res.headersSent) {
         if (!res.writableEnded) {
           res.write(`event: error\ndata: ${JSON.stringify({ code, error: errorMsg })}\n\n`);
@@ -2262,31 +2294,38 @@ export function createApp() {
         }
         return;
       }
-      res.status(500).json({ code, error: errorMsg });
+      res.status(byokRequired ? 403 : quota ? 429 : 502).json({ code, error: errorMsg });
     }
   });
 
-  app.post('/api/ai/transcribe', async (req, res) => {
-    try {
-      const caller = await verifyFirebaseBearerToken(req.headers.authorization);
-      if (!caller) {
-        res.status(401).json({ error: 'กรุณาเข้าสู่ระบบบัญชี Google เพื่อใช้โหมดถอดเสียง Cloud AI', code: 'AUTH_REQUIRED' });
-        return;
-      }
-      const rate = await checkDistributedRateLimit(`voice:${caller.uid}`, 50);
-      if (!rate.allowed) {
-        res.status(429).json({
-          error: `ใช้โหมดเสียงเกินโควต้าชั่วคราว กรุณารอ ${rate.retryAfterSec} วินาที`,
-          code: 'RATE_LIMITED',
-        });
-        return;
-      }
-      if (!process.env.GEMINI_API_KEY) {
-        res.status(503).json({ error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์', code: 'MISSING_API_KEY' });
-        return;
-      }
+  async function authorizeDeskVoice(req: express.Request, res: express.Response, bucket: 'voice' | 'live') {
+    res.set('Cache-Control', 'no-store');
+    const access = await resolveDeskAiAccess(req, 'voice');
+    if (!access.ok) {
+      res.status(access.status).json({ error: access.error, code: access.code });
+      return null;
+    }
+    const rate = await checkDistributedRateLimit(`${bucket}:${access.rateSubject}`, bucket === 'live' ? 15 : 50);
+    if (!rate.allowed) {
+      res.set('Retry-After', String(rate.retryAfterSec));
+      res.status(429).json({ error: 'The voice request limit has been reached. Try again later.', code: 'RATE_LIMITED' });
+      return null;
+    }
+    return access.connection;
+  }
 
-      const { audioBase64, mimeType } = req.body || {};
+  function sendVoiceCredentialError(res: express.Response, error: unknown, personal: boolean): boolean {
+    if (!personal || !isAiCredentialError(error)) return false;
+    res.status(403).json({ error: BYOK_REQUIRED_MESSAGE, code: 'BYOK_REQUIRED' });
+    return true;
+  }
+
+  app.post('/api/ai/transcribe', async (req, res) => {
+    const connection = await authorizeDeskVoice(req, res, 'voice');
+    if (!connection) return;
+    try {
+
+      const { audioBase64, mimeType } = asRecord(req.body) ?? {};
       const cleanBase64 = typeof audioBase64 === 'string'
         ? audioBase64.replace(/^data:[^;]+;base64,/, '').trim()
         : '';
@@ -2306,7 +2345,7 @@ export function createApp() {
         'audio/flac': 'audio/flac',
       };
       const interactionMime = interactionMimeMap[normalizedMime];
-      const ai = getGenAIClient();
+      const ai = createGoogleAiClient(connection.key);
 
       if (interactionMime) {
         try {
@@ -2345,13 +2384,15 @@ export function createApp() {
             return;
           }
         } catch (err) {
-          if (!isRetryableQuotaOrTransientError(err)) {
+          if (!isRetryableQuotaOrTransientError(err) && ![400, 404].includes(aiUpstreamStatus(err) ?? 0)) {
             throw err;
           }
         }
       }
 
-      const fallbackCandidates = [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
+      const fallbackCandidates = connection.provider === 'google'
+        ? [...new Set([connection.model || 'gemini-2.5-flash', 'gemini-2.5-flash', GEMINI_FLASH_LITE_35])]
+        : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
       let lastErr: unknown;
       for (const fallbackModel of fallbackCandidates) {
         try {
@@ -2379,36 +2420,22 @@ export function createApp() {
           return;
         } catch (err) {
           lastErr = err;
-          if (!isRetryableQuotaOrTransientError(err)) throw err;
+          if (!isRetryableQuotaOrTransientError(err) && ![400, 404].includes(aiUpstreamStatus(err) ?? 0)) throw err;
         }
       }
       throw lastErr instanceof Error ? lastErr : new Error('Transcription failed');
     } catch (err: unknown) {
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'ไม่สามารถถอดเสียงได้ในขณะนี้',
-        code: 'TRANSCRIBE_FAILED',
-      });
+      if (!sendVoiceCredentialError(res, err, connection.provider === 'google')) {
+        res.status(502).json({ error: 'The provider could not transcribe this audio.', code: 'TRANSCRIBE_FAILED' });
+      }
     }
   });
 
   app.post('/api/ai/tts', async (req, res) => {
+    const connection = await authorizeDeskVoice(req, res, 'voice');
+    if (!connection) return;
     try {
-      const caller = await verifyFirebaseBearerToken(req.headers.authorization);
-      if (!caller) {
-        res.status(401).json({ error: 'กรุณาเข้าสู่ระบบบัญชี Google', code: 'AUTH_REQUIRED' });
-        return;
-      }
-      const rate = await checkDistributedRateLimit(`voice:${caller.uid}`, 50);
-      if (!rate.allowed) {
-        res.json({ ok: true, fallbackClientTts: true, reason: 'rate_limited' });
-        return;
-      }
-      if (!process.env.GEMINI_API_KEY) {
-        res.json({ ok: true, fallbackClientTts: true, reason: 'missing_key' });
-        return;
-      }
-
-      const { text, voice } = req.body || {};
+      const { text, voice } = asRecord(req.body) ?? {};
       const cleanText = stripMarkdownForSpeech(typeof text === 'string' ? text : '').slice(0, 1800);
       if (!cleanText) {
         res.status(400).json({ error: 'ไม่มีข้อความสำหรับสังเคราะห์เสียง' });
@@ -2416,7 +2443,7 @@ export function createApp() {
       }
 
       const safeVoice = sanitizeVoiceName(voice);
-      const ai = getGenAIClient();
+      const ai = createGoogleAiClient(connection.key);
       const ttsModels = [GEMINI_38_FLASH_LITE_TTS, GEMINI_38_FLASH_TTS];
 
       for (let i = 0; i < ttsModels.length; i++) {
@@ -2444,10 +2471,8 @@ export function createApp() {
             return;
           }
         } catch (err) {
-          if (!isRetryableQuotaOrTransientError(err)) {
-            res.json({ ok: true, fallbackClientTts: true });
-            return;
-          }
+          if (sendVoiceCredentialError(res, err, connection.provider === 'google')) return;
+          if (!isRetryableQuotaOrTransientError(err) && ![400, 404].includes(aiUpstreamStatus(err) ?? 0)) break;
         }
       }
 
@@ -2458,29 +2483,10 @@ export function createApp() {
   });
 
   app.post('/api/ai/live-token', async (req, res) => {
+    const connection = await authorizeDeskVoice(req, res, 'live');
+    if (!connection) return;
     try {
-      const caller = await verifyFirebaseBearerToken(req.headers.authorization);
-      if (!caller) {
-        res.status(401).json({
-          error: 'กรุณาเข้าสู่ระบบบัญชี Google และเปิดสิทธิ์ PRO เพื่อใช้งาน Live Voice Mode',
-          code: 'AUTH_REQUIRED',
-        });
-        return;
-      }
-      const rate = await checkDistributedRateLimit(`live:${caller.uid}`, 15);
-      if (!rate.allowed) {
-        res.status(429).json({
-          error: `สร้างเซสชัน Live เกินโควต้าชั่วคราว กรุณารอ ${rate.retryAfterSec} วินาที`,
-          code: 'RATE_LIMITED',
-        });
-        return;
-      }
-      if (!process.env.GEMINI_API_KEY) {
-        res.status(503).json({ error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์', code: 'MISSING_API_KEY' });
-        return;
-      }
-
-      const { mode, voice, deskContext, liveChartContext } = req.body || {};
+      const { mode, voice, deskContext, liveChartContext } = asRecord(req.body) ?? {};
       const liveMode = mode === 'thinking' ? 'thinking' : 'standard';
       const targetModel = liveMode === 'thinking' ? GEMINI_38_LIVE_THINKING : GEMINI_38_LIVE;
       const safeVoice = sanitizeVoiceName(voice);
@@ -2493,12 +2499,13 @@ export function createApp() {
 - ตอบกลับเป็นคำพูดที่กระชับ เป็นธรรมชาติ อ่าน/ฟังเข้าใจง่าย ไม่ต้องอ่านเครื่องหมาย Markdown
 - ใช้ตัวเลขจากพอร์ตและกราฟสดล่าสุดเสมอ พร้อมย้ำ Safe Harbor (ไม่ให้สัญญาณซื้อขาย)
 ${safeDesk ? `\n=== Real-Time Desk Context ===\n${safeDesk}` : ''}
-${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
+${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_REMINDER}`;
 
       const now = Date.now();
       const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
       const newSessionExpireTime = new Date(now + 90 * 1000).toISOString();
-      const tokenClient = getLiveTokenGenAIClient();
+      const apiVersion = connection.provider === 'google' ? 'v1beta' : 'v1alpha';
+      const tokenClient = createGoogleAiClient(connection.key, apiVersion);
 
       const candidateLiveModels =
         liveMode === 'thinking' ? [GEMINI_38_LIVE_THINKING, GEMINI_38_LIVE] : [GEMINI_38_LIVE];
@@ -2536,7 +2543,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
               token: authToken.name,
               model: candidateModel,
               requestedModel: targetModel,
-              apiVersion: 'v1alpha',
+              apiVersion,
               expiresAt: expireTime,
               newSessionExpiresAt: newSessionExpireTime,
               voice: safeVoice,
@@ -2545,6 +2552,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
             return;
           }
         } catch (err) {
+          if (isAiCredentialError(err)) throw err;
           lastErr = err;
           // Retry with minimal locked constraints if optional live constraint fails validation
           try {
@@ -2568,7 +2576,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
                 token: minimalToken.name,
                 model: candidateModel,
                 requestedModel: targetModel,
-                apiVersion: 'v1alpha',
+                apiVersion,
                 expiresAt: expireTime,
                 newSessionExpiresAt: newSessionExpireTime,
                 voice: safeVoice,
@@ -2577,6 +2585,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
               return;
             }
           } catch (innerErr) {
+            if (isAiCredentialError(innerErr)) throw innerErr;
             lastErr = innerErr;
           }
         }
@@ -2584,13 +2593,9 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
 
       throw lastErr instanceof Error ? lastErr : new Error('Failed to mint ephemeral Live token');
     } catch (err: unknown) {
-      res.status(500).json({
-        error:
-          err instanceof Error
-            ? `ไม่สามารถสร้าง Ephemeral Token สำหรับ Live Mode: ${err.message}`
-            : 'ไม่สามารถเชื่อมต่อ Live Mode ได้ในขณะนี้',
-        code: 'LIVE_TOKEN_FAILED',
-      });
+      if (!sendVoiceCredentialError(res, err, connection.provider === 'google')) {
+        res.status(502).json({ error: 'The provider could not create a temporary Live token.', code: 'LIVE_TOKEN_FAILED' });
+      }
     }
   });
 
@@ -2804,12 +2809,13 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}`;
     });
   });
 
-  app.use('/api', createRiskSuperviseRouter({
-    verifyFirebaseBearerToken,
+  app.use('/api', createByokRouter({
+    resolvePlatformAiPrivilege: resolveCallerPlatformAiPrivilege,
+    isPlatformConfigured: () => Boolean(getPlatformGeminiKey()),
     checkDistributedRateLimit,
-    getGenAIClient,
-    isGeminiConfigured: () => Boolean(process.env.GEMINI_API_KEY?.trim()),
+    env: process.env,
   }));
+  app.use('/api', createRiskSuperviseRouter({ resolveDeskAiAccess, checkDistributedRateLimit }));
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ ok: false, error: 'API route not found' });
