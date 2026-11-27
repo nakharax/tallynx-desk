@@ -385,14 +385,22 @@ export function AiAndDataKeysDialogButton({ uid, lang, buttonLabel }: CardProps 
   const [open, setOpen] = useState(false);
   const label = deskText(lang, 'API Keys / Codex OAuth', 'คีย์ API / Codex OAuth');
   return <>
-    <button type="button" className="btn xs" onClick={() => setOpen(true)}>
+    <button type="button" className="btn xs" data-byok-trigger="true" onClick={() => setOpen(true)}>
       <KeyRound size={13} aria-hidden="true" /> {buttonLabel ?? label}
     </button>
     {open && <DeskDialog label={label} onClose={() => setOpen(false)} panelClassName="byok-dialog">
-      <button type="button" className="btn xs byok-close" aria-label={deskText(lang, 'Close', 'ปิด')} onClick={() => setOpen(false)}>
+      <AiAndDataKeysCard uid={uid} lang={lang} />
+      <button
+        type="button"
+        className="btn xs byok-close"
+        aria-label={deskText(lang, 'Close', 'ปิด')}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen(false);
+        }}
+      >
         <X size={16} aria-hidden="true" />
       </button>
-      <AiAndDataKeysCard uid={uid} lang={lang} />
     </DeskDialog>}
   </>;
 }

@@ -260,6 +260,10 @@ def main():
             check("quant_ai_risk")
             click_subtab("sec-comex-bridge")
             check("quant_comex")
+            page.locator("#sec-comex-bridge [data-byok-trigger]").click(timeout=5000)
+            page.locator(".byok-dialog .byok-close").wait_for(state="visible", timeout=5000)
+            page.locator(".byok-dialog .byok-close").click(timeout=5000)
+            page.locator(".byok-dialog").wait_for(state="detached", timeout=5000)
 
             click_pillar("review", "sec-review-autopsy")
             check("review_autopsy")
