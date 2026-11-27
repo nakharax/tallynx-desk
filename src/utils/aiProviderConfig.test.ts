@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AI_MODEL_CATALOG, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders, decodeCodexJwtMetadata,
-  maskCredential, normalizeAiModel, normalizeAiProvider, parseCodexCallbackInput,
+  getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel, normalizeAiProvider,
+  parseCodexCallbackInput,
 } from './aiProviderConfig.ts';
 import { planModelRoute } from './geminiOrchestrator.ts';
 import { loadByokCredentials, refreshCodexOauthIfNeeded, saveByokCredentials } from './byokStorage.ts';
@@ -70,6 +71,26 @@ test('planModelRoute prioritizes selected platform frontier models and cascades 
   assert.equal(plan.candidateModels[0], 'gemini-4-neon');
   assert.equal(plan.candidateModels[1], 'gemini-4-hydrogen');
   assert.equal(plan.candidateModels.length, 6);
+});
+
+test('reports per-provider connection state accurately across connected, expired, unavailable, and disconnected', () => {
+  const now = 2_000_000_000_000;
+  const freshJwt = jwt({ exp: 2_000_003_600 });
+  const expiredJwt = jwt({ exp: 1_999_999_000 });
+  assert.equal(getAiProviderConnectionState('platform', {}, { eligible: true, configured: true }, now), 'connected');
+  assert.equal(getAiProviderConnectionState('platform', {}, { eligible: true, configured: false }, now), 'unavailable');
+  assert.equal(getAiProviderConnectionState('platform', {}, { eligible: false, configured: true }, now), 'disconnected');
+  assert.equal(getAiProviderConnectionState('google', { googleKey: google }, null, now), 'connected');
+  assert.equal(getAiProviderConnectionState('google', {}, null, now), 'disconnected');
+  assert.equal(getAiProviderConnectionState('openrouter', { openrouterKey: openrouter }, null, now), 'connected');
+  assert.equal(getAiProviderConnectionState('openrouter', {}, null, now), 'disconnected');
+  assert.equal(getAiProviderConnectionState('codex_oauth', { openAiKey: 'sk-proj-example123456789' }, null, now), 'connected');
+  assert.equal(getAiProviderConnectionState('codex_oauth', { codex: { accessToken: freshJwt, expiresAt: now + 3_600_000 } }, null, now), 'connected');
+  assert.equal(getAiProviderConnectionState('codex_oauth', { codex: { accessToken: expiredJwt, expiresAt: now - 1_000 } }, null, now), 'expired');
+  assert.equal(getAiProviderConnectionState('codex_oauth', { codex: { accessToken: expiredJwt, refreshToken: 'rt-1', expiresAt: now - 1_000 } }, null, now), 'connected');
+  assert.equal(getAiProviderConnectionState('codex_oauth', {}, null, now), 'disconnected');
+  assert.equal(isDatabentoConnected('db-valid-key'), true);
+  assert.equal(isDatabentoConnected(undefined), false);
 });
 
 test('Desk access reads the platform key only after privilege verification and never falls back from personal providers', async () => {

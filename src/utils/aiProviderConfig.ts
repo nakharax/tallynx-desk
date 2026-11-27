@@ -110,6 +110,50 @@ export const AI_MODEL_BADGES: Readonly<Record<string, string>> = {
 export type AiProvider = keyof typeof AI_MODEL_CATALOG;
 export type ByokProvider = Exclude<AiProvider, 'platform'>;
 export type PlatformAiRole = 'FOUNDER' | 'ADMIN' | 'LIFETIME' | null;
+export type ProviderConnectionState = 'connected' | 'expired' | 'disconnected' | 'unavailable';
+
+export interface ProviderStatusInput {
+  googleKey?: string;
+  openrouterKey?: string;
+  openAiKey?: string;
+  codex?: CodexOauthCredential;
+  databentoKey?: string;
+}
+
+export function getAiProviderConnectionState(
+  provider: AiProvider,
+  credentials: ProviderStatusInput,
+  platform?: { eligible: boolean; configured: boolean } | null,
+  now = Date.now(),
+): ProviderConnectionState {
+  if (provider === 'platform') {
+    if (!platform) return 'disconnected';
+    if (!platform.eligible) return 'disconnected';
+    return platform.configured ? 'connected' : 'unavailable';
+  }
+  if (provider === 'google') {
+    return credentials.googleKey && isByokKeyFormat('google', credentials.googleKey) ? 'connected' : 'disconnected';
+  }
+  if (provider === 'openrouter') {
+    return credentials.openrouterKey && isByokKeyFormat('openrouter', credentials.openrouterKey) ? 'connected' : 'disconnected';
+  }
+  if (credentials.openAiKey && isOpenAiApiKey(credentials.openAiKey)) return 'connected';
+  if (credentials.codex?.accessToken && isByokKeyFormat('codex_oauth', credentials.codex.accessToken, credentials.codex.chatgptAccountId)) {
+    if (
+      typeof credentials.codex.expiresAt === 'number' &&
+      credentials.codex.expiresAt <= now &&
+      !credentials.codex.refreshToken
+    ) {
+      return 'expired';
+    }
+    return 'connected';
+  }
+  return 'disconnected';
+}
+
+export function isDatabentoConnected(key: string | undefined): boolean {
+  return Boolean(buildDatabentoRequestHeaders(key)[AI_HEADERS.databento]);
+}
 
 export interface CodexJwtMetadata {
   accountEmail?: string;
