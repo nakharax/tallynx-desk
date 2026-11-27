@@ -73,7 +73,7 @@
 .byok-databento {
   padding: 14px;
   border: 1px solid var(--border-color, #58637350);
-  border-radius: 8px;
+  border-radius: var(--radius-card-inner);
 }
 
 .byok-databento h3 {

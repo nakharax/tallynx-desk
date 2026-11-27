@@ -633,7 +633,7 @@
     position: absolute;
     inset: 0;
     z-index: 25;
-    border-radius: 20px;
+    border-radius: var(--radius-card);
     background: rgb(11 14 20 / 42%);
     backdrop-filter: blur(2px);
   }
@@ -1083,7 +1083,7 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
     height: auto;
     overflow: visible;
     padding: 8px 10px;
-    border-radius: 16px;
+    border-radius: var(--radius-card);
   }
   .mall-brand, .mall-presence { display: none; }
   .mall-zones {
@@ -1112,7 +1112,7 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
     overflow: visible;
     flex: none;
     height: auto;
-    border-radius: 16px;
+    border-radius: var(--radius-card);
   }
   .mall-feed {
     flex: none;

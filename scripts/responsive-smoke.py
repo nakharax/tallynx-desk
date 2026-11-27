@@ -58,6 +58,23 @@ JS_AUDIT = """() => {
     }
   }
 
+  const cardRadii = [];
+  for (const card of document.querySelectorAll('.live-cockpit, .desk-kpi-band > .fx-stat-card, .analysis-overview-main, .risk-posture, .analysis-week-strip, .site-traffic-strip, .review-diagnostics, .prop-autopsy, .comex-bridge, .risk-supervision, .prop-dossier.card, .proprules-firms')) {
+    const r = card.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const radius = parseFloat(getComputedStyle(card).borderTopLeftRadius);
+    if (Number.isFinite(radius)) cardRadii.push([card.className.split(' ')[0], Math.round(radius)]);
+  }
+  if (cardRadii.length >= 2) {
+    const expected = cardRadii[0][1];
+    for (const [name, radius] of cardRadii.slice(1)) {
+      if (Math.abs(radius - expected) > 1) {
+        issues.push(`card border-radius mismatch: ${name}=${radius}px vs ${cardRadii[0][0]}=${expected}px`);
+        break;
+      }
+    }
+  }
+
   const sidebar = document.querySelector('.fx-sidebar');
   const mobNav = document.querySelector('.fx-mobile-bottom-nav');
   const sidebarVis = sidebar && getComputedStyle(sidebar).display !== 'none';
