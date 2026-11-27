@@ -91,10 +91,12 @@ html[data-theme="alabaster"] {
   --bento-inset: color-mix(in srgb, var(--bg-subtle) 76%, var(--bg-surface-solid));
   --bento-shadow: var(--glass-specular), var(--shadow-sm);
   --bento-hover-border: color-mix(in srgb, var(--accent-ink) 52%, var(--border-strong));
-  --radius-xs: 4px;
-  --radius-sm: 8px;
-  --radius-md: 10px;
-  --radius-lg: 12px;
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 14px;
+  --radius-card: 14px;
+  --radius-card-inner: 10px;
   --nav-active: var(--accent-soft);
 }
 
@@ -283,10 +285,12 @@ html[data-room="daylight"] {
     rgba(15, 23, 42, 0.64) 56%,
     rgba(5, 8, 15, 0.78) 100%
   );
-  --radius-xs: 10px;
-  --radius-sm: 14px;
+  --radius-xs: 8px;
+  --radius-sm: 12px;
   --radius-md: 18px;
-  --radius-lg: 24px;
+  --radius-lg: 18px;
+  --radius-card: 18px;
+  --radius-card-inner: 12px;
   --nav-active: rgba(7, 82, 232, 0.28);
 }
 
@@ -475,8 +479,8 @@ html:is([data-room="night"], [data-room="daylight"]) :is(.card, .fx-stat-card, .
   box-shadow: var(--bento-shadow);
 }
 
-html:is([data-room="night"], [data-room="daylight"]) :is(.card, .fx-tabbed-container) {
-  border-radius: var(--room-panel-radius, 22px);
+html:is([data-room="night"], [data-room="daylight"]) :is(.card, .fx-stat-card, .fx-tabbed-container, .mkt-card, .reference-card, .mall-sidebar, .mall-center, .mall-inspector, .risk-posture, .site-traffic-strip, .market-trust-tile) {
+  border-radius: var(--radius-card);
 }
 
 /* Featured Blue Glass Spotlight Cards */
@@ -545,7 +549,7 @@ html:is([data-room="night"], [data-room="daylight"]) .fx-workstation .fx-tab-pan
 html:is([data-room="night"], [data-room="daylight"]) :is(.mall-snapshot, .settings-pref-tile) {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.14);
-  border-radius: 16px;
+  border-radius: var(--radius-card-inner);
 }
 
 @media (prefers-reduced-transparency: reduce) {

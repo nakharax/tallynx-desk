@@ -805,7 +805,7 @@ section[id] {
 .fx-stat-card {
   background: var(--bg-surface-solid);
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
   padding: 10px 14px;
   box-shadow: var(--shadow-sm);
   display: flex;
@@ -949,7 +949,7 @@ section[id] {
   min-width: 0;
   background: var(--bento-surface);
   border: 1px solid var(--border-color);
-  border-radius: 18px;
+  border-radius: var(--radius-card);
   padding: 12px;
   box-shadow: var(--bento-shadow);
   display: flex;
@@ -1018,7 +1018,7 @@ section[id] {
 .fx-chart-card {
   background: var(--bg-surface-solid);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-card);
   padding: 9px 12px;
   display: flex;
   flex-direction: column;
@@ -1144,7 +1144,7 @@ section[id] {
 .fx-consistency-strip {
   background: var(--bg-surface-solid);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-card);
   padding: 7px 10px;
   display: flex;
   flex-direction: column;
@@ -1557,7 +1557,7 @@ section[id] {
 .fx-workstation :is(.fx-stat-card, .fx-tabbed-container) {
   min-width: 0;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-card);
   background: var(--bg-surface-solid);
   box-shadow: none;
 }
@@ -2042,7 +2042,7 @@ section[id] {
 .card {
   background: var(--bg-surface-solid);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-card);
   padding: 14px 16px;
   box-shadow: var(--shadow-sm);
   display: flex;
@@ -4379,12 +4379,12 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   grid-template-columns: minmax(0, 1.8fr) repeat(4, minmax(0, 1fr));
   gap: 9px;
   padding: 11px;
-  border-radius: 18px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--border-color);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
-.mkt-filter-bar :is(input, select) { border-radius: 11px; background-color: var(--bento-inset); }
+.mkt-filter-bar :is(input, select) { border-radius: var(--radius-card-inner); background-color: var(--bento-inset); }
 .mkt-cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr));
@@ -4398,7 +4398,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   min-width: 0;
   padding: 15px;
   overflow-wrap: anywhere;
-  border-radius: 18px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--border-color);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
@@ -4668,7 +4668,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   color: var(--tape-ink);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
@@ -4697,7 +4697,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .reference-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .reference-card {
   position: relative; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 15px;
-  border: 1px solid var(--border-color); border-radius: 18px;
+  border: 1px solid var(--border-color); border-radius: var(--radius-card);
   background: var(--bento-surface); color: var(--text-primary);
   box-shadow: var(--bento-shadow);
   transition: border-color 140ms ease, box-shadow 140ms ease;
@@ -4858,7 +4858,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   gap: 16px;
 }
 .proprules-controls { padding: var(--workspace-card-padding); }
-.proprules-firms { --room-panel-radius: 18px; padding: var(--workspace-card-padding); border-radius: 18px; background: var(--bento-surface); }
+.proprules-firms { padding: var(--workspace-card-padding); border-radius: var(--radius-card); background: var(--bento-surface); }
 
 .journal-table-scroll {
   flex: 1 1 0;
@@ -4904,10 +4904,9 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .desk-calculator .workspace-grid { flex: 1 0 auto; }
 .desk-calculator .workspace-grid > section { min-width: 0; }
 .desk-calculator .workspace-grid > section > .card {
-  --room-panel-radius: 20px;
   padding: var(--workspace-card-padding);
   gap: 9px;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
@@ -5157,7 +5156,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   padding: 12px;
   background: var(--bento-inset);
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: var(--radius-card-inner);
   font-size: 11.5px;
   line-height: 1.4;
   flex-shrink: 0;
@@ -5234,7 +5233,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 #desk-cards-root > .fx-tabbed-container {
   flex: 1 0 auto;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-card);
   background: var(--bg-surface-solid);
 }
 #desk-cards-root .fx-folder-tabs {
@@ -5266,7 +5265,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   gap: 6px 12px;
   padding: 8px 10px;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-card);
   background: var(--bg-surface-solid);
 }
 
@@ -5456,7 +5455,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   justify-content: flex-start;
   text-align: start;
   border: 1px solid var(--border-color);
-  border-radius: 18px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
   gap: 4px;
@@ -5503,11 +5502,10 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 }
 .analysis-overview-grid:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
 .analysis-overview-main {
-  --room-panel-radius: 20px;
   min-width: 0;
   padding: var(--workspace-card-padding);
   justify-content: space-between;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
@@ -5518,13 +5516,13 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   min-width: 0;
   padding: var(--workspace-card-padding);
   border: 1px solid var(--border-color);
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
 .risk-posture .desk-band-heading { padding: 0 2px; background: transparent; box-shadow: none; }
 .posture-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.posture-cell { display: grid; align-content: center; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bento-inset); }
+.posture-cell { display: grid; align-content: center; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--border-color); border-radius: var(--radius-card-inner); background: var(--bento-inset); }
 .posture-cell > small, .chart-tape small {
   font-size: 10.5px; line-height: 1.35; font-weight: 600; color: var(--text-secondary);
 }
@@ -5537,7 +5535,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   margin: 0;
   padding: 8px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-card-inner);
   background: var(--bento-inset);
   color: var(--text-secondary);
   font-size: 11px;
@@ -5554,18 +5552,17 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .session-rate-track { width: 100%; height: 5px; border-radius: 999px; overflow: hidden; background: var(--session-soft); }
 .session-rate-track > span { display: block; height: 100%; border-radius: inherit; background: var(--session-ink); }
 .analysis-view > .analysis-week-strip {
-  --room-panel-radius: 20px;
   flex: 0 0 auto;
   margin-top: 6px;
   gap: 12px;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
 .analysis-week-strip .fx-consistency-head { flex-wrap: wrap; }
 .analysis-week-strip .fx-card-heading { font-size: 14px; }
 .analysis-week-strip .fx-consistency-grid { gap: 8px; }
-.analysis-week-strip .fx-heatmap-cell { min-height: 61px; padding: 8px; gap: 5px; border-radius: 14px; }
+.analysis-week-strip .fx-heatmap-cell { min-height: 61px; padding: 8px; gap: 5px; border-radius: var(--radius-card-inner); }
 .analysis-week-strip .fx-heatmap-cell.is-empty { background: var(--bento-inset); }
 .analysis-week-strip :is(.fx-heatmap-top, .fx-heatmap-bottom) { flex-wrap: wrap; }
 .desk-chart-empty, .journal-empty {
@@ -5598,7 +5595,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   flex-shrink: 0;
   gap: 1px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
   overflow: hidden;
   background: var(--border-color);
 }
@@ -5761,11 +5758,10 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .prop-firm-tags { justify-items: end; }
 .prop-firm-tags .desk-tag { font-size: 9.5px; }
 .prop-dossier.card {
-  --room-panel-radius: 20px;
   min-width: 0;
   padding: var(--workspace-card-padding);
   gap: 12px;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   background: var(--bento-surface);
   box-shadow: var(--bento-shadow);
 }
@@ -5774,7 +5770,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .prop-firm-identity > svg { color: var(--accent-gold); }
 .prop-firm-identity .desk-tag { border-color: var(--amber-border); color: var(--accent-gold); background: var(--amber-soft); }
 .prop-dossier-heading p { color: var(--text-secondary); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
-.prop-reference-links { gap: 5px; padding: 8px; border: 1px solid var(--border-color); border-radius: 14px; background: var(--bento-inset); }
+.prop-reference-links { gap: 5px; padding: 8px; border: 1px solid var(--border-color); border-radius: var(--radius-card-inner); background: var(--bento-inset); }
 .prop-reference-links .btn { height: auto; min-height: 29px; border-radius: 999px; white-space: normal; padding-block: 4px; }
 .prop-audit-heading h4 { color: var(--text-primary); font: 650 14px/1.45 var(--font-display); }
 .prop-audit > p { margin: 4px 0 9px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -5786,7 +5782,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   align-items: baseline;
   padding: 9px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 14px;
+  border-radius: var(--radius-card-inner);
   background: var(--bento-inset);
 }
 .prop-audit-row dt { font: 600 11px/1.5 var(--font-mono); }
