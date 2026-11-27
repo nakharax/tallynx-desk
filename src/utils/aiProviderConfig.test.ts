@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildDatabentoRequestHeaders, buildDeskAiRequestHeaders, decodeCodexJwtMetadata,
+  AI_MODEL_CATALOG, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders, decodeCodexJwtMetadata,
   maskCredential, normalizeAiModel, normalizeAiProvider, parseCodexCallbackInput,
 } from './aiProviderConfig.ts';
+import { planModelRoute } from './geminiOrchestrator.ts';
 import { loadByokCredentials, refreshCodexOauthIfNeeded, saveByokCredentials } from './byokStorage.ts';
 import { readFirebaseLookupCaller, resolvePlatformAiPrivilege, type PrivilegeDependencies } from '../../server/ai/platformPrivilege.ts';
 import { createDeskAiAccessResolver, streamOrGenerateCoachReply } from '../../server/ai/byokProvider.ts';
@@ -37,11 +38,38 @@ test('credential storage isolates signed-in profiles and the guest profile', () 
 test('normalizes aliases and validates provider-specific model IDs', () => {
   assert.equal(normalizeAiProvider(' OpenRouter '), 'openrouter');
   assert.equal(normalizeAiProvider('unknown'), undefined);
+  assert.equal(normalizeAiModel('google', 'models/Gemini-4-Neon'), 'gemini-4-neon');
   assert.equal(normalizeAiModel('google', 'models/Gemini-2.5-Pro'), 'gemini-2.5-pro');
-  assert.equal(normalizeAiModel('openrouter', ' OpenAI/GPT-4.1 '), 'openai/gpt-4.1');
-  assert.equal(normalizeAiModel('openrouter', 'gemini-2.5-pro'), undefined);
-  assert.equal(normalizeAiModel('google', 'gemini-2.5-pro\r\nAuthorization'), undefined);
+  assert.equal(normalizeAiModel('platform', 'gemini-4-neon'), 'gemini-4-neon');
+  assert.equal(normalizeAiModel('platform', 'gemini-4-carbon'), 'gemini-4-carbon');
+  assert.equal(normalizeAiModel('codex_oauth', 'gpt-6.2-astra'), 'gpt-6.2-astra');
+  assert.equal(normalizeAiModel('codex_oauth', 'gpt-6.2-sol'), 'gpt-6.2-sol');
+  assert.equal(normalizeAiModel('openrouter', ' OpenAI/GPT-6.2-Astra '), 'openai/gpt-6.2-astra');
+  assert.equal(normalizeAiModel('openrouter', 'Google/Gemini-4-Neon'), 'google/gemini-4-neon');
+  assert.equal(normalizeAiModel('openrouter', 'Anthropic/Claude-Opus-5.5'), 'anthropic/claude-opus-5.5');
+  assert.equal(normalizeAiModel('openrouter', 'x-ai/grok-4.7'), 'x-ai/grok-4.7');
+  assert.equal(normalizeAiModel('openrouter', 'deepseek/deepseek-v4.1-flash'), 'deepseek/deepseek-v4.1-flash');
+  assert.equal(normalizeAiModel('openrouter', 'qwen/qwen4-max'), 'qwen/qwen4-max');
+  assert.equal(normalizeAiModel('openrouter', 'gemini-4-neon'), undefined);
+  assert.equal(normalizeAiModel('google', 'gemini-4-neon\r\nAuthorization'), undefined);
   assert.equal(normalizeAiModel('google', google), undefined);
+  for (const [provider, models] of Object.entries(AI_MODEL_CATALOG)) {
+    for (const model of models) {
+      assert.equal(normalizeAiModel(provider as keyof typeof AI_MODEL_CATALOG, model), model);
+    }
+  }
+});
+
+test('planModelRoute prioritizes selected platform frontier models and cascades into free-tier fallbacks', async () => {
+  const plan = await planModelRoute({
+    prompt: 'Audit my prop firm drawdown telemetry',
+    preference: 'gemini-4-neon',
+  });
+  assert.equal(plan.routedBy, 'manual');
+  assert.equal(plan.requestedPreference, 'gemini-4-neon');
+  assert.equal(plan.candidateModels[0], 'gemini-4-neon');
+  assert.equal(plan.candidateModels[1], 'gemini-4-hydrogen');
+  assert.equal(plan.candidateModels.length, 6);
 });
 
 test('Desk access reads the platform key only after privilege verification and never falls back from personal providers', async () => {

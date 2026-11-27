@@ -11,11 +11,21 @@ import { Modality, ThinkingLevel } from "@google/genai";
 // src/utils/geminiOrchestrator.ts
 import { GoogleGenAI } from "@google/genai";
 var GEMINI_DECISION_MODEL = "gemini-decision-1";
+var GEMINI_4_NEON = "gemini-4-neon";
+var GEMINI_4_CARBON = "gemini-4-carbon";
+var GEMINI_4_ARGON = "gemini-4-argon";
+var GEMINI_38_FLASH = "gemini-3.8-flash";
 var GEMINI_4_HYDROGEN = "gemini-4-hydrogen";
 var GEMINI_FLASH_LITE_35 = "gemini-3.5-flash-lite";
 var GEMINI_FLASH_LITE_31 = "gemini-3.1-flash-lite";
 var GEMMA_4_31B_IT = "gemma-4-31b-it";
 var GEMMA_4_26B_A4B_IT = "gemma-4-26b-a4b-it";
+var PLATFORM_FRONTIER_GEMINI_MODELS = [
+  GEMINI_4_NEON,
+  GEMINI_4_CARBON,
+  GEMINI_4_ARGON,
+  GEMINI_38_FLASH
+];
 var GEMINI_38_LIVE = "gemini-3.8-live";
 var GEMINI_38_LIVE_THINKING = "gemini-3.8-live-extended-thinking";
 var GEMINI_35_TRANSCRIBE = "gemini-3.5-transcribe";
@@ -128,10 +138,15 @@ var TIER_CASCADES = {
   ]
 };
 var SAFE_HARBOR_REMINDER = "\n\n[Decision-1 Compliance Guard]: User query may request trade signals or profit predictions. Strictly decline giving buy/sell signals, entry targets, or profit guarantees; provide only objective risk math, drawdown telemetry, and discipline rules.";
+function isPlatformFrontierGeminiModel(raw) {
+  return typeof raw === "string" && PLATFORM_FRONTIER_GEMINI_MODELS.includes(raw);
+}
 function modelSupportsGoogleSearch(model) {
+  if (isPlatformFrontierGeminiModel(model)) return true;
   return MODEL_CAPABILITY_MAP[model]?.supportsGoogleSearch ?? false;
 }
 function modelSupportsPdf(model) {
+  if (isPlatformFrontierGeminiModel(model)) return true;
   return MODEL_CAPABILITY_MAP[model]?.supportsPdf ?? false;
 }
 function isOpenWeightGemmaModel(model) {
@@ -205,6 +220,7 @@ function orderCascadeForCapabilities(cascade, options) {
 }
 async function planModelRoute(params) {
   const pref = normalizeChatModelPreference(params.preference);
+  const frontierPref = isPlatformFrontierGeminiModel(params.preference) ? params.preference : null;
   const hasRichContext = Boolean(params.hasRichContext);
   const hasVisualOrPdf = Boolean(params.hasVisualOrPdf);
   const hasPdfAttachment = Boolean(params.hasPdfAttachment);
@@ -213,6 +229,19 @@ async function planModelRoute(params) {
     params.prompt
   );
   const heuristicSearch = forceWebSearch || detectWebSearchNeed(params.prompt);
+  if (frontierPref) {
+    return {
+      requestedPreference: frontierPref,
+      candidateModels: [frontierPref, ...FREE_TIER_CHAT_MODELS],
+      routedBy: "manual",
+      routeTier: "frontier_multimodal",
+      decisionConfidence: 1,
+      asksForTradeSignal: heuristicSignal,
+      needsWebSearch: heuristicSearch,
+      hasPdfAttachment,
+      decisionModel: GEMINI_DECISION_MODEL
+    };
+  }
   if (pref !== "auto") {
     const info = MODEL_CAPABILITY_MAP[pref];
     const remaining = FREE_TIER_CHAT_MODELS.filter((m) => m !== pref);
@@ -2416,10 +2445,60 @@ var AI_HEADERS = {
   oauthState: "X-TallyNX-Codex-State"
 };
 var AI_MODEL_CATALOG = {
-  platform: ["auto", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-3.1-flash-lite"],
-  google: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-4-hydrogen", "gemini-3.5-flash-lite"],
-  openrouter: ["anthropic/claude-sonnet-4", "openai/gpt-4.1", "openai/o3", "google/gemini-2.5-pro", "deepseek/deepseek-r1"],
-  codex_oauth: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "o3"]
+  platform: [
+    "auto",
+    "gemini-4-neon",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite"
+  ],
+  google: [
+    "gemini-4-neon",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemma-4-31b-it"
+  ],
+  openrouter: [
+    "google/gemini-4-neon",
+    "google/gemini-4-carbon",
+    "google/gemini-4-argon",
+    "google/gemini-4-hydrogen",
+    "google/gemini-3.8-flash",
+    "openai/gpt-6.2-astra",
+    "openai/gpt-6.2-sol",
+    "openai/gpt-5.4",
+    "openai/o3",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-haiku-5.5",
+    "anthropic/claude-fable-5.2",
+    "anthropic/claude-sonnet-4",
+    "x-ai/grok-4.7",
+    "x-ai/grok-4.6",
+    "x-ai/grok-4",
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-r1",
+    "qwen/qwen4-max",
+    "qwen/qwen3.8-max-prime",
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "openrouter/auto"
+  ],
+  codex_oauth: [
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
+    "gpt-6.1-sol",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "o3"
+  ]
 };
 var CODEX_CALLBACK_URI = "http://localhost:1455/auth/callback";
 function asRecord(value) {
@@ -6830,7 +6909,7 @@ data: ${JSON.stringify({ code, error: errorMsg })}
           }
         }
       }
-      const fallbackCandidates = connection.provider === "google" ? [.../* @__PURE__ */ new Set([connection.model || "gemini-2.5-flash", "gemini-2.5-flash", GEMINI_FLASH_LITE_35])] : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
+      const fallbackCandidates = connection.provider === "google" ? [.../* @__PURE__ */ new Set([connection.model || GEMINI_4_HYDROGEN, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_35])] : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
       let lastErr;
       for (const fallbackModel of fallbackCandidates) {
         signal.throwIfAborted();
