@@ -42,6 +42,22 @@ JS_AUDIT = """() => {
     }
   }
 
+  const trafficStrip = document.querySelector('.site-traffic-strip');
+  if (trafficStrip) {
+    const tr = trafficStrip.getBoundingClientRect();
+    if (tr.width > 0 && tr.height > 0) {
+      for (const sibling of document.querySelectorAll('.live-cockpit, .desk-kpi-band, .analysis-overview-grid, .analysis-week-strip')) {
+        const sr = sibling.getBoundingClientRect();
+        if (sr.width <= 0 || sr.height <= 0) continue;
+        const xOverlap = Math.min(tr.right, sr.right) - Math.max(tr.left, sr.left);
+        const yOverlap = Math.min(tr.bottom, sr.bottom) - Math.max(tr.top, sr.top);
+        if (xOverlap > 1 && yOverlap > 1) {
+          issues.push(`site-traffic-strip overlaps ${sibling.className.split(' ')[0]} (${Math.round(yOverlap)}px)`);
+        }
+      }
+    }
+  }
+
   const sidebar = document.querySelector('.fx-sidebar');
   const mobNav = document.querySelector('.fx-mobile-bottom-nav');
   const sidebarVis = sidebar && getComputedStyle(sidebar).display !== 'none';

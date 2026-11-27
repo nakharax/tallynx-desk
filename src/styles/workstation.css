@@ -5410,11 +5410,10 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
 .analysis-view,
 .analysis-subview {
   display: flex;
-  flex: 1 1 0;
+  flex: 1 0 auto;
   flex-direction: column;
   gap: 16px;
   min-width: 0;
-  min-height: 0;
 }
 .fx-workstation .analysis-subview > .fx-tab-panel-card { border-radius: var(--radius-sm); }
 .analysis-view[data-view="account"] > .fx-tabbed-container { flex: 0 0 auto; }

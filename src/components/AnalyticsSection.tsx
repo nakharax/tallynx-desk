@@ -2010,8 +2010,8 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
         </div>
       )}
       </>}
-      </section>
       <SiteTrafficStrip lang={lang} />
+      </section>
     </section>
   );
 });
