@@ -4083,7 +4083,7 @@ html[data-theme="obsidian"] .fx-modal-overlay::backdrop { background: rgb(0 0 0 
   overflow: auto;
   overscroll-behavior: contain;
   background: var(--bg-surface-solid);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--border-color);
   box-shadow: 0 20px 45px rgb(24 24 27 / 18%);
   padding: 16px;

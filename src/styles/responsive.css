@@ -1258,7 +1258,7 @@ html[data-theme="obsidian"] .workspace-subtab.is-active {
   .fx-modal-dialog {
     max-height: calc(100dvh - 20px);
     padding: 12px;
-    border-radius: 10px;
+    border-radius: var(--radius-card);
   }
   .workspace-subtabs {
     padding: 5px 8px;
