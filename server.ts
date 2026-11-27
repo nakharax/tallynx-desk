@@ -2386,7 +2386,7 @@ export function createApp() {
       }
 
       const fallbackCandidates = connection.provider === 'google'
-        ? [...new Set([connection.model || 'gemini-2.5-flash', 'gemini-2.5-flash', GEMINI_FLASH_LITE_35])]
+        ? [...new Set([connection.model || GEMINI_4_HYDROGEN, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_35])]
         : [GEMINI_FLASH_LITE_35, GEMINI_4_HYDROGEN, GEMINI_FLASH_LITE_31];
       let lastErr: unknown;
       for (const fallbackModel of fallbackCandidates) {

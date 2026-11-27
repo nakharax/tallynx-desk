@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { Database, KeyRound, X } from 'lucide-react';
 import { auth } from '../services/firebase';
 import {
-  AI_HEADERS, AI_MODEL_CATALOG, asRecord, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders,
+  AI_HEADERS, AI_MODEL_BADGES, AI_MODEL_CATALOG, asRecord, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders,
   maskCredential, normalizeAiModel, normalizeAiProvider, parseCodexCallbackInput, readCodexOauthCredential,
   type AiProvider, type PlatformAiRole,
 } from '../utils/aiProviderConfig';
@@ -89,6 +89,37 @@ function KeyField({ label, saved, hint, t, onSave, onClear, onVerify }: {
   );
 }
 
+const OPENROUTER_VENDOR_LABELS: Readonly<Record<string, string>> = {
+  google: 'Google Gemini',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic Claude',
+  'x-ai': 'xAI Grok',
+  deepseek: 'DeepSeek',
+  qwen: 'Alibaba Qwen',
+  openrouter: 'OpenRouter',
+};
+
+function formatModelOptionLabel(item: string, t: Translate): string {
+  if (item === 'auto') return t('Auto · Decision-1', 'อัตโนมัติ · Decision-1');
+  const badge = AI_MODEL_BADGES[item];
+  return badge ? `${item} · ${badge}` : item;
+}
+
+function groupOpenRouterModels(catalog: readonly string[]): Array<{ vendor: string; label: string; models: string[] }> {
+  const groups = new Map<string, string[]>();
+  for (const item of catalog) {
+    const vendor = item.split('/')[0] ?? 'other';
+    const list = groups.get(vendor) ?? [];
+    list.push(item);
+    groups.set(vendor, list);
+  }
+  return [...groups.entries()].map(([vendor, models]) => ({
+    vendor,
+    label: OPENROUTER_VENDOR_LABELS[vendor] ?? vendor,
+    models,
+  }));
+}
+
 function ModelPicker({ provider, model, t, onSave }: {
   provider: AiProvider; model: string; t: Translate; onSave: (model: string) => boolean;
 }) {
@@ -109,7 +140,17 @@ function ModelPicker({ provider, model, t, onSave }: {
           setDraft(null);
           setFeedback(next === '_custom' || onSave(next) ? '' : t('Could not save the model.', 'บันทึกโมเดลไม่สำเร็จ'));
         }}>
-          {catalog.map(item => <option key={item} value={item}>{item === 'auto' ? t('Auto · Decision-1', 'อัตโนมัติ · Decision-1') : item}</option>)}
+          {provider === 'openrouter'
+            ? groupOpenRouterModels(catalog).map(group => (
+                <optgroup key={group.vendor} label={group.label}>
+                  {group.models.map(item => (
+                    <option key={item} value={item}>{formatModelOptionLabel(item, t)}</option>
+                  ))}
+                </optgroup>
+              ))
+            : catalog.map(item => (
+                <option key={item} value={item}>{formatModelOptionLabel(item, t)}</option>
+              ))}
           {provider !== 'platform' && <option value="_custom">{t('Custom model ID', 'ระบุ ID โมเดลเอง')}</option>}
         </select>
       </label>

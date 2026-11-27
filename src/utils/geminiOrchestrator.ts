@@ -1,11 +1,24 @@
 import { GoogleGenAI } from '@google/genai';
 
 export const GEMINI_DECISION_MODEL = 'gemini-decision-1' as const;
+export const GEMINI_4_NEON = 'gemini-4-neon' as const;
+export const GEMINI_4_CARBON = 'gemini-4-carbon' as const;
+export const GEMINI_4_ARGON = 'gemini-4-argon' as const;
+export const GEMINI_38_FLASH = 'gemini-3.8-flash' as const;
 export const GEMINI_4_HYDROGEN = 'gemini-4-hydrogen' as const;
 export const GEMINI_FLASH_LITE_35 = 'gemini-3.5-flash-lite' as const;
 export const GEMINI_FLASH_LITE_31 = 'gemini-3.1-flash-lite' as const;
 export const GEMMA_4_31B_IT = 'gemma-4-31b-it' as const;
 export const GEMMA_4_26B_A4B_IT = 'gemma-4-26b-a4b-it' as const;
+
+export const PLATFORM_FRONTIER_GEMINI_MODELS = [
+  GEMINI_4_NEON,
+  GEMINI_4_CARBON,
+  GEMINI_4_ARGON,
+  GEMINI_38_FLASH,
+] as const;
+
+export type PlatformFrontierGeminiModel = (typeof PLATFORM_FRONTIER_GEMINI_MODELS)[number];
 
 export const GEMINI_38_LIVE = 'gemini-3.8-live' as const;
 export const GEMINI_38_LIVE_THINKING = 'gemini-3.8-live-extended-thinking' as const;
@@ -22,6 +35,7 @@ export const FREE_TIER_CHAT_MODELS = [
 ] as const;
 
 export type GeminiGenerationModel = (typeof FREE_TIER_CHAT_MODELS)[number];
+export type GeminiCandidateModel = GeminiGenerationModel | PlatformFrontierGeminiModel;
 
 export type ChatModelPreference = 'auto' | GeminiGenerationModel;
 
@@ -147,8 +161,8 @@ const TIER_CASCADES: Record<DecisionRouteTier, readonly GeminiGenerationModel[]>
 };
 
 export interface DecisionRoutePlan {
-  requestedPreference: ChatModelPreference;
-  candidateModels: GeminiGenerationModel[];
+  requestedPreference: ChatModelPreference | PlatformFrontierGeminiModel;
+  candidateModels: GeminiCandidateModel[];
   routedBy: 'decision-1' | 'heuristic' | 'manual';
   routeTier: DecisionRouteTier;
   decisionConfidence: number;
@@ -160,9 +174,9 @@ export interface DecisionRoutePlan {
 
 export interface OrchestratedResult {
   reply: string;
-  model: GeminiGenerationModel;
+  model: GeminiCandidateModel;
   failoverUsed: boolean;
-  attemptedModels: GeminiGenerationModel[];
+  attemptedModels: GeminiCandidateModel[];
   route: DecisionRoutePlan;
 }
 
@@ -209,15 +223,21 @@ export interface DecisionClientLike {
 export const SAFE_HARBOR_REMINDER =
   '\n\n[Decision-1 Compliance Guard]: User query may request trade signals or profit predictions. Strictly decline giving buy/sell signals, entry targets, or profit guarantees; provide only objective risk math, drawdown telemetry, and discipline rules.';
 
-export function modelSupportsGoogleSearch(model: GeminiGenerationModel): boolean {
+export function isPlatformFrontierGeminiModel(raw: unknown): raw is PlatformFrontierGeminiModel {
+  return typeof raw === 'string' && (PLATFORM_FRONTIER_GEMINI_MODELS as readonly string[]).includes(raw);
+}
+
+export function modelSupportsGoogleSearch(model: GeminiCandidateModel): boolean {
+  if (isPlatformFrontierGeminiModel(model)) return true;
   return MODEL_CAPABILITY_MAP[model]?.supportsGoogleSearch ?? false;
 }
 
-export function modelSupportsPdf(model: GeminiGenerationModel): boolean {
+export function modelSupportsPdf(model: GeminiCandidateModel): boolean {
+  if (isPlatformFrontierGeminiModel(model)) return true;
   return MODEL_CAPABILITY_MAP[model]?.supportsPdf ?? false;
 }
 
-export function isOpenWeightGemmaModel(model: GeminiGenerationModel): boolean {
+export function isOpenWeightGemmaModel(model: GeminiCandidateModel): boolean {
   return model === GEMMA_4_31B_IT || model === GEMMA_4_26B_A4B_IT;
 }
 
@@ -319,6 +339,7 @@ export async function planModelRoute(params: {
   decisionClient?: DecisionClientLike | null;
 }): Promise<DecisionRoutePlan> {
   const pref = normalizeChatModelPreference(params.preference);
+  const frontierPref = isPlatformFrontierGeminiModel(params.preference) ? params.preference : null;
   const hasRichContext = Boolean(params.hasRichContext);
   const hasVisualOrPdf = Boolean(params.hasVisualOrPdf);
   const hasPdfAttachment = Boolean(params.hasPdfAttachment);
@@ -328,6 +349,20 @@ export async function planModelRoute(params: {
       params.prompt,
     );
   const heuristicSearch = forceWebSearch || detectWebSearchNeed(params.prompt);
+
+  if (frontierPref) {
+    return {
+      requestedPreference: frontierPref,
+      candidateModels: [frontierPref, ...FREE_TIER_CHAT_MODELS],
+      routedBy: 'manual',
+      routeTier: 'frontier_multimodal',
+      decisionConfidence: 1,
+      asksForTradeSignal: heuristicSignal,
+      needsWebSearch: heuristicSearch,
+      hasPdfAttachment,
+      decisionModel: GEMINI_DECISION_MODEL,
+    };
+  }
 
   if (pref !== 'auto') {
     const info = MODEL_CAPABILITY_MAP[pref];
@@ -452,10 +487,10 @@ export async function planModelRoute(params: {
 
 export async function executeWithModelFailover(
   route: DecisionRoutePlan,
-  runModel: (model: GeminiGenerationModel, systemInstructionSuffix: string) => Promise<string>,
+  runModel: (model: GeminiCandidateModel, systemInstructionSuffix: string) => Promise<string>,
 ): Promise<OrchestratedResult> {
   const suffix = route.asksForTradeSignal ? SAFE_HARBOR_REMINDER : '';
-  const attemptedModels: GeminiGenerationModel[] = [];
+  const attemptedModels: GeminiCandidateModel[] = [];
   let lastError: unknown;
 
   for (let i = 0; i < route.candidateModels.length; i++) {
