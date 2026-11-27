@@ -4887,6 +4887,13 @@ export default function App() {
                 syncContent={renderDbSyncCenter()}
                 brandingContent={brandingForm}
                 onOpenMt5Sync={handleOpenMt5SyncModal}
+                mt5ConnectedCount={Object.values(state.accounts).filter((acc) =>
+                  (acc.syncProvider && acc.syncProvider !== 'MANUAL_XLSX' && acc.syncProvider !== 'FUNDEDNEXT_MCP') ||
+                  Boolean(acc.tredynApiKey || acc.metaApiAccountId || acc.bridgeUrl)
+                ).length}
+                fundedNextConnectedCount={Object.values(state.accounts).filter((acc) =>
+                  Boolean(acc.fundedNextConnectionId || acc.fundedNextAccountId || acc.syncProvider === 'FUNDEDNEXT_MCP')
+                ).length}
               />
             )}
           </React.Suspense>

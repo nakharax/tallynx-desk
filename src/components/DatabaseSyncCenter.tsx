@@ -253,7 +253,11 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                   className="status-dot"
                   style={{ background: currentUser ? 'var(--emerald)' : 'var(--text-muted)' }}
                 />
-                {cloudSyncing ? t("Syncing…", "กำลังซิงก์...") : currentUser ? 'Cloud Realtime' : 'Local Only'}
+                {cloudSyncing
+                  ? t("Syncing…", "กำลังซิงก์...")
+                  : currentUser
+                    ? t("Connected · Cloud Realtime", "เชื่อมต่อแล้ว · Cloud Realtime")
+                    : t("Not connected · Local Only", "ยังไม่เชื่อม · เก็บในเครื่องเท่านั้น")}
               </span>
             </div>
 
@@ -292,14 +296,20 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
 
             {/* Optional REST API / Webhook Disclosure */}
             <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '10px', marginTop: '8px' }}>
-              <button
-                type="button"
-                className="btn xs"
-                style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--text-secondary)', cursor: 'pointer' }}
-                onClick={() => setShowApiSettings((v) => !v)}
-              >
-                {showApiSettings ? t("▾ Hide REST API / webhook settings", "▾ ซ่อนการตั้งค่า REST API / Webhook") : t("▸ Configure optional REST API / webhook", "▸ ตั้งค่า REST API / Webhook เสริม")}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn xs"
+                  style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--text-secondary)', cursor: 'pointer' }}
+                  onClick={() => setShowApiSettings((v) => !v)}
+                >
+                  {showApiSettings ? t("▾ Hide REST API / webhook settings", "▾ ซ่อนการตั้งค่า REST API / Webhook") : t("▸ Configure optional REST API / webhook", "▸ ตั้งค่า REST API / Webhook เสริม")}
+                </button>
+                <span className="desk-conn-pill" data-state={apiUrl.trim() ? 'connected' : 'disconnected'}>
+                  <span className="desk-conn-dot" data-state={apiUrl.trim() ? 'connected' : 'disconnected'} aria-hidden="true" />
+                  {apiUrl.trim() ? t("Configured", "ตั้งค่าแล้ว") : t("Not connected", "ยังไม่เชื่อม")}
+                </span>
+              </div>
 
               {showApiSettings && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}>
@@ -354,13 +364,19 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
               gap: '12px',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
               <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
                 {t("Restore points (IndexedDB snapshots)", "จุดกู้คืนในเครื่อง (IndexedDB)")}
               </strong>
-              <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                {snapshots.length}{t(" snapshots", " รายการ")}
-              </span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                <span className="desk-conn-pill" data-state={idbReady ? 'connected' : 'unavailable'}>
+                  <span className="desk-conn-dot" data-state={idbReady ? 'connected' : 'unavailable'} aria-hidden="true" />
+                  {idbReady ? t("IndexedDB ready", "IndexedDB พร้อม") : t("LocalStorage fallback", "ใช้ LocalStorage สำรอง")}
+                </span>
+                <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  {snapshots.length}{t(" snapshots", " รายการ")}
+                </span>
+              </div>
             </div>
 
             {snapshots.length === 0 ? (

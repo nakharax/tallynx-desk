@@ -19,7 +19,7 @@ import {
   type DeskLanguage,
 } from '../utils/deskI18n';
 import { auth } from '../services/firebase';
-import { AI_MODEL_CATALOG, asRecord } from '../utils/aiProviderConfig';
+import { AI_MODEL_CATALOG, asRecord, getActiveDeskAiStatus } from '../utils/aiProviderConfig';
 import { CoachStreamError, readCoachReplyStream } from '../utils/coachReplyStream';
 import { isEventStream } from '../utils/serverSentEvents';
 import { canRequestDeskAi, getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
@@ -749,6 +749,12 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const providerLabel = textCredential?.provider === 'google' ? 'Google Gemini'
     : textCredential?.provider === 'openrouter' ? 'OpenRouter'
       : textCredential?.provider === 'codex_oauth' ? (byok.openAiKey ? 'OpenAI API' : 'Codex OAuth') : undefined;
+  const activeAiStatus = getActiveDeskAiStatus(byok, currentUserUid);
+  const aiStatusCopy = activeAiStatus.state === 'connected'
+    ? t('Connected', 'เชื่อมต่อแล้ว')
+    : activeAiStatus.state === 'expired'
+      ? t('Expired', 'หมดอายุ')
+      : t('Not connected', 'ยังไม่เชื่อม');
   const canCloudVoice = isOnline && canRequestDeskAi(byok, currentUserUid, 'voice');
   const voiceCredential = selectDeskAiCredential(byok, 'voice');
   const voiceProvider = voiceCredential?.provider;
@@ -2570,7 +2576,16 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
 
           <div className="coach-input-actions">
             {byok.provider ? (
-              <span className="coach-provider-label mono">{providerLabel ?? 'Platform Gemini'} · {byok.models[byok.provider] ?? personalTextModel ?? selectedModel}</span>
+              <span
+                className="coach-provider-label mono"
+                data-state={activeAiStatus.state}
+                title={`${providerLabel ?? 'Platform Gemini'} · ${aiStatusCopy}`}
+              >
+                <span className="desk-conn-dot" data-state={activeAiStatus.state} aria-hidden="true" />
+                <span>
+                  {providerLabel ?? 'Platform Gemini'} · {byok.models[byok.provider] ?? personalTextModel ?? selectedModel} · {aiStatusCopy}
+                </span>
+              </span>
             ) : <select
               aria-label={t("Choose a free-tier Google API model", "เลือกโมเดล Google API Free Tier")}
               className="coach-model-select"

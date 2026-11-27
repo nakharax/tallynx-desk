@@ -22,6 +22,8 @@ interface SettingsPageSectionProps {
   onChangeThbRate: (rate: number) => void;
   onTogglePrivacyMask: () => void;
   onOpenMt5Sync: () => void;
+  mt5ConnectedCount?: number;
+  fundedNextConnectedCount?: number;
   brandingContent: React.ReactNode;
   accountsContent: React.ReactNode;
   syncContent: React.ReactNode;
@@ -42,6 +44,8 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
   onChangeThbRate,
   onTogglePrivacyMask,
   onOpenMt5Sync,
+  mt5ConnectedCount = 0,
+  fundedNextConnectedCount = 0,
   brandingContent,
   accountsContent,
   syncContent,
@@ -160,7 +164,21 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
     sync: <>
       <div className="card settings-mt5-card">
         <div>
-          <h2 className="card-title">{t('MT5 Bridge', 'การเชื่อมต่อ MT5')}</h2>
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <h2 className="card-title">{t('MT5 & Broker Bridge', 'การเชื่อมต่อ MT5 และโบรกเกอร์')}</h2>
+            <span className="desk-conn-pill" data-state={mt5ConnectedCount > 0 ? 'connected' : 'disconnected'}>
+              <span className="desk-conn-dot" data-state={mt5ConnectedCount > 0 ? 'connected' : 'disconnected'} aria-hidden="true" />
+              {mt5ConnectedCount > 0
+                ? t(`MT5 connected (${mt5ConnectedCount})`, `MT5 เชื่อมต่อแล้ว (${mt5ConnectedCount} พอร์ต)`)
+                : t('MT5 not connected', 'MT5 ยังไม่เชื่อม')}
+            </span>
+            <span className="desk-conn-pill" data-state={fundedNextConnectedCount > 0 ? 'connected' : 'disconnected'}>
+              <span className="desk-conn-dot" data-state={fundedNextConnectedCount > 0 ? 'connected' : 'disconnected'} aria-hidden="true" />
+              {fundedNextConnectedCount > 0
+                ? t(`FundedNext MCP (${fundedNextConnectedCount})`, `FundedNext MCP เชื่อมต่อแล้ว (${fundedNextConnectedCount} พอร์ต)`)
+                : t('FundedNext MCP not connected', 'FundedNext MCP ยังไม่เชื่อม')}
+            </span>
+          </div>
           <p>{t('Manage read-only connections or import an MT5 statement.', 'จัดการการเชื่อมต่อแบบอ่านอย่างเดียวหรือนำเข้ารายงาน MT5')}</p>
         </div>
         <button id="settings-mt5-bridge" type="button" className="btn sm" onClick={onOpenMt5Sync}>

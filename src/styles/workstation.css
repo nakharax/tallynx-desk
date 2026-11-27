@@ -3553,10 +3553,65 @@ body.drag-over-active .mt5-dropzone {
   padding: 4px 6px 6px;
 }
 .coach-provider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.desk-conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: var(--text-secondary, #64748b);
+  opacity: 0.55;
+}
+
+.desk-conn-dot[data-state="connected"] {
+  background: var(--emerald, #16a34a);
+  opacity: 1;
+}
+
+.desk-conn-dot[data-state="expired"],
+.desk-conn-dot[data-state="unavailable"] {
+  background: var(--amber, #d97706);
+  opacity: 1;
+}
+
+.desk-conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color, #58637350);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.desk-conn-pill[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--emerald, #16a34a) 45%, transparent);
+  color: var(--emerald, #16a34a);
+  font-weight: 600;
+}
+
+.desk-conn-pill[data-state="expired"],
+.desk-conn-pill[data-state="unavailable"] {
+  border-color: color-mix(in srgb, var(--amber, #d97706) 45%, transparent);
+  color: var(--amber, #b37930);
+  font-weight: 600;
+}
+
+.byok-trigger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .coach-model-select {
   flex: 0 1 175px;

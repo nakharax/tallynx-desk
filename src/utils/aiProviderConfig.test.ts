@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AI_MODEL_CATALOG, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders, decodeCodexJwtMetadata,
-  getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel, normalizeAiProvider,
-  parseCodexCallbackInput,
+  getActiveDeskAiStatus, getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel,
+  normalizeAiProvider, parseCodexCallbackInput,
 } from './aiProviderConfig.ts';
 import { planModelRoute } from './geminiOrchestrator.ts';
 import { loadByokCredentials, refreshCodexOauthIfNeeded, saveByokCredentials } from './byokStorage.ts';
@@ -91,6 +91,12 @@ test('reports per-provider connection state accurately across connected, expired
   assert.equal(getAiProviderConnectionState('codex_oauth', {}, null, now), 'disconnected');
   assert.equal(isDatabentoConnected('db-valid-key'), true);
   assert.equal(isDatabentoConnected(undefined), false);
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'google', googleKey: google }, null, now), { provider: 'google', state: 'connected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'codex_oauth' }, null, now), { provider: 'codex_oauth', state: 'disconnected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'codex_oauth', codex: { accessToken: expiredJwt, expiresAt: now - 1_000 } }, null, now), { provider: 'codex_oauth', state: 'expired' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, 'founder-uid', now), { provider: 'platform', state: 'connected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, null, now), { provider: 'platform', state: 'disconnected' });
+  assert.deepEqual(getActiveDeskAiStatus({}, null, now), { provider: null, state: 'disconnected' });
 });
 
 test('Desk access reads the platform key only after privilege verification and never falls back from personal providers', async () => {

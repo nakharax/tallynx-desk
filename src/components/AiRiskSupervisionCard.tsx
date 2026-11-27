@@ -18,7 +18,7 @@ import {
   type RiskSupervisionFallbackReason,
 } from '../utils/riskSupervisionReport';
 import { formatChartPrice, LIVE_CHART_SYMBOLS, LIVE_CHART_TIMEFRAMES, useLiveChartFeed } from '../utils/useLiveChartFeed';
-import { AI_MODEL_CATALOG } from '../utils/aiProviderConfig';
+import { AI_MODEL_CATALOG, getActiveDeskAiStatus } from '../utils/aiProviderConfig';
 import { getDeskAiRequestHeaders, selectDeskAiCredential, useByokCredentials } from '../utils/byokStorage';
 import { AiAndDataKeysDialogButton } from './AiAndDataKeysCard';
 
@@ -233,6 +233,7 @@ function SupervisionAudit({
 }) {
   const byok = useByokCredentials(uid);
   const connection = selectDeskAiCredential(byok);
+  const activeAiStatus = getActiveDeskAiStatus(byok, uid);
   const model = connection && connection.provider !== 'platform'
     ? connection.model ?? AI_MODEL_CATALOG[connection.provider][0] : undefined;
   const [result, setResult] = useState<AiRiskSupervisionReport | null>(null);
@@ -307,6 +308,14 @@ function SupervisionAudit({
           <span className="risk-sv-badge" data-source={report.source}>
             {report.source === 'deterministic' ? t('Deterministic Quant Audit', 'การตรวจสอบเชิงปริมาณตามสูตร')
               : t('AI Risk Supervision', 'การกำกับความเสี่ยงด้วย AI')}
+          </span>
+          <span className="desk-conn-pill" data-state={activeAiStatus.state}>
+            <span className="desk-conn-dot" data-state={activeAiStatus.state} aria-hidden="true" />
+            {activeAiStatus.state === 'connected'
+              ? t('AI connected', 'AI เชื่อมต่อแล้ว')
+              : activeAiStatus.state === 'expired'
+                ? t('AI token expired', 'โทเค็น AI หมดอายุ')
+                : t('AI not connected', 'AI ยังไม่เชื่อม')}
           </span>
           {(result?.model ?? (!result && model)) && <span className="mono">{result?.model ?? model}</span>}
           {result && <time dateTime={result.generatedAt} className="mono">
