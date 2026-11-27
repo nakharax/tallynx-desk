@@ -50,6 +50,120 @@
   color: var(--emerald, #26826c);
 }
 
+.byok-status-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.byok-status-chip {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: var(--radius-card-inner);
+  border: 1px solid var(--border-color, #58637350);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+  min-width: 0;
+}
+
+.byok-status-chip:hover {
+  border-color: var(--accent, #2563eb);
+}
+
+.byok-status-chip[data-active="true"] {
+  border-color: var(--accent, #2563eb);
+  background: color-mix(in srgb, var(--accent, #2563eb) 7%, transparent);
+}
+
+.byok-status-chip-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.byok-status-name {
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.byok-status-active {
+  margin-inline-start: auto;
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--accent, #2563eb);
+  white-space: nowrap;
+}
+
+.byok-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: var(--text-secondary, #64748b);
+  opacity: 0.55;
+}
+
+.byok-status-dot[data-state="connected"] {
+  background: var(--emerald, #16a34a);
+  opacity: 1;
+}
+
+.byok-status-dot[data-state="expired"],
+.byok-status-dot[data-state="unavailable"] {
+  background: var(--amber, #d97706);
+  opacity: 1;
+}
+
+.byok-status-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-inline-start: 13px;
+}
+
+.byok-status-text[data-state="connected"] {
+  color: var(--emerald, #16a34a);
+  font-weight: 600;
+}
+
+.byok-status-text[data-state="expired"],
+.byok-status-text[data-state="unavailable"] {
+  color: var(--amber, #b37930);
+  font-weight: 600;
+}
+
+.byok-databento-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.byok-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color, #58637350);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.byok-status-pill[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--emerald, #16a34a) 45%, transparent);
+  color: var(--emerald, #16a34a);
+  font-weight: 600;
+}
+
 .byok-grid {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);

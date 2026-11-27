@@ -3,8 +3,9 @@ import { Database, KeyRound, X } from 'lucide-react';
 import { auth } from '../services/firebase';
 import {
   AI_HEADERS, AI_MODEL_BADGES, AI_MODEL_CATALOG, asRecord, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders,
-  maskCredential, normalizeAiModel, normalizeAiProvider, parseCodexCallbackInput, readCodexOauthCredential,
-  type AiProvider, type PlatformAiRole,
+  getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel, normalizeAiProvider,
+  parseCodexCallbackInput, readCodexOauthCredential,
+  type AiProvider, type PlatformAiRole, type ProviderConnectionState,
 } from '../utils/aiProviderConfig';
 import {
   loadByokCredentials, refreshCodexOauthIfNeeded, saveByokCredentials, useByokCredentials, type ByokCredentials,
@@ -19,6 +20,20 @@ const PROVIDER_LABELS: Record<AiProvider, string> = {
   openrouter: 'OpenRouter API',
   codex_oauth: 'OpenAI / Codex OAuth',
 };
+
+const PROVIDER_SHORT_LABELS: Record<AiProvider, string> = {
+  platform: 'Platform Gemini',
+  google: 'Google Gemini',
+  openrouter: 'OpenRouter',
+  codex_oauth: 'Codex / OpenAI',
+};
+
+function connectionStateLabel(state: ProviderConnectionState, t: Translate): string {
+  if (state === 'connected') return t('Connected', 'เชื่อมต่อแล้ว');
+  if (state === 'expired') return t('Expired', 'หมดอายุ');
+  if (state === 'unavailable') return t('Unavailable', 'ไม่พร้อมใช้งาน');
+  return t('Not connected', 'ยังไม่เชื่อม');
+}
 
 interface CardProps {
   uid: string | null;
@@ -483,6 +498,14 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
     : status ? t('BYOK required', 'ต้องใช้คีย์ของคุณ') : t('Checking platform access…', 'กำลังตรวจสอบสิทธิ์แพลตฟอร์ม…');
   const providerOptions: AiProvider[] = eligible
     ? ['platform', 'google', 'openrouter', 'codex_oauth'] : ['google', 'openrouter', 'codex_oauth'];
+  const platformInfo = status ? { eligible: status.platformEligible, configured: status.platformConfigured } : null;
+  const providerStates: Record<AiProvider, ProviderConnectionState> = {
+    platform: getAiProviderConnectionState('platform', credentials, platformInfo),
+    google: getAiProviderConnectionState('google', credentials, platformInfo),
+    openrouter: getAiProviderConnectionState('openrouter', credentials, platformInfo),
+    codex_oauth: getAiProviderConnectionState('codex_oauth', credentials, platformInfo),
+  };
+  const databentoState: ProviderConnectionState = isDatabentoConnected(credentials.databentoKey) ? 'connected' : 'disconnected';
   return (
     <section className="card byok-card">
       <header className="byok-heading">
@@ -492,6 +515,32 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
         </div>
         <span className="byok-access" data-eligible={eligible} role="status">{roleLabel}</span>
       </header>
+      <div className="byok-status-strip" aria-label={t('Provider connection status', 'สถานะการเชื่อมต่อผู้ให้บริการ')}>
+        {providerOptions.map(value => {
+          const state = providerStates[value];
+          const isActive = provider === value;
+          return (
+            <button
+              key={value}
+              type="button"
+              className="byok-status-chip"
+              data-state={state}
+              data-active={isActive}
+              aria-pressed={isActive}
+              onClick={() => { update({ provider: value }); }}
+            >
+              <span className="byok-status-chip-top">
+                <span className="byok-status-dot" data-state={state} aria-hidden="true" />
+                <span className="byok-status-name">{PROVIDER_SHORT_LABELS[value]}</span>
+                {isActive && <span className="byok-status-active">{t('Active', 'ใช้งานอยู่')}</span>}
+              </span>
+              <span className="byok-status-text" data-state={state}>
+                {connectionStateLabel(state, t)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
       <div className="byok-grid">
         <div className="byok-provider">
           <label className="byok-field">
@@ -501,7 +550,11 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
               if (next) update({ provider: next });
             }}>
               <option value="" disabled>{t('Choose a provider', 'เลือกผู้ให้บริการ')}</option>
-              {providerOptions.map(value => <option key={value} value={value}>{PROVIDER_LABELS[value]}</option>)}
+              {providerOptions.map(value => (
+                <option key={value} value={value}>
+                  {`${PROVIDER_LABELS[value]} · ${connectionStateLabel(providerStates[value], t)}`}
+                </option>
+              ))}
             </select>
           </label>
           {provider && <ModelPicker key={provider} provider={provider} t={t}
@@ -522,7 +575,13 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
             <p className="byok-feedback">{t('This provider handles text. Cloud voice and Live use a Google Gemini key.', 'ผู้ให้บริการนี้ใช้กับข้อความ ส่วนเสียงบนคลาวด์และ Live ใช้คีย์ Google Gemini')}</p>}
         </div>
         <div className="byok-databento">
-          <h3><Database size={15} aria-hidden="true" /> Databento</h3>
+          <div className="byok-databento-head">
+            <h3><Database size={15} aria-hidden="true" /> Databento</h3>
+            <span className="byok-status-pill" data-state={databentoState}>
+              <span className="byok-status-dot" data-state={databentoState} aria-hidden="true" />
+              {connectionStateLabel(databentoState, t)}
+            </span>
+          </div>
           <p>{t('Your personal key for the COMEX data bridge.', 'คีย์ส่วนตัวสำหรับการเชื่อมต่อข้อมูล COMEX')}</p>
           <KeyField t={t} label={t('Databento API key', 'คีย์ Databento API')} hint="db-…" saved={credentials.databentoKey}
             onClear={() => update({ databentoKey: undefined })}
