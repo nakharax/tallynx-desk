@@ -20,6 +20,7 @@ import { canFallbackToUsdWorkspace, formatPilotAmount } from '../utils/fundedNex
 import type { PilotTelemetryView } from '../utils/fundedNextPilot';
 import type { AnyLivePositionInput, LiveTelemetryPoint } from '../utils/liveTelemetryBuffer';
 import { LivePositionMonitorCard, type LiveMonitorControlState } from './LivePositionMonitorCard';
+import { SiteTrafficStrip } from './SiteTrafficStrip';
 import {
   buildMonthlyConsistencyCalendar,
   buildSevenDayConsistencyCalendar,
@@ -2010,6 +2011,7 @@ export const AnalyticsSection: React.FC<AnalyticsSectionProps> = React.memo(({
       )}
       </>}
       </section>
+      <SiteTrafficStrip lang={lang} />
     </section>
   );
 });

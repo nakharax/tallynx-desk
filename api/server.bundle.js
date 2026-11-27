@@ -1,8 +1,8 @@
 // server.ts
 import "dotenv/config";
-import crypto from "crypto";
+import crypto2 from "crypto";
 import { EventEmitter } from "events";
-import express4 from "express";
+import express5 from "express";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -3982,6 +3982,300 @@ function createComexBridgeRouter({ fetchLiveSpotQuote }) {
   return router;
 }
 
+// server/telemetry/siteTraffic.ts
+import { readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join2 } from "node:path";
+import express4 from "express";
+
+// src/utils/siteTraffic.ts
+var BOT_USER_AGENT_RE = /bot|crawler|spider|slurp|bingpreview|facebookexternalhit|whatsapp|telegrambot|discordbot|headlesschrome|lighthouse|pagespeed|pingdom|uptimerobot|statuscake|curl|wget|python-requests|go-http-client|axios|node-fetch|playwright|puppeteer/i;
+var SESSION_ID_RE = /^[a-zA-Z0-9_-]{8,64}$/;
+function normalizeTrafficSite(value, fallback = "desk") {
+  if (typeof value !== "string") return fallback;
+  const norm = value.trim().toLowerCase();
+  if (norm === "web" || norm === "tallynx-web" || norm === "tallynx.com") return "web";
+  if (norm === "desk" || norm === "tallynx-desk" || norm === "desk.tallynx.com") return "desk";
+  return fallback;
+}
+function normalizeSessionId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return SESSION_ID_RE.test(trimmed) ? trimmed : null;
+}
+function isLikelyBotUserAgent(userAgent) {
+  if (typeof userAgent !== "string" || !userAgent.trim()) return false;
+  return BOT_USER_AGENT_RE.test(userAgent);
+}
+function getBangkokDayKey(nowMs = Date.now()) {
+  const shifted = new Date(nowMs + 7 * 60 * 60 * 1e3);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// server/telemetry/siteTraffic.ts
+var ONLINE_WINDOW_MS = 5 * 60 * 1e3;
+var DAY_KEY_TTL_SEC = 60 * 60 * 48;
+var REDIS_PREFIX = "tallynx:traffic:v1";
+var ALLOWED_CORS_ORIGINS = /* @__PURE__ */ new Set([
+  "https://tallynx.com",
+  "https://www.tallynx.com",
+  "https://desk.tallynx.com",
+  "https://mall.tallynx.com"
+]);
+function resolveUpstashConfig(env = process.env) {
+  const url = (env.UPSTASH_REDIS_REST_URL || env.KV_REST_API_URL || "").trim().replace(/\/+$/, "");
+  const token = (env.UPSTASH_REDIS_REST_TOKEN || env.KV_REST_API_TOKEN || "").trim();
+  if (!url || !token || !/^https?:\/\//i.test(url)) return null;
+  return { url, token };
+}
+function isAllowedCorsOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED_CORS_ORIGINS.has(origin)) return true;
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+async function runRedisPipeline(config, commands, fetcher = fetch) {
+  const response = await fetcher(`${config.url}/pipeline`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(commands),
+    signal: AbortSignal.timeout(4e3),
+    redirect: "error"
+  });
+  if (!response.ok) {
+    throw new Error(`Upstash REST pipeline failed (${response.status})`);
+  }
+  const payload = await response.json();
+  if (!Array.isArray(payload)) {
+    throw new Error("Unexpected Upstash pipeline payload");
+  }
+  return payload.map((item) => item?.result);
+}
+function toCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+async function recordAndReadRedis(config, site, sessionId, pageView, nowMs, fetcher) {
+  const dayKey = getBangkokDayKey(nowMs);
+  const cutoffMs = nowMs - ONLINE_WINDOW_MS;
+  const totalKey = (s) => `${REDIS_PREFIX}:total:${s}`;
+  const dayCountKey = (s) => `${REDIS_PREFIX}:day:${s}:${dayKey}`;
+  const seenKey = (s) => `${REDIS_PREFIX}:seen:${s}:${dayKey}`;
+  const onlineKey = (s) => `${REDIS_PREFIX}:online:${s}`;
+  if (sessionId) {
+    if (pageView) {
+      const [added] = await runRedisPipeline(
+        config,
+        [
+          ["SADD", seenKey(site), sessionId],
+          ["EXPIRE", seenKey(site), DAY_KEY_TTL_SEC]
+        ],
+        fetcher
+      );
+      if (toCount(added) > 0) {
+        await runRedisPipeline(
+          config,
+          [
+            ["INCR", totalKey(site)],
+            ["INCR", dayCountKey(site)],
+            ["EXPIRE", dayCountKey(site), DAY_KEY_TTL_SEC]
+          ],
+          fetcher
+        );
+      }
+    }
+    await runRedisPipeline(
+      config,
+      [
+        ["ZADD", onlineKey(site), nowMs, sessionId],
+        ["EXPIRE", onlineKey(site), 900]
+      ],
+      fetcher
+    );
+  }
+  const results = await runRedisPipeline(
+    config,
+    [
+      ["ZREMRANGEBYSCORE", onlineKey("web"), 0, cutoffMs],
+      ["ZREMRANGEBYSCORE", onlineKey("desk"), 0, cutoffMs],
+      ["GET", totalKey("web")],
+      ["GET", dayCountKey("web")],
+      ["ZCARD", onlineKey("web")],
+      ["GET", totalKey("desk")],
+      ["GET", dayCountKey("desk")],
+      ["ZCARD", onlineKey("desk")]
+    ],
+    fetcher
+  );
+  const webTotal = toCount(results[2]);
+  const webToday = toCount(results[3]);
+  const webOnline = toCount(results[4]);
+  const deskTotal = toCount(results[5]);
+  const deskToday = toCount(results[6]);
+  const deskOnline = toCount(results[7]);
+  const isWeb = site === "web";
+  const siteTotalVisits = isWeb ? webTotal : deskTotal;
+  const siteTodayVisits = isWeb ? webToday : deskToday;
+  const siteOnlineNow = Math.max(sessionId ? 1 : 0, isWeb ? webOnline : deskOnline);
+  return {
+    site,
+    dayKey,
+    siteTotalVisits,
+    siteTodayVisits,
+    siteOnlineNow,
+    ecosystemTotalVisits: webTotal + deskTotal,
+    ecosystemTodayVisits: webToday + deskToday,
+    ecosystemOnlineNow: Math.max(siteOnlineNow, webOnline + deskOnline),
+    storageMode: "redis",
+    updatedAt: new Date(nowMs).toISOString()
+  };
+}
+function emptySiteState(dayKey) {
+  return { total: 0, dayKey, today: 0, seenToday: [], online: {} };
+}
+function createMemoryTrafficStore(filePath) {
+  let state = null;
+  function load(dayKey) {
+    if (state) return state;
+    try {
+      const parsed = JSON.parse(readFileSync2(filePath, "utf8"));
+      state = {
+        web: parsed.web ? { ...emptySiteState(dayKey), ...parsed.web } : emptySiteState(dayKey),
+        desk: parsed.desk ? { ...emptySiteState(dayKey), ...parsed.desk } : emptySiteState(dayKey)
+      };
+    } catch {
+      state = { web: emptySiteState(dayKey), desk: emptySiteState(dayKey) };
+    }
+    return state;
+  }
+  function persist(next) {
+    const tmp = `${filePath}.${randomUUID3()}.tmp`;
+    try {
+      writeFileSync2(tmp, JSON.stringify(next), { encoding: "utf8", mode: 384 });
+      renameSync2(tmp, filePath);
+    } catch {
+      try {
+        rmSync2(tmp, { force: true });
+      } catch {
+      }
+    }
+  }
+  function pruneAndRollover(siteState, dayKey, cutoffMs) {
+    if (siteState.dayKey !== dayKey) {
+      siteState.dayKey = dayKey;
+      siteState.today = 0;
+      siteState.seenToday = [];
+    }
+    for (const [sid, ts] of Object.entries(siteState.online)) {
+      if (!Number.isFinite(ts) || ts < cutoffMs) {
+        delete siteState.online[sid];
+      }
+    }
+    if (siteState.seenToday.length > 5e3) {
+      siteState.seenToday = siteState.seenToday.slice(-2500);
+    }
+  }
+  return function recordAndReadMemory(site, sessionId, pageView, nowMs) {
+    const dayKey = getBangkokDayKey(nowMs);
+    const cutoffMs = nowMs - ONLINE_WINDOW_MS;
+    const store = load(dayKey);
+    pruneAndRollover(store.web, dayKey, cutoffMs);
+    pruneAndRollover(store.desk, dayKey, cutoffMs);
+    const target = store[site];
+    let dirty = false;
+    if (sessionId) {
+      target.online[sessionId] = nowMs;
+      dirty = true;
+      if (pageView && !target.seenToday.includes(sessionId)) {
+        target.seenToday.push(sessionId);
+        target.total += 1;
+        target.today += 1;
+      }
+    }
+    if (dirty) persist(store);
+    const webOnline = Object.keys(store.web.online).length;
+    const deskOnline = Object.keys(store.desk.online).length;
+    const isWeb = site === "web";
+    const siteOnlineNow = Math.max(sessionId ? 1 : 0, isWeb ? webOnline : deskOnline);
+    return {
+      site,
+      dayKey,
+      siteTotalVisits: target.total,
+      siteTodayVisits: target.today,
+      siteOnlineNow,
+      ecosystemTotalVisits: store.web.total + store.desk.total,
+      ecosystemTodayVisits: store.web.today + store.desk.today,
+      ecosystemOnlineNow: Math.max(siteOnlineNow, webOnline + deskOnline),
+      storageMode: "memory",
+      updatedAt: new Date(nowMs).toISOString()
+    };
+  };
+}
+function createSiteTrafficRouter(options = {}) {
+  const router = express4.Router();
+  const defaultSite = options.defaultSite ?? "desk";
+  const env = options.env ?? process.env;
+  const fetcher = options.fetcher ?? fetch;
+  const now = options.now ?? Date.now;
+  const recordMemory = createMemoryTrafficStore(
+    options.storeFile ?? join2(tmpdir2(), "tallynx_site_traffic_v1.json")
+  );
+  function applyCors(req, res) {
+    const origin = req.headers.origin;
+    if (typeof origin === "string" && isAllowedCorsOrigin(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    }
+  }
+  router.options("/telemetry/traffic", (req, res) => {
+    applyCors(req, res);
+    res.status(204).end();
+  });
+  router.get("/telemetry/traffic", async (req, res) => {
+    applyCors(req, res);
+    res.setHeader("Cache-Control", "no-store");
+    const site = normalizeTrafficSite(req.query.site, defaultSite);
+    const nowMs = now();
+    const redisConfig = resolveUpstashConfig(env);
+    if (redisConfig) {
+      try {
+        const snapshot = await recordAndReadRedis(redisConfig, site, null, false, nowMs, fetcher);
+        return res.json(snapshot);
+      } catch {
+      }
+    }
+    return res.json(recordMemory(site, null, false, nowMs));
+  });
+  router.post("/telemetry/traffic", async (req, res) => {
+    applyCors(req, res);
+    res.setHeader("Cache-Control", "no-store");
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const site = normalizeTrafficSite(body.site, defaultSite);
+    const isBot = isLikelyBotUserAgent(req.headers["user-agent"]);
+    const sessionId = isBot ? null : normalizeSessionId(body.sessionId);
+    const pageView = !isBot && body.pageView === true && Boolean(sessionId);
+    const nowMs = now();
+    const redisConfig = resolveUpstashConfig(env);
+    if (redisConfig) {
+      try {
+        const snapshot = await recordAndReadRedis(redisConfig, site, sessionId, pageView, nowMs, fetcher);
+        return res.json(snapshot);
+      } catch {
+      }
+    }
+    return res.json(recordMemory(site, sessionId, pageView, nowMs));
+  });
+  return router;
+}
+
 // server/ai/platformPrivilege.ts
 function readFirebaseLookupCaller(payload, requireVerifiedEmail) {
   const users = asRecord(payload)?.users;
@@ -4800,7 +5094,7 @@ function normalizeLiveBridgeState(body, rawMeta) {
 var LIVE_BRIDGE_STORE_PATH = path.join(os.tmpdir(), "tredyn_live_bridge_store_v32.json");
 var liveBridgeMemoryStore = /* @__PURE__ */ new Map();
 function hashTredynApiKey(rawKey) {
-  return crypto.createHash("sha256").update(rawKey.trim()).digest("hex");
+  return crypto2.createHash("sha256").update(rawKey.trim()).digest("hex");
 }
 function isValidTredynApiKey(rawKey) {
   const cleaned = rawKey.trim();
@@ -4926,8 +5220,8 @@ async function probeSinglePropFirm(firm, forceRefresh = false) {
   return result;
 }
 function createApp() {
-  const app2 = express4();
-  app2.use(express4.json({ limit: "8mb" }));
+  const app2 = express5();
+  app2.use(express5.json({ limit: "8mb" }));
   const sovereignMt5BaseUrl = (process.env.MT5_SOVEREIGN_BASE_URL || process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || "").trim().replace(/\/+$/, "");
   const fundedNextVpsBaseUrl = (process.env.FUNDEDNEXT_VPS_BASE_URL || process.env.FUNDEDNEXT_GATEWAY_URL || sovereignMt5BaseUrl).trim().replace(/\/+$/, "");
   let fundedNext;
@@ -5916,7 +6210,7 @@ function createApp() {
         firstTicket: verifiedPositions[0].ticket,
         lastTicket: verifiedPositions[verifiedPositions.length - 1].ticket
       });
-      const proofHash = crypto.createHash("sha256").update(proofPayload).digest("hex");
+      const proofHash = crypto2.createHash("sha256").update(proofPayload).digest("hex");
       const rawBp = body.blueprint || {};
       const blueprint = {
         directionMode: rawBp.directionMode === "BUY" || rawBp.directionMode === "SELL" ? rawBp.directionMode : "BOTH",
@@ -6742,23 +7036,23 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       return null;
     }
     if (!devEphemeralSsoSecret) {
-      devEphemeralSsoSecret = crypto.randomBytes(32).toString("hex");
+      devEphemeralSsoSecret = crypto2.randomBytes(32).toString("hex");
     }
     return devEphemeralSsoSecret;
   }
   const signSsoPayload = (payload, key) => {
     const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-    const sig = crypto.createHmac("sha256", key).update(encoded).digest("base64url");
+    const sig = crypto2.createHmac("sha256", key).update(encoded).digest("base64url");
     return `${encoded}.${sig}`;
   };
   const verifySsoToken = (token, key) => {
     const parts = String(token || "").trim().split(".");
     if (parts.length !== 2) return null;
     const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac("sha256", key).update(encoded).digest("base64url");
+    const expectedSig = crypto2.createHmac("sha256", key).update(encoded).digest("base64url");
     const sigBuf = Buffer.from(sig, "utf8");
     const expBuf = Buffer.from(expectedSig, "utf8");
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+    if (sigBuf.length !== expBuf.length || !crypto2.timingSafeEqual(sigBuf, expBuf)) return null;
     try {
       const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
       const rawExp = Number(parsed.exp);
@@ -6790,7 +7084,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       handle,
       sub: handle.replace(/^@/, ""),
       exp: expSec,
-      nonce: crypto.randomUUID()
+      nonce: crypto2.randomUUID()
     }, ssoHmacKey);
     res.json({ ok: true, token: ssoToken, ssoToken, handle, expiresInSec: 300 });
   });
@@ -6917,6 +7211,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
   }));
   app2.use("/api", createRiskSuperviseRouter({ resolveDeskAiAccess, checkDistributedRateLimit }));
   app2.use("/api", createComexBridgeRouter({ fetchLiveSpotQuote }));
+  app2.use("/api", createSiteTrafficRouter({ defaultSite: "desk" }));
   app2.all("/api/*", (_req, res) => {
     res.status(404).json({ ok: false, error: "API route not found" });
   });
@@ -6935,7 +7230,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(
-      express4.static(distPath, {
+      express5.static(distPath, {
         etag: true,
         lastModified: true,
         setHeaders(res, filePath) {
