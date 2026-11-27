@@ -3,8 +3,8 @@ import { Database, KeyRound, X } from 'lucide-react';
 import { auth } from '../services/firebase';
 import {
   AI_HEADERS, AI_MODEL_BADGES, AI_MODEL_CATALOG, asRecord, buildDatabentoRequestHeaders, buildDeskAiRequestHeaders,
-  getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel, normalizeAiProvider,
-  parseCodexCallbackInput, readCodexOauthCredential,
+  getActiveDeskAiStatus, getAiProviderConnectionState, isDatabentoConnected, maskCredential, normalizeAiModel,
+  normalizeAiProvider, parseCodexCallbackInput, readCodexOauthCredential,
   type AiProvider, type PlatformAiRole, type ProviderConnectionState,
 } from '../utils/aiProviderConfig';
 import {
@@ -594,19 +594,39 @@ function ScopedAiAndDataKeysCard({ uid, lang }: CardProps) {
   );
 }
 
-export function AiAndDataKeysDialogButton({ uid, lang, buttonLabel }: CardProps & { buttonLabel?: string }) {
+export function AiAndDataKeysDialogButton({
+  uid,
+  lang,
+  buttonLabel,
+  statusScope = 'ai',
+}: CardProps & { buttonLabel?: string; statusScope?: 'ai' | 'databento' }) {
   const [open, setOpen] = useState(false);
-  const label = deskText(lang, 'API Keys / Codex OAuth', 'คีย์ API / Codex OAuth');
+  const credentials = useByokCredentials(uid);
+  const t: Translate = (en, th) => deskText(lang, en, th);
+  const label = t('API Keys / Codex OAuth', 'คีย์ API / Codex OAuth');
+  const statusState: ProviderConnectionState = statusScope === 'databento'
+    ? (isDatabentoConnected(credentials.databentoKey) ? 'connected' : 'disconnected')
+    : getActiveDeskAiStatus(credentials, uid).state;
+  const statusCopy = connectionStateLabel(statusState, t);
   return <>
-    <button type="button" className="btn xs" data-byok-trigger="true" onClick={() => setOpen(true)}>
-      <KeyRound size={13} aria-hidden="true" /> {buttonLabel ?? label}
+    <button
+      type="button"
+      className="btn xs byok-trigger-btn"
+      data-byok-trigger="true"
+      data-state={statusState}
+      title={`${buttonLabel ?? label} · ${statusCopy}`}
+      onClick={() => setOpen(true)}
+    >
+      <span className="desk-conn-dot" data-state={statusState} aria-hidden="true" />
+      <KeyRound size={13} aria-hidden="true" />
+      <span>{buttonLabel ?? label}</span>
     </button>
     {open && <DeskDialog label={label} onClose={() => setOpen(false)} panelClassName="byok-dialog">
       <AiAndDataKeysCard uid={uid} lang={lang} />
       <button
         type="button"
         className="btn xs byok-close"
-        aria-label={deskText(lang, 'Close', 'ปิด')}
+        aria-label={t('Close', 'ปิด')}
         onClick={(event) => {
           event.stopPropagation();
           setOpen(false);

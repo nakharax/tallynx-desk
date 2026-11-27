@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { ArrowRightLeft, Copy, RefreshCw } from 'lucide-react';
-import { buildDatabentoRequestHeaders } from '../utils/aiProviderConfig';
+import { buildDatabentoRequestHeaders, isDatabentoConnected, type ProviderConnectionState } from '../utils/aiProviderConfig';
 import { useByokCredentials } from '../utils/byokStorage';
 import {
   COMEX_TIMEFRAMES,
@@ -100,15 +100,32 @@ function ScopedComexBridgePanel({ lang, uid, onCopyText }: ComexBridgePanelProps
   const profile = snapshot?.profile;
   const maxVolume = profile?.bins.reduce((max, bin) => Math.max(max, bin.volume), 0) || 1;
   const databentoNote = snapshot && (lang === 'th' ? DATABENTO_TH[snapshot.databentoStatus] : snapshot.databentoNote);
+  const hasDatabentoKey = isDatabentoConnected(byokCredentials.databentoKey);
+  const databentoPillState: ProviderConnectionState = snapshot?.databentoUsed
+    ? 'connected'
+    : hasDatabentoKey
+      ? (snapshot && snapshot.databentoStatus !== 'public' ? 'unavailable' : 'connected')
+      : 'disconnected';
+  const databentoPillLabel = databentoPillState === 'connected'
+    ? t('Databento connected', 'Databento เชื่อมต่อแล้ว')
+    : databentoPillState === 'unavailable'
+      ? t('Databento fallback (public)', 'คีย์ Databento มีปัญหา · ใช้ข้อมูลสาธารณะ')
+      : t('Databento not connected · Public feed', 'ยังไม่เชื่อม Databento · ใช้ข้อมูลสาธารณะ');
 
   return (
     <section className="card comex-bridge" aria-labelledby={`${id}-heading`}>
       <header className="comex-bridge-header">
         <div>
-          <h2 id={`${id}-heading`} className="card-title desk-icon-title">
-            <ArrowRightLeft size={17} aria-hidden="true" />
-            {t('COMEX Gold ↔ XAU/USD', 'ทองคำ COMEX ↔ XAU/USD')}
-          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <h2 id={`${id}-heading`} className="card-title desk-icon-title">
+              <ArrowRightLeft size={17} aria-hidden="true" />
+              {t('COMEX Gold ↔ XAU/USD', 'ทองคำ COMEX ↔ XAU/USD')}
+            </h2>
+            <span className="desk-conn-pill" data-state={databentoPillState}>
+              <span className="desk-conn-dot" data-state={databentoPillState} aria-hidden="true" />
+              {databentoPillLabel}
+            </span>
+          </div>
           {snapshot && <p className="comex-bridge-source">
             {snapshot.databentoUsed
               ? t(snapshot.dataSource, 'Databento GLBX.MDP3 (BYOK) + ราคาสปอต XAU')
@@ -129,7 +146,7 @@ function ScopedComexBridgePanel({ lang, uid, onCopyText }: ComexBridgePanelProps
           <button type="button" className="btn xs" onClick={() => setRefresh(previous => previous + 1)} disabled={loading}>
             <RefreshCw size={13} aria-hidden="true" />{t('Refresh', 'รีเฟรช')}
           </button>
-          <AiAndDataKeysDialogButton uid={uid} lang={lang} buttonLabel={t('Databento Key (BYOK)', 'คีย์ Databento (BYOK)')} />
+          <AiAndDataKeysDialogButton uid={uid} lang={lang} statusScope="databento" buttonLabel={t('Databento Key (BYOK)', 'คีย์ Databento (BYOK)')} />
         </div>
       </header>
 

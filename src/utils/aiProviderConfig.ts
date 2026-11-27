@@ -155,6 +155,29 @@ export function isDatabentoConnected(key: string | undefined): boolean {
   return Boolean(buildDatabentoRequestHeaders(key)[AI_HEADERS.databento]);
 }
 
+export function getActiveDeskAiStatus(
+  credentials: ProviderStatusInput & { provider?: AiProvider },
+  uid: string | null | undefined,
+  now = Date.now(),
+): { provider: AiProvider | null; state: ProviderConnectionState } {
+  const provider = credentials.provider ?? null;
+  if (provider === 'google' || provider === 'openrouter' || provider === 'codex_oauth') {
+    return {
+      provider,
+      state: getAiProviderConnectionState(provider, credentials, null, now),
+    };
+  }
+  if (provider === 'platform') {
+    return { provider: 'platform', state: uid ? 'connected' : 'disconnected' };
+  }
+  // No explicit provider selected yet: check whether any personal key is saved, or signed-in platform default.
+  for (const candidate of ['google', 'codex_oauth', 'openrouter'] as const) {
+    const state = getAiProviderConnectionState(candidate, credentials, null, now);
+    if (state === 'connected') return { provider: candidate, state };
+  }
+  return { provider: uid ? 'platform' : null, state: uid ? 'connected' : 'disconnected' };
+}
+
 export interface CodexJwtMetadata {
   accountEmail?: string;
   planType?: string;
