@@ -2921,6 +2921,8 @@ function textProviderHeaders(connection) {
   const headers = { Authorization: `Bearer ${connection.key}` };
   if (usesCodexBackend(connection)) {
     headers.originator = CODEX_ORIGINATOR;
+    headers["User-Agent"] = `${CODEX_ORIGINATOR}/0.1.0`;
+    headers.Accept = "application/json";
     if (connection.chatgptAccountId) headers["chatgpt-account-id"] = connection.chatgptAccountId;
   }
   return headers;
@@ -3321,14 +3323,24 @@ function createByokRouter(deps) {
   async function tokenRequest(params, previous) {
     const response = await fetcher(`${AUTH_ORIGIN}/oauth/token`, {
       method: "POST",
-      headers: { "Content-Type": previous ? "application/json" : "application/x-www-form-urlencoded" },
-      body: previous ? JSON.stringify(params) : new URLSearchParams(params),
+      headers: {
+        "Content-Type": previous ? "application/json" : "application/x-www-form-urlencoded",
+        Accept: "application/json",
+        "User-Agent": `${CODEX_ORIGINATOR}/0.1.0`
+      },
+      body: previous ? JSON.stringify(params) : new URLSearchParams(params).toString(),
       redirect: "error",
       signal: AbortSignal.timeout(12e3)
     });
     if (!response.ok) {
-      await response.body?.cancel();
-      return { status: response.status };
+      let detail;
+      try {
+        const errPayload = asRecord(await response.json());
+        const rawErr = typeof errPayload?.error === "string" ? errPayload.error : typeof asRecord(errPayload?.error)?.code === "string" ? String(asRecord(errPayload?.error)?.code) : void 0;
+        if (rawErr && /^[a-zA-Z0-9._-]{1,64}$/.test(rawErr)) detail = rawErr;
+      } catch {
+      }
+      return { status: response.status, detail };
     }
     const data = asRecord(await response.json());
     const seconds = Number(data?.expires_in);
@@ -3338,7 +3350,7 @@ function createByokRouter(deps) {
       refresh_token: normalizeHeaderSecret(data?.refresh_token) ?? previous?.token,
       expiresAt: Number.isFinite(seconds) && seconds > 0 && seconds <= 31536e3 ? Date.now() + seconds * 1e3 : void 0
     });
-    return { status: response.status, credential };
+    return { status: response.status, credential, detail: credential ? void 0 : "invalid_token_payload" };
   }
   router.post("/ai/codex-oauth/exchange", limited("codex-exchange", 25, async (req, res) => {
     const code = normalizeHeaderSecret(req.get(AI_HEADERS.oauthCode), 2048);
@@ -3347,7 +3359,8 @@ function createByokRouter(deps) {
     const timestamp = state?.match(/^(\d{13})\.[a-zA-Z0-9_-]{43}$/)?.[1];
     const expiry = Number(timestamp);
     const now = Date.now();
-    if (!redirectUri || !code || !verifier || !/^[a-zA-Z0-9_-]{43}$/.test(verifier) || !state || !timestamp || expiry <= now || expiry > now + OAUTH_WINDOW_MS || !timingSafeEqual3(Buffer.from(state), Buffer.from(oauthState(verifier, expiry, clientId, redirectUri)))) {
+    const CLOCK_SKEW_MS = 6e4;
+    if (!redirectUri || !code || !verifier || !/^[a-zA-Z0-9_-]{43}$/.test(verifier) || !state || !timestamp || expiry <= now || expiry > now + OAUTH_WINDOW_MS + CLOCK_SKEW_MS || !timingSafeEqual3(Buffer.from(state), Buffer.from(oauthState(verifier, expiry, clientId, redirectUri)))) {
       res.status(400).json({ ok: false, code: "INVALID_OAUTH_CALLBACK", error: "Start a new Codex sign-in and paste its callback or code." });
       return;
     }
@@ -3359,7 +3372,12 @@ function createByokRouter(deps) {
       code_verifier: verifier
     });
     if (!result.credential) {
-      res.status(result.status === 429 ? 429 : result.status >= 400 && result.status < 500 ? 400 : 502).json({ ok: false, code: "OAUTH_EXCHANGE_FAILED", error: "Codex could not exchange this code. Start a new sign-in." });
+      res.status(result.status === 429 ? 429 : result.status >= 400 && result.status < 500 ? 400 : 502).json({
+        ok: false,
+        code: "OAUTH_EXCHANGE_FAILED",
+        detail: result.detail ?? `http_${result.status}`,
+        error: "Codex could not exchange this code. Start a new sign-in or import ~/.codex/auth.json."
+      });
       return;
     }
     res.json({ ok: true, credential: result.credential });
