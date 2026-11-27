@@ -182,6 +182,21 @@ export type CodexCallbackInput =
   | { kind: 'oauth'; credential: CodexOauthCredential }
   | { kind: 'api_key'; key: string };
 
+function sameCallbackOrigin(pasted: URL, registered: URL): boolean {
+  if (pasted.origin === registered.origin) return true;
+  const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
+  return (
+    pasted.protocol === registered.protocol &&
+    pasted.port === registered.port &&
+    loopback.has(pasted.hostname.toLowerCase()) &&
+    loopback.has(registered.hostname.toLowerCase())
+  );
+}
+
+function normalizeCallbackPath(pathname: string): string {
+  return pathname.replace(/\/+$/, '') || '/';
+}
+
 export function parseCodexCallbackInput(input: string, redirectUri = CODEX_CALLBACK_URI): CodexCallbackInput | null {
   const text = input.trim();
   if (!text || text.length > 64_000) return null;
@@ -203,11 +218,25 @@ export function parseCodexCallbackInput(input: string, redirectUri = CODEX_CALLB
     return credential ? { kind: 'oauth', credential } : null;
   }
   if (/^[a-zA-Z0-9._~-]{1,2048}$/.test(text)) return { kind: 'code', code: text };
+  if (/^\??(?:[^#]*&)?code=/.test(text) && !/^https?:\/\//i.test(text) && !/^(?:localhost|127\.0\.0\.1)[:/]/i.test(text)) {
+    const params = new URLSearchParams(text.replace(/^\?/, ''));
+    if (params.has('error')) return null;
+    const codes = params.getAll('code');
+    const states = params.getAll('state');
+    const code = normalizeHeaderSecret(codes[0], 2048);
+    const state = states.length === 1 ? normalizeHeaderSecret(states[0], 256) : undefined;
+    if (codes.length === 1 && states.length <= 1 && code) {
+      return state ? { kind: 'code', code, state } : { kind: 'code', code };
+    }
+    return null;
+  }
   try {
-    const pasted = new URL(text);
+    const candidate = /^(?:localhost|127\.0\.0\.1)(?::\d+)?\//i.test(text) ? `http://${text}` : text;
+    const pasted = new URL(candidate);
     const registered = new URL(redirectUri);
-    if (pasted.origin !== registered.origin || pasted.pathname !== registered.pathname ||
-        pasted.username || pasted.password || pasted.hash || pasted.searchParams.has('error')) return null;
+    if (!sameCallbackOrigin(pasted, registered) ||
+        normalizeCallbackPath(pasted.pathname) !== normalizeCallbackPath(registered.pathname) ||
+        pasted.username || pasted.password || pasted.searchParams.has('error')) return null;
     const codes = pasted.searchParams.getAll('code');
     const states = pasted.searchParams.getAll('state');
     const code = normalizeHeaderSecret(codes[0], 2048);

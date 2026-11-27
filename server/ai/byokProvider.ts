@@ -158,6 +158,8 @@ function textProviderHeaders(connection: PersonalAiConnection): Record<string, s
   const headers: Record<string, string> = { Authorization: `Bearer ${connection.key}` };
   if (usesCodexBackend(connection)) {
     headers.originator = CODEX_ORIGINATOR;
+    headers['User-Agent'] = `${CODEX_ORIGINATOR}/0.1.0`;
+    headers.Accept = 'application/json';
     if (connection.chatgptAccountId) headers['chatgpt-account-id'] = connection.chatgptAccountId;
   }
   return headers;

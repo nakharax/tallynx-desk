@@ -128,25 +128,66 @@ function ModelPicker({ provider, model, t, onSave }: {
   );
 }
 
+const CODEX_ATTEMPT_STORAGE_KEY = 'TALLYNX_CODEX_OAUTH_ATTEMPT_V1';
+
+type StoredCodexAttempt = OAuthAttempt & { authorizationUrl?: string };
+
+function readStoredCodexAttempt(): StoredCodexAttempt | null {
+  try {
+    const raw = window.sessionStorage.getItem(CODEX_ATTEMPT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = asRecord(JSON.parse(raw));
+    if (
+      !parsed ||
+      typeof parsed.verifier !== 'string' ||
+      typeof parsed.state !== 'string' ||
+      typeof parsed.redirectUri !== 'string' ||
+      typeof parsed.expiresAt !== 'number' ||
+      parsed.expiresAt <= Date.now()
+    ) {
+      window.sessionStorage.removeItem(CODEX_ATTEMPT_STORAGE_KEY);
+      return null;
+    }
+    return {
+      verifier: parsed.verifier,
+      state: parsed.state,
+      redirectUri: parsed.redirectUri,
+      expiresAt: parsed.expiresAt,
+      authorizationUrl: typeof parsed.authorizationUrl === 'string' ? parsed.authorizationUrl : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredCodexAttempt(next: StoredCodexAttempt | null): void {
+  try {
+    if (!next) window.sessionStorage.removeItem(CODEX_ATTEMPT_STORAGE_KEY);
+    else window.sessionStorage.setItem(CODEX_ATTEMPT_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage errors in restricted browsing modes.
+  }
+}
+
 function CodexConnection({ uid, credentials, t, update }: {
   uid: string | null; credentials: ByokCredentials; t: Translate;
   update: (patch: Partial<ByokCredentials>) => boolean;
 }) {
-  const [attempt, setAttempt] = useState<OAuthAttempt | null>(null);
+  const [attempt, setAttemptState] = useState<StoredCodexAttempt | null>(() => readStoredCodexAttempt());
   const [input, setInput] = useState('');
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState(false);
   const activeRequest = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => () => activeRequest.current?.abort(), []);
+  const setAttempt = (next: StoredCodexAttempt | null) => {
+    writeStoredCodexAttempt(next);
+    setAttemptState(next);
+  };
   const saved = credentials.openAiKey ?? credentials.codex?.accessToken;
   async function start() {
     if (activeRequest.current) return;
     const popup = window.open('about:blank', '_blank');
-    if (popup) popup.opener = null;
-    if (!popup) {
-      setFeedback(t('Allow popups to start Codex sign-in.', 'อนุญาตป๊อปอัปเพื่อเริ่มเข้าสู่ระบบ Codex'));
-      return;
-    }
     const request = new AbortController();
     activeRequest.current = request;
     setBusy(true);
@@ -161,22 +202,45 @@ function CodexConnection({ uid, credentials, t, update }: {
           typeof data.state !== 'string' || typeof data.redirectUri !== 'string' || typeof data.expiresAt !== 'number') throw new Error();
       const authorize = new URL(data.authorizationUrl);
       if (authorize.origin !== 'https://auth.openai.com' || authorize.pathname !== '/oauth/authorize') throw new Error();
-      popup.location.replace(authorize.href);
-      setAttempt({ verifier: data.verifier, state: data.state, redirectUri: data.redirectUri, expiresAt: data.expiresAt });
-      setFeedback(t('After authorizing, copy the callback URL from the new tab and paste it here.', 'หลังอนุญาตแล้ว ให้คัดลอก URL callback จากแท็บใหม่มาวางที่นี่'));
+      if (popup && !popup.closed) {
+        popup.location.replace(authorize.href);
+        try { popup.opener = null; } catch { /* cross-origin already detached */ }
+      }
+      setAttempt({
+        verifier: data.verifier,
+        state: data.state,
+        redirectUri: data.redirectUri,
+        expiresAt: data.expiresAt,
+        authorizationUrl: authorize.href,
+      });
+      setFeedback(
+        popup
+          ? t(
+              'Sign in on OpenAI. When redirected to localhost:1455 ("site can’t be reached" is normal), copy the full URL from that tab’s address bar, paste it below, and click Connect.',
+              'ล็อกอินในหน้า OpenAI พอเด้งไปหน้า localhost:1455 (ขึ้นเปิดไม่ได้ถือว่าปกติ) ให้คัดลอก URL ทั้งหมดจากช่อง address bar ของแท็บนั้นมาวางด้านล่างแล้วกด "เชื่อมต่อ"'
+            )
+          : t(
+              'Popup was blocked. Open the sign-in link below, then copy the localhost:1455 callback URL back here.',
+              'เบราว์เซอร์บล็อกป๊อปอัป กดลิงก์เข้าสู่ระบบด้านล่าง แล้วคัดลอก URL callback ของ localhost:1455 กลับมาวางที่นี่'
+            )
+      );
     } catch {
-      popup.close();
+      if (popup && !popup.closed) popup.close();
       if (!request.signal.aborted) setFeedback(t('Could not start Codex sign-in. Try again.', 'เริ่มเข้าสู่ระบบ Codex ไม่สำเร็จ โปรดลองอีกครั้ง'));
     } finally {
       if (activeRequest.current === request) activeRequest.current = null;
       setBusy(false);
     }
   }
-  async function connect() {
+  async function connectRaw(rawText: string) {
     if (activeRequest.current) return;
-    const parsed = parseCodexCallbackInput(input, attempt?.redirectUri);
+    const currentAttempt = attempt && attempt.expiresAt > Date.now() ? attempt : readStoredCodexAttempt();
+    const parsed = parseCodexCallbackInput(rawText, currentAttempt?.redirectUri);
     if (!parsed) {
-      setFeedback(t('Enter a callback URL, authorization code, Codex auth.json, or OpenAI API key.', 'กรอก URL callback, รหัสอนุญาต, Codex auth.json หรือคีย์ OpenAI API'));
+      setFeedback(t(
+        'Enter the full localhost:1455 callback URL, authorization code, ~/.codex/auth.json, or OpenAI API key (sk-...).',
+        'วาง URL callback เต็มของ localhost:1455, รหัสอนุญาต, ไฟล์ ~/.codex/auth.json หรือคีย์ OpenAI API (sk-...)'
+      ));
       return;
     }
     const request = new AbortController();
@@ -185,8 +249,11 @@ function CodexConnection({ uid, credentials, t, update }: {
     try {
       let patch: Partial<ByokCredentials>;
       if (parsed.kind === 'code') {
-        if (!attempt || attempt.expiresAt <= Date.now() || (parsed.state && parsed.state !== attempt.state)) {
-          setFeedback(t('Start a new sign-in and use its callback or code.', 'เริ่มเข้าสู่ระบบใหม่และใช้ callback หรือรหัสจากครั้งนั้น'));
+        if (!currentAttempt || currentAttempt.expiresAt <= Date.now() || (parsed.state && parsed.state !== currentAttempt.state)) {
+          setFeedback(t(
+            'This callback does not match an active sign-in session (or expired after 10m). Click "Start Codex sign-in" again and paste the new localhost:1455 URL.',
+            'URL callback นี้ไม่ตรงกับรอบล็อกอินปัจจุบัน (หรือหมดอายุเกิน 10 นาที) กรุณากด "เริ่มเข้าสู่ระบบ Codex" ใหม่แล้วนำ URL localhost:1455 รอบใหม่มาวาง'
+          ));
           return;
         }
         const response = await fetch('/api/ai/codex-oauth/exchange', {
@@ -194,18 +261,22 @@ function CodexConnection({ uid, credentials, t, update }: {
           signal: AbortSignal.any([request.signal, AbortSignal.timeout(16_000)]),
           headers: {
             [AI_HEADERS.oauthCode]: parsed.code,
-            [AI_HEADERS.oauthVerifier]: attempt.verifier,
-            [AI_HEADERS.oauthState]: attempt.state,
+            [AI_HEADERS.oauthVerifier]: currentAttempt.verifier,
+            [AI_HEADERS.oauthState]: currentAttempt.state,
           },
         });
-        const codex = readCodexOauthCredential(asRecord(await response.json())?.credential);
-        if (!response.ok || !codex) throw new Error();
+        const payload = asRecord(await response.json().catch(() => null));
+        const codex = readCodexOauthCredential(payload?.credential);
+        if (!response.ok || !codex) {
+          const detail = typeof payload?.detail === 'string' ? ` (${payload.detail})` : '';
+          throw new Error(detail);
+        }
         setAttempt(null);
-        patch = { codex, openAiKey: undefined };
+        patch = { provider: 'codex_oauth', codex, openAiKey: undefined };
       } else if (parsed.kind === 'oauth') {
-        patch = { codex: parsed.credential, openAiKey: undefined };
+        patch = { provider: 'codex_oauth', codex: parsed.credential, openAiKey: undefined };
       } else {
-        patch = { openAiKey: parsed.key, codex: undefined };
+        patch = { provider: 'codex_oauth', openAiKey: parsed.key, codex: undefined };
       }
       if (request.signal.aborted) return;
       if (!update(patch)) {
@@ -214,12 +285,34 @@ function CodexConnection({ uid, credentials, t, update }: {
       }
       setAttempt(null);
       setInput('');
-      setFeedback(t('Credential saved on this browser.', 'บันทึกข้อมูลรับรองในเบราว์เซอร์นี้แล้ว'));
-    } catch {
-      if (!request.signal.aborted) setFeedback(t('Codex could not connect. Start a new sign-in or check the credential.', 'เชื่อมต่อ Codex ไม่สำเร็จ โปรดเริ่มเข้าสู่ระบบใหม่หรือตรวจสอบข้อมูลรับรอง'));
+      const connectedIdentity = patch.codex?.accountEmail
+        ? ` (${patch.codex.accountEmail}${patch.codex.planType ? ` · ${patch.codex.planType}` : ''})`
+        : '';
+      setFeedback(t(`Codex connected and saved on this browser${connectedIdentity}.`, `เชื่อมต่อและบันทึก Codex ในเบราว์เซอร์นี้แล้ว${connectedIdentity}`));
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? err.message : '';
+      if (!request.signal.aborted) {
+        setFeedback(t(
+          `Codex could not connect${detail}. Start a new sign-in or import ~/.codex/auth.json instead.`,
+          `เชื่อมต่อ Codex ไม่สำเร็จ${detail} ลองกด "เริ่มเข้าสู่ระบบ Codex" ใหม่ หรือกด "นำเข้า auth.json" แทน`
+        ));
+      }
     } finally {
       if (activeRequest.current === request) activeRequest.current = null;
       setBusy(false);
+    }
+  }
+  async function connect() {
+    await connectRaw(input);
+  }
+  async function handleImportAuthJson(file: File | null | undefined) {
+    if (!file) return;
+    try {
+      const text = (await file.text()).slice(0, 64_000);
+      setInput(text);
+      await connectRaw(text);
+    } catch {
+      setFeedback(t('Could not read the selected auth.json file.', 'ไม่สามารถอ่านไฟล์ auth.json ที่เลือกได้'));
     }
   }
   async function verify() {
@@ -245,17 +338,30 @@ function CodexConnection({ uid, credentials, t, update }: {
         {credentials.codex?.planType && <span className="pill">{credentials.codex.planType}</span>}
       </div>}
       <label>
-        {t('Callback URL, code, auth.json, or OpenAI API key', 'URL callback, รหัส, auth.json หรือคีย์ OpenAI API')}
+        {t('Callback URL (localhost:1455), auth.json, or OpenAI API key', 'URL callback (localhost:1455), ไฟล์ auth.json หรือคีย์ OpenAI API')}
         <input className="inp mono" type="password" value={input} maxLength={64_000} autoComplete="off" spellCheck={false} disabled={busy}
+          placeholder="http://localhost:1455/auth/callback?code=...&state=..."
           onChange={event => setInput(event.target.value)}
           onPaste={event => {
             event.preventDefault();
             setInput(event.clipboardData.getData('text').slice(0, 64_000));
           }} />
       </label>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: 'none' }}
+        onChange={event => {
+          const selected = event.target.files?.[0];
+          event.target.value = '';
+          void handleImportAuthJson(selected);
+        }}
+      />
       <div className="byok-actions">
         <button type="button" className="btn sm" disabled={busy} onClick={() => void start()}>{t('Start Codex sign-in', 'เริ่มเข้าสู่ระบบ Codex')}</button>
         <button type="button" className="btn sm primary" disabled={busy || !input.trim()} onClick={() => void connect()}>{t('Connect', 'เชื่อมต่อ')}</button>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => fileInputRef.current?.click()}>{t('Import auth.json', 'นำเข้า auth.json')}</button>
         <button type="button" className="btn sm" disabled={busy || !saved} onClick={() => void verify()}>{t('Verify', 'ตรวจสอบ')}</button>
         <button type="button" className="btn sm" disabled={busy || (!saved && !input && !attempt)} onClick={() => {
           const removed = update({ codex: undefined, openAiKey: undefined });
@@ -264,6 +370,13 @@ function CodexConnection({ uid, credentials, t, update }: {
           setFeedback(removed ? t('Credential cleared.', 'ล้างข้อมูลรับรองแล้ว') : t('Could not update browser storage.', 'ไม่สามารถอัปเดตข้อมูลในเบราว์เซอร์ได้'));
         }}>{t('Clear', 'ล้าง')}</button>
       </div>
+      {attempt?.authorizationUrl && attempt.expiresAt > Date.now() && (
+        <p className="byok-feedback">
+          <a href={attempt.authorizationUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'underline' }}>
+            {t('Open OpenAI sign-in page again ↗', 'เปิดหน้าล็อกอิน OpenAI อีกครั้ง ↗')}
+          </a>
+        </p>
+      )}
       {feedback && <span className="byok-feedback" role="status">{feedback}</span>}
     </div>
   );

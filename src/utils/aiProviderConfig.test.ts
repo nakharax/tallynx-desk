@@ -88,6 +88,9 @@ test('Desk access reads the platform key only after privilege verification and n
 
 test('parses callback, raw code and auth.json while decoding display-only token metadata', () => {
   assert.deepEqual(parseCodexCallbackInput('http://localhost:1455/auth/callback?code=test-code&state=xyz'), { kind: 'code', code: 'test-code', state: 'xyz' });
+  assert.deepEqual(parseCodexCallbackInput('localhost:1455/auth/callback?code=test-code&state=xyz'), { kind: 'code', code: 'test-code', state: 'xyz' });
+  assert.deepEqual(parseCodexCallbackInput('http://127.0.0.1:1455/auth/callback/?code=test-code&state=xyz#_=_'), { kind: 'code', code: 'test-code', state: 'xyz' });
+  assert.deepEqual(parseCodexCallbackInput('?code=test-code&state=xyz'), { kind: 'code', code: 'test-code', state: 'xyz' });
   assert.deepEqual(parseCodexCallbackInput('test-code'), { kind: 'code', code: 'test-code' });
   assert.equal(parseCodexCallbackInput('http://evil.example/auth/callback?code=test-code&state=xyz'), null);
   assert.equal(parseCodexCallbackInput('http://localhost:1455/auth/callback?code=a&code=b&state=xyz'), null);
