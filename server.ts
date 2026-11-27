@@ -17,6 +17,7 @@ import { createMallRouter, type MallSnapshotSource } from './server/mall/mallRou
 import { createRiskSuperviseRouter } from './server/ai/riskSupervise.js';
 import { createByokRouter } from './server/ai/byokRouter.js';
 import { createComexBridgeRouter } from './server/market/comexBridge.js';
+import { createSiteTrafficRouter } from './server/telemetry/siteTraffic.js';
 import { readFirebaseLookupCaller, resolvePlatformAiPrivilege, type PrivilegeDependencies, type VerifiedAiCaller } from './server/ai/platformPrivilege.js';
 import {
   AiUpstreamError, BYOK_REQUIRED_MESSAGE, aiUpstreamStatus, assertCompleteGoogleReply, createDeskAiAccessResolver, createGoogleAiClient,
@@ -2828,6 +2829,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
   }));
   app.use('/api', createRiskSuperviseRouter({ resolveDeskAiAccess, checkDistributedRateLimit }));
   app.use('/api', createComexBridgeRouter({ fetchLiveSpotQuote }));
+  app.use('/api', createSiteTrafficRouter({ defaultSite: 'desk' }));
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ ok: false, error: 'API route not found' });
