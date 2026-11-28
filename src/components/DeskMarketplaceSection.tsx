@@ -208,9 +208,14 @@ const MarketplaceListingCard = memo(function MarketplaceListingCard({
       <div className="mkt-card-content">
         <header className="mkt-card-heading">
           <div className="mkt-card-badges">
-            <span className={channelInfo.toneClass}>{t(...channelInfo.badgeText)}</span>
+            <span className={channelInfo.toneClass}>
+              {t(...channelInfo.badgeText)}
+              {item.proofOrigin === 'CLIENT_SUBMITTED' ? ` · ${t('Snapshot', 'สแนปช็อต')}` : ''}
+            </span>
             <span className="mkt-card-price mono" data-free={item.priceUsd === 0}>
-              {item.priceUsd === 0 ? t('Free setup', 'แผนฟรี') : `$${item.priceUsd.toFixed(0)}`}
+              {item.priceUsd === 0
+                ? t('Free setup', 'แผนฟรี')
+                : `$${item.priceUsd.toFixed(0)} · ${t('Soon', 'เร็ว ๆ นี้')}`}
             </span>
           </div>
           <div>
@@ -314,8 +319,16 @@ const MarketplaceListingCard = memo(function MarketplaceListingCard({
 
         <button
           type="button"
-          className={`btn sm ${isOwned ? 'emerald' : 'primary'}`}
-          disabled={isBusy}
+          className={`btn sm ${isOwned ? 'emerald' : item.priceUsd > 0 ? '' : 'primary'}`}
+          disabled={isBusy || (!isOwned && item.priceUsd > 0)}
+          title={
+            !isOwned && item.priceUsd > 0
+              ? t(
+                  'Paid checkout is coming soon — free community blueprints ($0) are available now.',
+                  'ระบบชำระเงินสำหรับแผนมีค่าใช้จ่ายกำลังจะเปิดเร็ว ๆ นี้ — ใช้แผนฟรี ($0) ได้ทันที',
+                )
+              : undefined
+          }
           onClick={() => onAcquire(item)}
         >
           {isBusy
@@ -325,8 +338,8 @@ const MarketplaceListingCard = memo(function MarketplaceListingCard({
               : item.priceUsd === 0
                 ? t('Get free setup & load it', 'รับฟรี & โหลดลง Desk')
                 : t(
-                    `Buy blueprint ($${item.priceUsd.toFixed(0)})`,
-                    `ซื้อ Blueprint ($${item.priceUsd.toFixed(0)})`,
+                    `Checkout coming soon ($${item.priceUsd.toFixed(0)})`,
+                    `ระบบชำระเงินเร็ว ๆ นี้ ($${item.priceUsd.toFixed(0)})`,
                   )}
         </button>
       </div>
@@ -713,6 +726,14 @@ export const DeskMarketplaceSection: React.FC<DeskMarketplaceSectionProps> = ({
         return;
       }
 
+      if (setup.priceUsd > 0) {
+        setErrorMsg([
+          'Paid marketplace checkout is not yet active. Free community blueprints ($0) are available now.',
+          'ระบบชำระเงินสำหรับแผนมีค่าใช้จ่ายยังไม่เปิดใช้งาน สามารถใช้งานแผนชุมชนฟรี ($0) ได้ทันที',
+        ]);
+        return;
+      }
+
       const user = auth.currentUser;
       if (!user) {
         setErrorMsg([
@@ -734,6 +755,13 @@ export const DeskMarketplaceSection: React.FC<DeskMarketplaceSectionProps> = ({
           body: JSON.stringify({ setupId: setup.id }),
         });
         const data = await res.json();
+        if (res.status === 501 || data?.error === 'PAYMENT_GATEWAY_REQUIRED') {
+          setErrorMsg([
+            data?.message || 'Paid marketplace checkout is not yet active. Free community blueprints ($0) are available now.',
+            'ระบบชำระเงินสำหรับแผนมีค่าใช้จ่ายยังไม่เปิดใช้งาน สามารถใช้งานแผนชุมชนฟรี ($0) ได้ทันที',
+          ]);
+          return;
+        }
         if (!res.ok || !data?.ok) {
           throw new Error(data?.error || '');
         }
@@ -746,17 +774,10 @@ export const DeskMarketplaceSection: React.FC<DeskMarketplaceSectionProps> = ({
         saveLocalVerifiedCache(next);
         onMarkSetupPurchased(setup.id);
         onApplyBlueprint(setup.blueprint, setup.title);
-        setNoticeMsg(
-          setup.priceUsd > 0
-            ? [
-                `Purchased “${setup.title}” and loaded it into the Calculator.`,
-                `ซื้อ Setup "${setup.title}" สำเร็จและโหลดค่าลง Calculator เรียบร้อย`,
-              ]
-            : [
-                `Added “${setup.title}” to the Calculator for free.`,
-                `โหลดชุดตั้งค่า “${setup.title}” เข้าเครื่องคำนวณแล้ว (ฟรี)`,
-              ],
-        );
+        setNoticeMsg([
+          `Added “${setup.title}” to the Calculator for free.`,
+          `โหลดชุดตั้งค่า “${setup.title}” เข้าเครื่องคำนวณแล้ว (ฟรี)`,
+        ]);
       } catch (err) {
         setErrorMsg(marketplaceError(err, "Couldn't add the setup", 'เพิ่มชุดตั้งค่าไม่ได้'));
       } finally {
@@ -821,12 +842,16 @@ export const DeskMarketplaceSection: React.FC<DeskMarketplaceSectionProps> = ({
       const token = await user.getIdToken();
       const acc = selectedAudit.acc;
       const meta = selectedAudit.rawReport?.meta;
+      const publishHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
+      if (selectedAudit.channel === 'LIVE_BRIDGE' && acc.tredynApiKey?.trim()) {
+        publishHeaders['X-TallyNX-Api-Key'] = acc.tredynApiKey.trim();
+      }
       const res = await fetch('/api/marketplace/publish', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: publishHeaders,
         body: JSON.stringify({
           title: cleanTitle,
           summary: cleanSummary,
@@ -1293,6 +1318,14 @@ export const DeskMarketplaceSection: React.FC<DeskMarketplaceSectionProps> = ({
                     value={priceUsd}
                     onChange={(e) => setPriceUsd(Number(e.target.value))}
                   />
+                  {listingPriceUsd > 0 && (
+                    <small style={{ fontSize: '11px', color: 'var(--amber)' }}>
+                      {t(
+                        'Paid checkout is coming soon. Set $0 so traders can load your blueprint immediately.',
+                        'ระบบชำระเงินจะเปิดเร็ว ๆ นี้ หากตั้งเป็น $0 เทรดเดอร์จะโหลดแผนของคุณได้ทันที',
+                      )}
+                    </small>
+                  )}
                 </div>
 
                 <div className="form-field">

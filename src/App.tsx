@@ -518,32 +518,77 @@ export default function App() {
     }
   }, [showRightDock]);
 
+  const configuredBridgeKeysSig = useMemo(
+    () =>
+      Object.values(state.accounts)
+        .map((account) => (account.tredynApiKey || '').trim())
+        .filter((key) => key.length >= 12)
+        .sort()
+        .join('|'),
+    [state.accounts],
+  );
+
   useEffect(() => {
-    if (!isOnline || typeof window === 'undefined' || !('EventSource' in window)) {
+    if (!isOnline || !currentUser || typeof window === 'undefined' || !('EventSource' in window)) {
       setHasActiveSse(false);
       return;
     }
-    const es = new EventSource('/api/telemetry/stream');
-    es.onopen = () => setHasActiveSse(true);
-    es.onmessage = (ev) => {
+    let cancelled = false;
+    let es: EventSource | null = null;
+
+    void (async () => {
       try {
-        const parsed = JSON.parse(ev.data) as { event?: string; payload?: { login?: string; receivedPositions?: number } };
-        if (parsed.event === 'bridge.push' && parsed.payload) {
-          triggerLive3sPollRef.current?.();
-          addToast(
-            `Live data received from MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} positions)`,
-            `รับข้อมูลสดจาก MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} รายการ)`
+        const token = await currentUser.getIdToken();
+        if (cancelled || !token) return;
+        const params = new URLSearchParams({ token });
+        const keys = configuredBridgeKeysSig ? configuredBridgeKeysSig.split('|') : [];
+        if (keys.length > 0 && window.crypto?.subtle) {
+          const encoder = new TextEncoder();
+          const hashes = await Promise.all(
+            keys.slice(0, 16).map(async (key) => {
+              const digest = await window.crypto.subtle.digest('SHA-256', encoder.encode(key));
+              return Array.from(new Uint8Array(digest))
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join('');
+            }),
           );
+          if (cancelled) return;
+          if (hashes.length > 0) params.set('keyHashes', hashes.join(','));
         }
+        es = new EventSource(`/api/telemetry/stream?${params.toString()}`);
+        es.onopen = () => {
+          if (!cancelled) setHasActiveSse(true);
+        };
+        es.onmessage = (ev) => {
+          try {
+            const parsed = JSON.parse(ev.data) as {
+              event?: string;
+              payload?: { login?: string; receivedPositions?: number };
+            };
+            if (parsed.event === 'bridge.push' && parsed.payload) {
+              triggerLive3sPollRef.current?.();
+              addToast(
+                `Live data received from MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} positions)`,
+                `รับข้อมูลสดจาก MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} รายการ)`
+              );
+            }
+          } catch {
+            // ignore non-json heartbeat
+          }
+        };
+        es.onerror = () => {
+          if (!cancelled) setHasActiveSse(false);
+        };
       } catch {
-        // ignore non-json heartbeat
+        if (!cancelled) setHasActiveSse(false);
       }
-    };
-    es.onerror = () => setHasActiveSse(false);
+    })();
+
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
     };
-  }, [isOnline]);
+  }, [isOnline, currentUser, configuredBridgeKeysSig]);
   const [deskTheme, setDeskTheme] = useState<DeskTheme>(() => {
     if (initialHandoff.theme) return initialHandoff.theme;
     try {
@@ -2946,13 +2991,15 @@ export default function App() {
   const mallAccount = mallChannel === 'FUNDEDNEXT_MCP' ? acc.fundedNextAccountId : mallChannel === 'MYFXBOOK_API' ? acc.login : undefined;
   const mallHeaders = useCallback(async (purpose: 'post' | 'snapshot' | 'presence'): Promise<Record<string, string>> => {
     const headers: Record<string, string> = {};
+    if (currentUser) {
+      const token = await currentUser.getIdToken().catch(() => undefined);
+      if (token) headers.Authorization = 'Bearer ' + token;
+    }
     if (state.privacyMasked) return headers;
     if (purpose === 'snapshot' && mallChannel) headers['X-TallyNX-Mall-Channel'] = mallChannel;
-    if (mallBridgeKey) headers['X-Tredyn-Api-Key'] = mallBridgeKey;
+    if (mallBridgeKey) headers['X-TallyNX-Api-Key'] = mallBridgeKey;
     if (mallAccount) {
       headers['X-TallyNX-Mall-Account'] = mallAccount;
-      const token = await currentUser?.getIdToken().catch(() => undefined);
-      if (token) headers.Authorization = 'Bearer ' + token;
     }
     return headers;
   }, [currentUser, mallAccount, mallBridgeKey, mallChannel, state.privacyMasked]);

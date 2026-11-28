@@ -4,6 +4,7 @@ export interface VerifiedAiCaller {
   uid: string;
   email: string;
   emailVerified?: boolean;
+  displayName?: string;
   customAttributes?: string;
 }
 
@@ -12,10 +13,14 @@ export function readFirebaseLookupCaller(payload: unknown, requireVerifiedEmail:
   const user = asRecord(Array.isArray(users) ? users[0] : undefined);
   if (!user || typeof user.localId !== 'string' || !user.localId.trim() || user.disabled === true ||
       (requireVerifiedEmail && user.emailVerified !== true)) return null;
+  const displayName = typeof user.displayName === 'string' && user.displayName.trim()
+    ? user.displayName.trim().slice(0, 80)
+    : undefined;
   return {
     uid: user.localId,
     email: typeof user.email === 'string' ? user.email : '',
     emailVerified: user.emailVerified === true,
+    ...(displayName ? { displayName } : {}),
     customAttributes: typeof user.customAttributes === 'string' ? user.customAttributes : undefined,
   };
 }

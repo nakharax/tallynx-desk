@@ -356,6 +356,7 @@ export interface MarketplaceDeskSetup {
   brokerServer: string;
   maskedLogin: string;
   proofHash: string;
+  proofOrigin?: 'SERVER_LIVE_BRIDGE' | 'CLIENT_SUBMITTED';
   verifiedAt: string;
   createdAt: string;
   buyerCount: number;

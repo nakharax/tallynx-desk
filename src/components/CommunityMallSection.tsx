@@ -829,8 +829,9 @@ export function CommunityMallSection({
     const publish = async () => {
       if (document.hidden) return;
       lastPresenceAt.current = Date.now();
-      const headers = verifiedChannel ? await getHeaders('presence') : {};
+      const headers = await getHeaders('presence');
       if (abort.signal.aborted) return;
+      if (!headers.Authorization && !headers['X-TallyNX-Api-Key'] && !headers['X-Tredyn-Api-Key']) return;
       const result = await mallRequest<{ presence: MallPresence[] }>(
         '/zones/' + zoneId + '/presence',
         {
@@ -1066,7 +1067,7 @@ export function CommunityMallSection({
     setSending(true);
     setFeedback(undefined);
     try {
-      const headers = listing || verifiedChannel ? await getHeaders('post') : {};
+      const headers = await getHeaders('post');
       const result = await mallRequest<{
         message: MallChatMessage;
         threadRoot?: MallChatMessage;
@@ -1101,11 +1102,12 @@ export function CommunityMallSection({
       if (!online || reactionPendingRef.current) return;
       setReactionPending(message.id);
       try {
+        const headers = await getHeaders('post');
         const result = await mallRequest<{ message: MallChatMessage }>(
           '/zones/' + message.zoneId + '/messages/' + message.id + '/reactions',
           {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...headers },
             body: JSON.stringify({
               handle,
               emoji,
@@ -1121,7 +1123,7 @@ export function CommunityMallSection({
         setReactionPending(undefined);
       }
     },
-    [online, handle, upsert],
+    [online, handle, upsert, getHeaders],
   );
 
   const handleFeedScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {

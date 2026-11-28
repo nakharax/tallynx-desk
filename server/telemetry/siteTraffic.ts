@@ -278,15 +278,40 @@ export function createSiteTrafficRouter(options: {
   fetcher?: typeof fetch;
   now?: () => number;
   storeFile?: string;
+  rateLimitMax?: number;
+  rateLimitWindowMs?: number;
 } = {}) {
   const router = express.Router();
   const defaultSite = options.defaultSite ?? 'desk';
   const env = options.env ?? process.env;
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? Date.now;
+  const rateLimitMax = options.rateLimitMax ?? 60;
+  const rateLimitWindowMs = options.rateLimitWindowMs ?? 15 * 60 * 1000;
+  const postRateBuckets = new Map<string, number[]>();
+  let nextSweepAt = 0;
   const recordMemory = createMemoryTrafficStore(
     options.storeFile ?? join(tmpdir(), 'tallynx_site_traffic_v1.json')
   );
+
+  function checkTrafficRateLimit(ipKey: string, nowMs: number): { allowed: boolean; retryAfterSec: number } {
+    const windowStart = nowMs - rateLimitWindowMs;
+    if (nowMs >= nextSweepAt) {
+      for (const [key, stamps] of postRateBuckets) {
+        if ((stamps.at(-1) ?? 0) <= windowStart) postRateBuckets.delete(key);
+      }
+      nextSweepAt = nowMs + rateLimitWindowMs;
+    }
+    const stamps = (postRateBuckets.get(ipKey) ?? []).filter((ts) => ts > windowStart);
+    if (stamps.length >= rateLimitMax) {
+      const oldest = stamps[0] ?? nowMs;
+      postRateBuckets.set(ipKey, stamps);
+      return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((oldest + rateLimitWindowMs - nowMs) / 1000)) };
+    }
+    stamps.push(nowMs);
+    postRateBuckets.set(ipKey, stamps);
+    return { allowed: true, retryAfterSec: 0 };
+  }
 
   function applyCors(req: express.Request, res: express.Response) {
     const origin = req.headers.origin;
@@ -325,12 +350,28 @@ export function createSiteTrafficRouter(options: {
   router.post('/telemetry/traffic', async (req, res) => {
     applyCors(req, res);
     res.setHeader('Cache-Control', 'no-store');
-    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const nowMs = now();
+    const clientIp =
+      (process.env.VERCEL === '1' ? req.get('x-vercel-forwarded-for')?.split(',')[0]?.trim() : undefined) ||
+      req.ip ||
+      req.socket?.remoteAddress ||
+      'unknown';
+    const rate = checkTrafficRateLimit(clientIp, nowMs);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', String(rate.retryAfterSec));
+      return res.status(429).json({
+        ok: false,
+        code: 'RATE_LIMITED',
+        error: 'Too many traffic telemetry pings. Try again later.',
+      });
+    }
+
+    const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}) as Record<string, unknown>;
     const site = normalizeTrafficSite(body.site, defaultSite);
     const isBot = isLikelyBotUserAgent(req.headers['user-agent']);
-    const sessionId = isBot ? null : normalizeSessionId(body.sessionId);
+    const rawSessionId = typeof body.sessionId === 'string' && body.sessionId.length <= 128 ? body.sessionId : null;
+    const sessionId = isBot ? null : normalizeSessionId(rawSessionId);
     const pageView = !isBot && body.pageView === true && Boolean(sessionId);
-    const nowMs = now();
     const redisConfig = resolveUpstashConfig(env);
 
     if (redisConfig) {
