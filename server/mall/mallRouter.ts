@@ -78,8 +78,9 @@ export function createMallRouter(options: {
   legacyBaseUrl: string;
   listings: () => Promise<MarketplaceDeskSetup[]>;
   localListings: () => MarketplaceDeskSetup[];
-  verifyUser: (authHeader: string | undefined) => Promise<{ uid: string } | null>;
+  verifyUser: (authHeader: string | undefined) => Promise<{ uid: string; email?: string; displayName?: string } | null>;
   bridgeSnapshot: (bridgeKey: string | undefined) => MallSnapshotSource | undefined;
+  hasActiveBridgeFeed?: (bridgeKey: string | undefined) => boolean;
   connectedSnapshot: (uid: string, channel: 'FUNDEDNEXT_MCP' | 'MYFXBOOK_API', accountId: string) => Promise<MallSnapshotSource | undefined>;
 }) {
   const router = express.Router();
@@ -116,9 +117,40 @@ export function createMallRouter(options: {
       && timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(snapshotSignature(snapshot), 'hex'));
   }
 
+  function readBridgeKey(req: express.Request): string | undefined {
+    const key = (req.get('X-TallyNX-Api-Key') || req.get('X-Tredyn-Api-Key') || '').trim();
+    return key || undefined;
+  }
+
+  async function requireMallAuth(
+    req: express.Request,
+    res: express.Response,
+  ): Promise<{ uid?: string; derivedHandle?: string; authenticatedBy: 'firebase' | 'bridge_key' } | null> {
+    const caller = await options.verifyUser(req.headers.authorization).catch(() => null);
+    if (caller) {
+      const base = caller.email ? caller.email.split('@')[0] : caller.displayName || `trader_${caller.uid.slice(0, 8)}`;
+      return { uid: caller.uid, derivedHandle: mallHandle(base), authenticatedBy: 'firebase' };
+    }
+    const bridgeKey = readBridgeKey(req);
+    const hasBridge = bridgeKey
+      ? Boolean(options.hasActiveBridgeFeed?.(bridgeKey) || options.bridgeSnapshot(bridgeKey))
+      : false;
+    if (hasBridge) {
+      return { authenticatedBy: 'bridge_key' };
+    }
+    res.status(401).json({
+      ok: false,
+      code: 'AUTH_REQUIRED',
+      error: 'Sign in with Google or connect an active Live Bridge key to interact in Community Mall.',
+      reasonEn: 'Sign in with Google or connect an active Live Bridge key to interact in Community Mall.',
+      reasonTh: 'กรุณาเข้าสู่ระบบด้วย Google หรือเชื่อมต่อ Live Bridge ก่อนโพสต์ กดรีแอ็กชัน หรืออัปเดตสถานะใน Community Mall',
+    });
+    return null;
+  }
+
   async function resolveSource(req: express.Request, channel: unknown) {
     if (channel === 'LIVE_BRIDGE') {
-      return options.bridgeSnapshot(req.get('X-Tredyn-Api-Key'));
+      return options.bridgeSnapshot(readBridgeKey(req));
     }
     if (channel !== 'FUNDEDNEXT_MCP' && channel !== 'MYFXBOOK_API') return undefined;
     const accountId = req.get('X-TallyNX-Mall-Account');
@@ -187,11 +219,16 @@ export function createMallRouter(options: {
 
   async function postMessage(req: express.Request, res: express.Response, zoneId: MallZoneId, legacyRequest = false) {
     try {
+      const authCaller = await requireMallAuth(req, res);
+      if (!authCaller) return;
       const body = legacyRequest ? {
-        handle: req.body?.handle, symbol: req.body?.symbol, text: String(req.body?.text || '').slice(0, 500),
+        handle: authCaller.derivedHandle ?? req.body?.handle, symbol: req.body?.symbol, text: String(req.body?.text || '').slice(0, 500),
         clientMessageId: req.body?.clientMessageId || req.body?.id || randomUUID(),
         isTradeIdea: req.body?.isTradeIdea === true,
-      } : req.body || {};
+      } : {
+        ...(req.body || {}),
+        ...(authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}),
+      };
       const rawListingId = body.setupBlueprint?.listingId;
       let setupBlueprint;
       const reference = REFERENCE_WORKSHEETS.find(item => item.id === rawListingId);
@@ -215,7 +252,7 @@ export function createMallRouter(options: {
         }
       }
       const source = await resolveSource(req, 'verifiedChannel' in body ? body.verifiedChannel : undefined);
-      const output = engine.post(zoneId, body, req.ip || req.socket.remoteAddress || 'unknown', {
+      const output = engine.post(zoneId, body, authCaller.uid ?? (req.ip || req.socket.remoteAddress || 'unknown'), {
         setupBlueprint, verifiedBadge: source?.verifiedBadge, verifyInternalSnapshot,
       });
       if (output.created) emit({ type: 'message', zoneId, message: output.message, threadRoot: output.threadRoot });
@@ -233,20 +270,33 @@ export function createMallRouter(options: {
     void postMessage(req, res, zoneId).catch(next);
   });
 
-  router.post('/mall/zones/:zoneId/messages/:messageId/reactions', (req, res) => {
+  router.post('/mall/zones/:zoneId/messages/:messageId/reactions', (req, res, next) => {
     const { zoneId, messageId } = req.params;
     if (!isMallZoneId(zoneId)) return res.status(404).json({ ok: false, code: 'ZONE_NOT_FOUND' });
-    try {
-      const { message, changed } = engine.react(zoneId, messageId, req.body || {});
-      if (changed) emit({ type: 'reaction', zoneId, message });
-      res.json({ ok: true, message });
-    } catch (error) {
-      respondError(res, error);
-    }
+    void (async () => {
+      try {
+        const authCaller = await requireMallAuth(req, res);
+        if (!authCaller) return;
+        const payload = {
+          ...(req.body || {}),
+          ...(authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}),
+        };
+        const { message, changed } = engine.react(zoneId, messageId, payload);
+        if (changed) emit({ type: 'reaction', zoneId, message });
+        res.json({ ok: true, message });
+      } catch (error) {
+        respondError(res, error);
+      }
+    })().catch(next);
   });
 
   async function updatePresence(req: express.Request, res: express.Response, zoneId: MallZoneId, legacyRequest = false) {
-    const body = req.body || {};
+    const authCaller = await requireMallAuth(req, res);
+    if (!authCaller) return;
+    const body = {
+      ...(req.body || {}),
+      ...(authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}),
+    };
     const source = await resolveSource(req, body.verifiedChannel);
     const local = engine.updatePresence(zoneId, body, source?.verifiedBadge.channel);
     if (zoneId === DESK_ROOM_ZONE_ID && legacyBaseUrl) {
@@ -286,6 +336,7 @@ export function createMallRouter(options: {
       Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
     });
     res.flushHeaders();
+    res.write('retry: 10000\n\n');
     const send = (event: string, payload: unknown) => {
       if (!res.writableEnded) res.write('data: ' + JSON.stringify({ event, payload, ts: new Date().toISOString() }) + '\n\n');
     };
@@ -296,11 +347,25 @@ export function createMallRouter(options: {
     telemetryBus.on('mall.presence', presence);
     heartbeat();
     const timer = setInterval(heartbeat, 15_000);
-    res.on('close', () => {
+    // Cleanly close before serverless function timeout so EventSource reconnects cleanly via retry directive.
+    const maxLifetimeMs = process.env.VERCEL || process.env.VERCEL_ENV ? 25_000 : 5 * 60_000;
+    const lifetimeTimer = setTimeout(() => {
+      if (!res.writableEnded) {
+        send('mall.heartbeat', { reconnect: true });
+        res.end();
+      }
+    }, maxLifetimeMs);
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(timer);
+      clearTimeout(lifetimeTimer);
       telemetryBus.off('mall.chat', chat);
       telemetryBus.off('mall.presence', presence);
-    });
+    };
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
   });
 
   router.get('/desk-room', (_req, res, next) => {

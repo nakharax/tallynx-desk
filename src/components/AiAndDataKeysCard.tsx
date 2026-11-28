@@ -599,15 +599,24 @@ export function AiAndDataKeysDialogButton({
   lang,
   buttonLabel,
   statusScope = 'ai',
-}: CardProps & { buttonLabel?: string; statusScope?: 'ai' | 'databento' }) {
+  platformAccessAllowed = false,
+  statusOverride,
+}: CardProps & {
+  buttonLabel?: string;
+  statusScope?: 'ai' | 'databento';
+  platformAccessAllowed?: boolean;
+  statusOverride?: ProviderConnectionState;
+}) {
   const [open, setOpen] = useState(false);
   const credentials = useByokCredentials(uid);
   const t: Translate = (en, th) => deskText(lang, en, th);
   const label = t('API Keys / Codex OAuth', 'คีย์ API / Codex OAuth');
-  const statusState: ProviderConnectionState = statusScope === 'databento'
+  const statusState: ProviderConnectionState = statusOverride ?? (statusScope === 'databento'
     ? (isDatabentoConnected(credentials.databentoKey) ? 'connected' : 'disconnected')
-    : getActiveDeskAiStatus(credentials, uid).state;
-  const statusCopy = connectionStateLabel(statusState, t);
+    : getActiveDeskAiStatus(credentials, uid, undefined, platformAccessAllowed).state);
+  const statusCopy = statusScope === 'ai' && statusState === 'disconnected' && uid && !platformAccessAllowed
+    ? t('BYOK required', 'ต้องใช้คีย์ของคุณ')
+    : connectionStateLabel(statusState, t);
   return <>
     <button
       type="button"

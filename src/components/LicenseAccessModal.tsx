@@ -130,11 +130,13 @@ export const LicenseAccessModal: React.FC<LicenseAccessModalProps> = ({
 
   const generateRandomKey = (prefix: string) => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = new Uint8Array(8);
+    window.crypto.getRandomValues(bytes);
     let part1 = '';
     let part2 = '';
     for (let i = 0; i < 4; i++) {
-      part1 += chars[Math.floor(Math.random() * chars.length)];
-      part2 += chars[Math.floor(Math.random() * chars.length)];
+      part1 += chars[bytes[i] % chars.length];
+      part2 += chars[bytes[i + 4] % chars.length];
     }
     setNewKeyInput(`${prefix}-${part1}-${part2}`);
   };
@@ -381,7 +383,7 @@ export const LicenseAccessModal: React.FC<LicenseAccessModalProps> = ({
                 {t("Customer portal link", "ทางเข้าเว็บสำหรับส่งให้ลูกค้า (Customer Portal Link)")}
               </strong>
               <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                {t("Use your custom domain or the URL from AI Studio’s Share button.", "ใช้โดเมนของคุณหรือ URL จากปุ่ม Share ใน AI Studio")}
+                {t("Use your custom domain or TallyNX Desk portal URL.", "ใช้โดเมนของคุณหรือ URL ทางเข้า TallyNX Desk")}
               </span>
             </div>
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>

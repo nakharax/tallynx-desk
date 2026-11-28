@@ -315,7 +315,7 @@ export function createFundedNextRuntimeForStore(
         response = await requestFetch(checkedUrl(process.env.FUNDEDNEXT_OAUTH_REGISTRATION_ENDPOINT ?? oauthOrigin + '/oauth/register'), {
           method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({
-            client_name: 'Tredyn Desk', redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'],
+            client_name: 'TallyNX Desk', redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'],
             response_types: ['code'], token_endpoint_auth_method: 'none', scope: 'mcp:read',
           }),
           redirect: 'error', signal: AbortSignal.timeout(10_000),

@@ -74,6 +74,7 @@ import {
   formatPilotAmount,
   FUNDEDNEXT_POLL_MS,
   isPilotReconnect,
+  isPilotReconnectStatus,
   LIVE_TELEMETRY_POLL_MS,
   listPilotAccounts,
   loadCachedPilotSnapshot,
@@ -231,6 +232,7 @@ import {
 import {
   buildWebPortalUrl,
   deskThemeToWeb,
+  parseWebCooldownMinutes,
   parseWebHandoff,
   resolveBrandHomeSection,
   resolveDeskSection,
@@ -398,6 +400,7 @@ export default function App() {
     const sandbox = parseWebHandoff(search);
     return {
       sandbox,
+      cooldownMinutes: parseWebCooldownMinutes(search),
       theme: resolveDeskTheme(search),
       section: resolveDeskSection(search, hash, pathname)
         ?? (sandbox ? 'sec-calc' : resolveBrandHomeSection(hostname)),
@@ -518,32 +521,77 @@ export default function App() {
     }
   }, [showRightDock]);
 
+  const configuredBridgeKeysSig = useMemo(
+    () =>
+      Object.values(state.accounts)
+        .map((account) => (account.tredynApiKey || '').trim())
+        .filter((key) => key.length >= 12)
+        .sort()
+        .join('|'),
+    [state.accounts],
+  );
+
   useEffect(() => {
-    if (!isOnline || typeof window === 'undefined' || !('EventSource' in window)) {
+    if (!isOnline || !currentUser || typeof window === 'undefined' || !('EventSource' in window)) {
       setHasActiveSse(false);
       return;
     }
-    const es = new EventSource('/api/telemetry/stream');
-    es.onopen = () => setHasActiveSse(true);
-    es.onmessage = (ev) => {
+    let cancelled = false;
+    let es: EventSource | null = null;
+
+    void (async () => {
       try {
-        const parsed = JSON.parse(ev.data) as { event?: string; payload?: { login?: string; receivedPositions?: number } };
-        if (parsed.event === 'bridge.push' && parsed.payload) {
-          triggerLive3sPollRef.current?.();
-          addToast(
-            `Live data received from MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} positions)`,
-            `รับข้อมูลสดจาก MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} รายการ)`
+        const token = await currentUser.getIdToken();
+        if (cancelled || !token) return;
+        const params = new URLSearchParams({ token });
+        const keys = configuredBridgeKeysSig ? configuredBridgeKeysSig.split('|') : [];
+        if (keys.length > 0 && window.crypto?.subtle) {
+          const encoder = new TextEncoder();
+          const hashes = await Promise.all(
+            keys.slice(0, 16).map(async (key) => {
+              const digest = await window.crypto.subtle.digest('SHA-256', encoder.encode(key));
+              return Array.from(new Uint8Array(digest))
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join('');
+            }),
           );
+          if (cancelled) return;
+          if (hashes.length > 0) params.set('keyHashes', hashes.join(','));
         }
+        es = new EventSource(`/api/telemetry/stream?${params.toString()}`);
+        es.onopen = () => {
+          if (!cancelled) setHasActiveSse(true);
+        };
+        es.onmessage = (ev) => {
+          try {
+            const parsed = JSON.parse(ev.data) as {
+              event?: string;
+              payload?: { login?: string; receivedPositions?: number };
+            };
+            if (parsed.event === 'bridge.push' && parsed.payload) {
+              triggerLive3sPollRef.current?.();
+              addToast(
+                `Live data received from MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} positions)`,
+                `รับข้อมูลสดจาก MT5 Live Bridge (#${parsed.payload.login || '-'} · ${parsed.payload.receivedPositions ?? 0} รายการ)`
+              );
+            }
+          } catch {
+            // ignore non-json heartbeat
+          }
+        };
+        es.onerror = () => {
+          if (!cancelled) setHasActiveSse(false);
+        };
       } catch {
-        // ignore non-json heartbeat
+        if (!cancelled) setHasActiveSse(false);
       }
-    };
-    es.onerror = () => setHasActiveSse(false);
+    })();
+
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
     };
-  }, [isOnline]);
+  }, [isOnline, currentUser, configuredBridgeKeysSig]);
   const [deskTheme, setDeskTheme] = useState<DeskTheme>(() => {
     if (initialHandoff.theme) return initialHandoff.theme;
     try {
@@ -1211,6 +1259,17 @@ export default function App() {
     } catch {
       // The calculator remains available when history replacement is restricted.
     }
+    if (initialHandoff.cooldownMinutes) {
+      const mins = initialHandoff.cooldownMinutes;
+      commitWorkspaceChange((prev) => ({
+        ...prev,
+        cooldownUntil: Date.now() + mins * 60_000,
+      }));
+      addToast(
+        `Started a ${mins}-minute trading cooldown from TallyNX Web.`,
+        `เริ่มจับเวลาพักเทรด ${mins} นาทีจาก TallyNX Web แล้ว`,
+      );
+    }
     if (initialHandoff.sandbox) {
       addToast(
         'Loaded Web Sandbox values into the calculator.',
@@ -1223,7 +1282,7 @@ export default function App() {
         },
       );
     }
-  }, [addToast, handleSwitchPage, initialHandoff]);
+  }, [addToast, commitWorkspaceChange, handleSwitchPage, initialHandoff]);
 
   useEffect(() => {
     const syncUrlPage = () => {
@@ -1620,9 +1679,10 @@ export default function App() {
 
   const exportFullDatabaseJSON = useCallback(() => {
     const backupPayload = {
-      app: 'TREDYN_GHR_v3.2',
+      app: 'TALLYNX_DESK_v5.7',
+      legacyCompat: 'TREDYN_GHR_v3.2',
       exportedAt: new Date().toISOString(),
-      version: '3.2',
+      version: '5.7.0',
       state: stateRef.current,
     };
     const jsonStr = JSON.stringify(backupPayload, null, 2);
@@ -1630,7 +1690,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `TREDYN_GHR_Database_${getBangkokIsoDate()}.json`;
+    a.download = `TALLYNX_Desk_Database_${getBangkokIsoDate()}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2946,16 +3006,82 @@ export default function App() {
   const mallAccount = mallChannel === 'FUNDEDNEXT_MCP' ? acc.fundedNextAccountId : mallChannel === 'MYFXBOOK_API' ? acc.login : undefined;
   const mallHeaders = useCallback(async (purpose: 'post' | 'snapshot' | 'presence'): Promise<Record<string, string>> => {
     const headers: Record<string, string> = {};
+    if (currentUser) {
+      const token = await currentUser.getIdToken().catch(() => undefined);
+      if (token) headers.Authorization = 'Bearer ' + token;
+    }
     if (state.privacyMasked) return headers;
     if (purpose === 'snapshot' && mallChannel) headers['X-TallyNX-Mall-Channel'] = mallChannel;
-    if (mallBridgeKey) headers['X-Tredyn-Api-Key'] = mallBridgeKey;
+    if (mallBridgeKey) headers['X-TallyNX-Api-Key'] = mallBridgeKey;
     if (mallAccount) {
       headers['X-TallyNX-Mall-Account'] = mallAccount;
-      const token = await currentUser?.getIdToken().catch(() => undefined);
-      if (token) headers.Authorization = 'Bearer ' + token;
     }
     return headers;
   }, [currentUser, mallAccount, mallBridgeKey, mallChannel, state.privacyMasked]);
+
+  const platformAiAccessAllowed = useMemo(() => {
+    if (!currentUser) return false;
+    if (isAdminUser(currentUser, entitlement, isClaimAdmin)) return true;
+    return entitlement?.status === 'ACTIVE' && (entitlement.plan === 'LIFETIME' || entitlement.plan === 'ADMIN');
+  }, [currentUser, entitlement, isClaimAdmin]);
+
+  const brokerConnectionCounts = useMemo(() => {
+    let mt5Live = 0;
+    let mt5Configured = 0;
+    let fundedNextConnected = 0;
+    let fundedNextReconnect = 0;
+    const nowMs = Date.now();
+    for (const account of Object.values(state.accounts)) {
+      const isFundedNext = Boolean(
+        account.fundedNextConnectionId ||
+        account.fundedNextAccountId ||
+        account.syncProvider === 'FUNDEDNEXT_MCP'
+      );
+      if (isFundedNext) {
+        const feed = pilotFeeds[account.id];
+        const needsReconnect = Boolean(
+          feed?.reconnect ||
+          feed?.error ||
+          isPilotReconnectStatus(feed?.data?.syncStatus) ||
+          isPilotReconnectStatus(feed?.data?.snapshot?.status)
+        );
+        if (needsReconnect) {
+          fundedNextReconnect += 1;
+        } else if (
+          firebaseUid &&
+          account.fundedNextAccountId &&
+          (feed
+            ? Boolean(feed.data?.snapshot || feed.data?.syncStatus)
+            : Boolean(cachedPilotSnapshotsByPort[account.id]))
+        ) {
+          fundedNextConnected += 1;
+        }
+        continue;
+      }
+
+      // Ignore deprecated metaApiAccountId; only active non-custodial channels count as MT5 bridge/cloud configs.
+      const isMt5Configured =
+        account.syncProvider === 'LIVE_BRIDGE' ||
+        account.syncProvider === 'MYFXBOOK_API' ||
+        account.syncProvider === 'PROJECTX_API' ||
+        Boolean(account.tredynApiKey?.trim() || account.bridgeUrl?.trim());
+      if (!isMt5Configured) continue;
+      mt5Configured += 1;
+
+      const bridgeSyncedAt = liveBridgeByPort[account.id]?.data?.syncedAt;
+      const bridgeSyncedMs = bridgeSyncedAt ? Date.parse(bridgeSyncedAt) : NaN;
+      const hasRecentBridgeHeartbeat = Number.isFinite(bridgeSyncedMs) && nowMs - bridgeSyncedMs <= 5 * 60_000;
+      const syncMeta = liveSyncMetaByPort[account.id];
+      const hasLiveMeta = Boolean(syncMeta?.lastSyncAt && !syncMeta.error);
+      const hasCloudSyncReport =
+        (account.syncProvider === 'MYFXBOOK_API' || account.syncProvider === 'PROJECTX_API') &&
+        Boolean(account.lastMt5SyncAt || state.mt5RawReports?.[account.id]?.importedAt);
+      if (hasRecentBridgeHeartbeat || hasLiveMeta || hasCloudSyncReport) {
+        mt5Live += 1;
+      }
+    }
+    return { mt5Live, mt5Configured, fundedNextConnected, fundedNextReconnect };
+  }, [state.accounts, state.mt5RawReports, liveBridgeByPort, liveSyncMetaByPort, pilotFeeds, cachedPilotSnapshotsByPort, firebaseUid]);
   const cycleRuleStatus = useMemo(() => {
     const rule = getActiveConsistencyRule(state);
     return {
@@ -4249,6 +4375,7 @@ export default function App() {
                   initialTimeframe="5m"
                   portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
                   accountScope={state.activePort}
+                  platformAccessAllowed={platformAiAccessAllowed}
                 />
               </div>
             )}
@@ -4887,13 +5014,10 @@ export default function App() {
                 syncContent={renderDbSyncCenter()}
                 brandingContent={brandingForm}
                 onOpenMt5Sync={handleOpenMt5SyncModal}
-                mt5ConnectedCount={Object.values(state.accounts).filter((acc) =>
-                  (acc.syncProvider && acc.syncProvider !== 'MANUAL_XLSX' && acc.syncProvider !== 'FUNDEDNEXT_MCP') ||
-                  Boolean(acc.tredynApiKey || acc.metaApiAccountId || acc.bridgeUrl)
-                ).length}
-                fundedNextConnectedCount={Object.values(state.accounts).filter((acc) =>
-                  Boolean(acc.fundedNextConnectionId || acc.fundedNextAccountId || acc.syncProvider === 'FUNDEDNEXT_MCP')
-                ).length}
+                mt5ConnectedCount={brokerConnectionCounts.mt5Live}
+                mt5ConfiguredCount={brokerConnectionCounts.mt5Configured}
+                fundedNextConnectedCount={brokerConnectionCounts.fundedNextConnected}
+                fundedNextReconnectCount={brokerConnectionCounts.fundedNextReconnect}
               />
             )}
           </React.Suspense>
@@ -4959,6 +5083,7 @@ export default function App() {
                 alerts={behavioralAlerts}
                 analytics={realtimeAnalytics}
                 currentUserUid={currentUser?.uid ?? null}
+                platformAccessAllowed={platformAiAccessAllowed}
                 currentUserLabel={mallHandle}
                 rMultipleToday={mallSessionR}
                 status={mallStatus}

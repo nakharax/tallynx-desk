@@ -19,7 +19,7 @@ export class McpReadError extends Error {
 }
 
 export class McpStreamableClient {
-  private readonly client = new Client({ name: 'Tredyn Desk', version: '1.0.0' });
+  private readonly client = new Client({ name: 'TallyNX Desk', version: '1.0.0' });
   private readonly transport: StreamableHTTPClientTransport;
   private connecting?: Promise<void>;
   private failure?: McpReadError;

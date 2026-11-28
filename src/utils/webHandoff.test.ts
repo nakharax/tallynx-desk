@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   buildWebPortalUrl,
   calculateWebSandboxRisk,
+  parseWebCooldownMinutes,
   parseWebHandoff,
   resolveBrandHomeSection,
   resolveDeskSection,
@@ -166,4 +167,23 @@ test('calculates risk and daily loss amounts with the imported symbol and stop d
   assert.equal(calculateWebSandboxRisk({ ...sandbox, symbol: 'EURUSD' })?.modeledLots, 0.4);
   assert.equal(calculateWebSandboxRisk({ ...sandbox, slPips: 50 })?.modeledLots, 2);
   assert.equal(calculateWebSandboxRisk({ ...sandbox, riskPct: NaN }), undefined);
+});
+
+test('parses, clamps, and strips cooldown_minutes handoff parameter cleanly', () => {
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=15'), 15);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=1'), 1);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=240'), 240);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=0'), undefined);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=241'), undefined);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=-10'), undefined);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=15.5'), undefined);
+  assert.equal(parseWebCooldownMinutes('?cooldown_minutes=abc'), undefined);
+  assert.equal(parseWebHandoff('?cooldown_minutes=30'), undefined);
+  assert.deepEqual(parseWebHandoff('?balance=10000&cooldown_minutes=45'), {
+    balance: 10000, riskPct: 1, slPips: 25, symbol: 'XAUUSD', mode: 'prop', dailyDd: 4, cooldownMinutes: 45,
+  });
+  assert.equal(
+    stripWebHandoffParams('/calc?lang=th&cooldown_minutes=30&balance=10000#calc'),
+    '/calc?lang=th#calc',
+  );
 });

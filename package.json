@@ -1,16 +1,17 @@
 {
-  "name": "react-example",
+  "name": "tallynx-desk",
   "private": true,
-  "version": "0.0.0",
+  "version": "5.7.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && node scripts/prepare-api-bundle.mjs",
     "build:worker": "node scripts/prepare-worker-bundle.mjs",
-    "start": "node server.ts",
+    "start": "NODE_ENV=production tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "tsx --test src/utils/*.test.ts server/fundednext/phase1.test.ts",
     "test:responsive": "python3 scripts/responsive-smoke.py"
   },
   "dependencies": {

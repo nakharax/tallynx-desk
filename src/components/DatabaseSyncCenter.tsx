@@ -132,6 +132,50 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
 
   const [showApiSettings, setShowApiSettings] = useState(false);
 
+  const webhookUrlTrimmed = apiUrl.trim();
+  const isValidWebhookUrl = (() => {
+    if (!webhookUrlTrimmed) return false;
+    try {
+      const parsed = new URL(webhookUrlTrimmed);
+      if (parsed.protocol === 'https:') return Boolean(parsed.hostname);
+      if (parsed.protocol === 'http:') {
+        return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname.toLowerCase());
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  })();
+
+  const cloudRealtimeReady = isOnline && Boolean(currentUser?.emailVerified);
+  const cloudStatusTone = cloudSyncing
+    ? 'var(--blue)'
+    : cloudRealtimeReady
+      ? 'var(--emerald)'
+      : currentUser
+        ? 'var(--amber)'
+        : 'var(--text-muted)';
+  const cloudStatusLabel = cloudSyncing
+    ? t('Syncing…', 'กำลังซิงก์...')
+    : !currentUser
+      ? t('Not connected · Local Only', 'ยังไม่เชื่อม · เก็บในเครื่องเท่านั้น')
+      : !currentUser.emailVerified
+        ? t('Verify email · Cloud paused', 'ยืนยันอีเมลก่อนซิงก์ Cloud')
+        : !isOnline
+          ? t('Offline · Local queue', 'ออฟไลน์ · รอซิงก์อัตโนมัติ')
+          : t('Connected · Cloud Realtime', 'เชื่อมต่อแล้ว · Cloud Realtime');
+
+  const webhookPillState: 'unavailable' | 'expired' | 'disconnected' = !webhookUrlTrimmed
+    ? 'disconnected'
+    : isValidWebhookUrl
+      ? 'unavailable'
+      : 'expired';
+  const webhookPillLabel = !webhookUrlTrimmed
+    ? t('Not configured', 'ยังไม่ตั้งค่า')
+    : isValidWebhookUrl
+      ? t('Configured', 'ตั้งค่าแล้ว')
+      : t('Invalid URL', 'URL ไม่ถูกต้อง');
+
   return (
     <section id="db-manager-root">
       <div className="db-manager-card">
@@ -235,7 +279,7 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
               minWidth: 0,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
               <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
                 {t("Cloud sync (Google Firestore)", "การซิงก์ Cloud (Google Firestore)")}
               </strong>
@@ -243,7 +287,7 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                 style={{
                   fontSize: '11px',
                   fontWeight: 500,
-                  color: currentUser ? 'var(--emerald)' : 'var(--text-muted)',
+                  color: cloudStatusTone,
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '4px',
@@ -251,13 +295,9 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
               >
                 <span
                   className="status-dot"
-                  style={{ background: currentUser ? 'var(--emerald)' : 'var(--text-muted)' }}
+                  style={{ background: cloudStatusTone }}
                 />
-                {cloudSyncing
-                  ? t("Syncing…", "กำลังซิงก์...")
-                  : currentUser
-                    ? t("Connected · Cloud Realtime", "เชื่อมต่อแล้ว · Cloud Realtime")
-                    : t("Not connected · Local Only", "ยังไม่เชื่อม · เก็บในเครื่องเท่านั้น")}
+                {cloudStatusLabel}
               </span>
             </div>
 
@@ -266,7 +306,9 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                 <>
                   {t("Signed in: ", "เข้าสู่ระบบแล้ว: ")}<strong className="mono" style={{ color: 'var(--text-primary)' }}>{currentUser.email || currentUser.uid.slice(0, 14)}</strong>
                   <div style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    {t("Accounts and trade history sync automatically. Workspace data is compressed for Firestore’s 900 KB limit.", "ซิงก์พอร์ตและประวัติเทรดอัตโนมัติ ระบบบีบอัดข้อมูลให้เหมาะกับเพดาน 900 KB ของ Firestore")}
+                    {!currentUser.emailVerified
+                      ? t("Verify your email address before Firestore realtime sync can activate.", "กรุณายืนยันอีเมลของบัญชีก่อนเปิดใช้การซิงก์ Cloud แบบเรียลไทม์")
+                      : t("Accounts and trade history sync automatically. Workspace data is compressed for Firestore’s 900 KB limit.", "ซิงก์พอร์ตและประวัติเทรดอัตโนมัติ ระบบบีบอัดข้อมูลให้เหมาะกับเพดาน 900 KB ของ Firestore")}
                   </div>
                 </>
               ) : (
@@ -281,10 +323,10 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                 </button>
               ) : (
                 <>
-                  <button type="button" className="btn xs primary" onClick={onCloudPushNow}>
+                  <button type="button" className="btn xs primary" disabled={!cloudRealtimeReady} onClick={onCloudPushNow}>
                     {t("Sync to cloud now", "ซิงก์ขึ้น Cloud ตอนนี้")}
                   </button>
-                  <button type="button" className="btn xs" onClick={onCloudPullNow}>
+                  <button type="button" className="btn xs" disabled={!cloudRealtimeReady} onClick={onCloudPullNow}>
                     {t("Pull from cloud", "ดึงข้อมูลจาก Cloud")}
                   </button>
                   <button type="button" className="btn xs" onClick={onGoogleLogout}>
@@ -305,9 +347,9 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                 >
                   {showApiSettings ? t("▾ Hide REST API / webhook settings", "▾ ซ่อนการตั้งค่า REST API / Webhook") : t("▸ Configure optional REST API / webhook", "▸ ตั้งค่า REST API / Webhook เสริม")}
                 </button>
-                <span className="desk-conn-pill" data-state={apiUrl.trim() ? 'connected' : 'disconnected'}>
-                  <span className="desk-conn-dot" data-state={apiUrl.trim() ? 'connected' : 'disconnected'} aria-hidden="true" />
-                  {apiUrl.trim() ? t("Configured", "ตั้งค่าแล้ว") : t("Not connected", "ยังไม่เชื่อม")}
+                <span className="desk-conn-pill" data-state={webhookPillState}>
+                  <span className="desk-conn-dot" data-state={webhookPillState} aria-hidden="true" />
+                  {webhookPillLabel}
                 </span>
               </div>
 
@@ -316,7 +358,7 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                   <div className="input-row">
                     <div className="field">
                       <input
-                        type="text"
+                        type="url"
                         placeholder="https://your-server.com/api/ghr-db"
                         value={apiUrl}
                         onChange={(e) => {
@@ -339,11 +381,16 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
                       />
                     </div>
                   </div>
+                  {webhookUrlTrimmed && !isValidWebhookUrl && (
+                    <span style={{ fontSize: '11px', color: 'var(--amber)' }}>
+                      {t('Use an https:// URL (or http://localhost for local testing).', 'กรุณาใช้ URL แบบ https:// (หรือ http://localhost สำหรับทดสอบในเครื่อง)')}
+                    </span>
+                  )}
                   <div style={{ display: 'flex', gap: '6px' }}>
-                    <button type="button" className="btn xs primary" onClick={onApiPushNow}>
+                    <button type="button" className="btn xs primary" disabled={!isValidWebhookUrl} onClick={onApiPushNow}>
                       {t("Push (POST)", "ส่งข้อมูล (POST)")}
                     </button>
-                    <button type="button" className="btn xs" onClick={onApiPullNow}>
+                    <button type="button" className="btn xs" disabled={!isValidWebhookUrl} onClick={onApiPullNow}>
                       {t("Pull (GET)", "ดึงข้อมูล (GET)")}
                     </button>
                   </div>
@@ -428,6 +475,79 @@ export const DatabaseSyncCenter: React.FC<DatabaseSyncCenterProps> = ({
             )}
           </div>
         </div>
+
+        {/* Recent Sync Activity Log */}
+        {syncLogs.length > 0 && (
+          <div
+            style={{
+              padding: '12px 16px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border-color)',
+              background: 'var(--bg-surface-solid)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+              <strong style={{ fontSize: '12.5px', color: 'var(--text-primary)' }}>
+                {t('Recent sync activity', 'ประวัติการซิงก์ล่าสุด')}
+              </strong>
+              <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                {Math.min(syncLogs.length, 8)} / {syncLogs.length}
+              </span>
+            </div>
+            <ul
+              style={{
+                listStyle: 'none',
+                margin: 0,
+                padding: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '4px',
+                maxHeight: '132px',
+                overflowY: 'auto',
+              }}
+            >
+              {syncLogs.slice(0, 8).map((entry) => {
+                const statusColor =
+                  entry.status === 'ERROR'
+                    ? 'var(--rose)'
+                    : entry.status === 'QUEUED'
+                      ? 'var(--amber)'
+                      : 'var(--emerald)';
+                return (
+                  <li
+                    key={entry.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '8px',
+                      fontSize: '11.5px',
+                      padding: '4px 8px',
+                      borderRadius: 'var(--radius-xs)',
+                      background: 'var(--bg-subtle)',
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                      <span className="status-dot" style={{ background: statusColor }} aria-hidden="true" />
+                      <span className="mono" style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>
+                        {entry.channel}
+                      </span>
+                      <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {entry.action}
+                      </span>
+                    </span>
+                    <time className="mono" style={{ fontSize: '10.5px', color: 'var(--text-muted)', flexShrink: 0 }} dateTime={entry.timestamp}>
+                      {new Date(entry.timestamp).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </time>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
 
         {/* MT5 Server Timezone & Session Alignment */}
         {(() => {

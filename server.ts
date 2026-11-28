@@ -940,18 +940,50 @@ export function createApp() {
     return localRate;
   }
 
+  const bridgeKeyOwners = new Map<string, string>();
+  function bindBridgeKeyOwner(apiKey: string, uid: string | undefined | null) {
+    if (!uid) return;
+    const keyHash = hashTredynApiKey(apiKey);
+    bridgeKeyOwners.set(keyHash, uid);
+    if (bridgeKeyOwners.size > 2048) {
+      const oldest = bridgeKeyOwners.keys().next().value;
+      if (oldest) bridgeKeyOwners.delete(oldest);
+    }
+  }
+
   app.get('/api/mt5/engine-status', (_req, res) => {
+    const eaBinExists = fs.existsSync(path.join(process.cwd(), 'scripts', 'TredynLiveBridge.ex5'));
+    const eaSrcExists = fs.existsSync(path.join(process.cwd(), 'scripts', 'TredynLiveBridge.mq5'));
+    const liveBridgeReady = eaBinExists && eaSrcExists;
+    const fundedNextGatewayReady = Boolean(fundedNextVpsBaseUrl);
+    const sovereignStoreReady = Boolean(DEFAULT_SOVEREIGN_MT5_BASE_URL);
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       ok: true,
-      liveBridgeReady: true,
+      liveBridgeReady,
       cloudConnectorsReady: true,
+      fundedNextGatewayReady,
+      sovereignStoreReady,
       sharedVpsDisabled: true,
-      engineReady: true,
+      engineReady: liveBridgeReady,
+      activeBridgeFeeds: liveBridgeMemoryStore.size,
+      checkedAt: new Date().toISOString(),
     });
   });
 
   app.post('/api/mt5/live-bridge/push', async (req, res) => {
     try {
+      const ipRate = checkChatRateLimit(`live_bridge_push_ip:${req.ip || req.socket.remoteAddress || 'unknown'}`, Date.now(), 900);
+      if (!ipRate.allowed) {
+        res.setHeader('Retry-After', String(ipRate.retryAfterSec));
+        res.status(429).json({
+          ok: false,
+          code: 'RATE_LIMITED',
+          error: `Live Bridge push rate limit exceeded; retry in ${ipRate.retryAfterSec}s`,
+        });
+        return;
+      }
+
       const body = req.body || {};
       const headerKey =
         typeof req.headers['x-tallynx-api-key'] === 'string'
@@ -968,6 +1000,18 @@ export function createApp() {
         res.status(401).json({
           ok: false,
           error: 'Invalid or missing X-TallyNX-Api-Key (or X-Tredyn-Api-Key) header',
+        });
+        return;
+      }
+
+      const keyHash = hashTredynApiKey(headerKey);
+      const keyRate = checkChatRateLimit(`live_bridge_push_key:${keyHash}`, Date.now(), 600);
+      if (!keyRate.allowed) {
+        res.setHeader('Retry-After', String(keyRate.retryAfterSec));
+        res.status(429).json({
+          ok: false,
+          code: 'RATE_LIMITED',
+          error: `Live Bridge push rate limit exceeded for this key; retry in ${keyRate.retryAfterSec}s`,
         });
         return;
       }
@@ -990,7 +1034,7 @@ export function createApp() {
         syncedAt,
         reason: typeof body.reason === 'string' ? body.reason : 'MT5_EA_PUSH',
         meta: {
-          holderName: String(rawMeta.holderName || rawMeta.name || 'Tredyn MT5 Trader'),
+          holderName: String(rawMeta.holderName || rawMeta.name || 'TallyNX MT5 Trader'),
           login: String(rawMeta.login || rawMeta.accountLogin || ''),
           broker: String(rawMeta.broker || rawMeta.company || 'MT5 Live Bridge'),
           server: String(rawMeta.server || ''),
@@ -1008,16 +1052,20 @@ export function createApp() {
 
       saveLiveBridgeFeed(headerKey, entry);
       telemetryBus.emit('bridge_push', {
-        login: entry.meta.login,
-        broker: entry.meta.broker,
-        initialDeposit: entry.meta.initialDeposit,
-        summaryNetProfit: entry.meta.summaryNetProfit,
-        receivedPositions: positions.length,
-        openPositionsCount: liveState.openPositions.length,
-        balance: liveState.balance,
-        equity: liveState.equity,
-        floatingPnl: liveState.floatingPnl,
-        syncedAt,
+        keyHash,
+        ownerUid: bridgeKeyOwners.get(keyHash) ?? null,
+        payload: {
+          login: entry.meta.login,
+          broker: entry.meta.broker,
+          initialDeposit: entry.meta.initialDeposit,
+          summaryNetProfit: entry.meta.summaryNetProfit,
+          receivedPositions: positions.length,
+          openPositionsCount: liveState.openPositions.length,
+          balance: liveState.balance,
+          equity: liveState.equity,
+          floatingPnl: liveState.floatingPnl,
+          syncedAt,
+        },
       });
 
       // Persist to remote bridge store when configured so serverless cold starts preserve Live Bridge state
@@ -1026,6 +1074,7 @@ export function createApp() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'X-TallyNX-Api-Key': headerKey,
             'X-Tredyn-Api-Key': headerKey,
           },
           body: JSON.stringify({
@@ -1071,6 +1120,11 @@ export function createApp() {
       return;
     }
 
+    if (req.headers.authorization) {
+      const caller = await verifyFirebaseBearerToken(req.headers.authorization, false).catch(() => null);
+      if (caller) bindBridgeKeyOwner(headerKey, caller.uid);
+    }
+
     const rate = checkChatRateLimit(`live_bridge:${hashTredynApiKey(headerKey)}`, Date.now(), 450);
     if (!rate.allowed) {
       res.status(429).json({
@@ -1091,6 +1145,7 @@ export function createApp() {
             method: 'GET',
             headers: {
               Accept: 'application/json',
+              'X-TallyNX-Api-Key': headerKey,
               'X-Tredyn-Api-Key': headerKey,
             },
             signal: AbortSignal.timeout(4000),
@@ -1115,7 +1170,7 @@ export function createApp() {
               syncedAt: String(pullData.entry.syncedAt || new Date().toISOString()),
               reason: 'VPS01_PERSISTENT_STORE',
               meta: {
-                holderName: String(rawMeta.holderName || rawMeta.name || 'Tredyn MT5 Trader'),
+                holderName: String(rawMeta.holderName || rawMeta.name || 'TallyNX MT5 Trader'),
                 login: String(rawMeta.login || ''),
                 broker: String(rawMeta.broker || 'MT5 Live Bridge'),
                 server: String(rawMeta.server || ''),
@@ -1142,7 +1197,7 @@ export function createApp() {
     if (!feed) {
       res.status(404).json({
         ok: false,
-        error: 'Waiting for MT5 Live Bridge heartbeat for this tredyn-api-key',
+        error: 'Waiting for MT5 Live Bridge heartbeat for this bridge API key',
         code: 'LIVE_BRIDGE_WAITING',
       });
       return;
@@ -1284,17 +1339,21 @@ export function createApp() {
 
       if (provider === 'LIVE_BRIDGE') {
         const tredynApiKey =
-          typeof body.tredynApiKey === 'string' && body.tredynApiKey.trim()
+          typeof body.tallynxApiKey === 'string' && body.tallynxApiKey.trim()
+            ? body.tallynxApiKey.trim()
+            : typeof body.tredynApiKey === 'string' && body.tredynApiKey.trim()
             ? body.tredynApiKey.trim()
             : userToken;
 
         if (!isValidTredynApiKey(tredynApiKey)) {
           res.status(400).json({
-            error: 'กรุณาระบุ tredyn-api-key ที่ถูกต้อง (เช่น trd_live_...)',
+            error: 'กรุณาระบุ Live Bridge API key ที่ถูกต้อง (เช่น trd_live_...)',
             code: 'INVALID_TREDYN_API_KEY',
           });
           return;
         }
+
+        if (caller) bindBridgeKeyOwner(tredynApiKey, caller.uid);
 
         let feed = getLiveBridgeFeed(tredynApiKey);
         if (!feed && DEFAULT_SOVEREIGN_MT5_BASE_URL) {
@@ -1305,6 +1364,7 @@ export function createApp() {
                 method: 'GET',
                 headers: {
                   Accept: 'application/json',
+                  'X-TallyNX-Api-Key': tredynApiKey,
                   'X-Tredyn-Api-Key': tredynApiKey,
                 },
                 signal: AbortSignal.timeout(6000),
@@ -1335,7 +1395,7 @@ export function createApp() {
                   syncedAt: String(pullData.entry.syncedAt || new Date().toISOString()),
                   reason: 'VPS01_PERSISTENT_STORE',
                   meta: {
-                    holderName: String(rawMeta.holderName || rawMeta.name || 'Tredyn MT5 Trader'),
+                    holderName: String(rawMeta.holderName || rawMeta.name || 'TallyNX MT5 Trader'),
                     login: String(rawMeta.login || ''),
                     broker: String(rawMeta.broker || 'MT5 Live Bridge'),
                     server: String(rawMeta.server || ''),
@@ -1361,7 +1421,7 @@ export function createApp() {
         if (!feed) {
           res.status(404).json({
             error:
-              'ยังไม่ได้รับสัญญาณข้อมูลจาก MT5 Live Bridge สำหรับ tredyn-api-key นี้ — กรุณาติดตั้ง TredynLiveBridge.ex5 ลงบนกราฟใน MT5 และเปิด Allow WebRequest',
+              'ยังไม่ได้รับสัญญาณข้อมูลจาก MT5 Live Bridge สำหรับ API key นี้ — กรุณาติดตั้ง TredynLiveBridge.ex5 ลงบนกราฟใน MT5 และเปิด Allow WebRequest',
             code: 'LIVE_BRIDGE_WAITING',
           });
           return;
@@ -1672,24 +1732,60 @@ export function createApp() {
         return;
       }
 
+      const rawChannel = typeof body.verificationChannel === 'string' ? body.verificationChannel.trim() : '';
+      if (rawChannel === 'DIRECT_INVESTOR' || rawChannel === 'METAAPI_CLOUD' || rawChannel === 'BRIDGE_API') {
+        res.status(410).json({
+          ok: false,
+          code: 'DEPRECATED_CHANNEL',
+          error: 'ช่องทางล็อกอิน Investor Password / MetaApi Cloud / Shared VPS ถูกถอดออกถาวรเพื่อป้องกันความเสี่ยงผิดกฎ Shared IP ของกองทุน กรุณาใช้ Live Bridge (.ex5), Myfxbook API, FundedNext MCP, ProjectX API หรือไฟล์ .xlsx',
+        });
+        return;
+      }
+
       const allowedChannels: Mt5VerificationChannel[] = [
         'LIVE_BRIDGE',
-        'DIRECT_INVESTOR',
-        'METAAPI_CLOUD',
         'MANUAL_XLSX',
         'FUNDEDNEXT_MCP',
         'MYFXBOOK_API',
         'PROJECTX_API',
       ];
-      const verificationChannel: Mt5VerificationChannel = allowedChannels.includes(
-        body.verificationChannel as Mt5VerificationChannel
+      let verificationChannel: Mt5VerificationChannel = allowedChannels.includes(
+        rawChannel as Mt5VerificationChannel
       )
-        ? (body.verificationChannel as Mt5VerificationChannel)
+        ? (rawChannel as Mt5VerificationChannel)
         : 'MANUAL_XLSX';
 
-      const brokerServer = String(body.brokerServer || '').trim();
-      const brokerName = String(body.brokerName || '').trim() || 'MT5 Verified Broker';
-      const rawLogin = String(body.login || '').trim();
+      let proofOrigin: 'SERVER_LIVE_BRIDGE' | 'CLIENT_SUBMITTED' = 'CLIENT_SUBMITTED';
+      let brokerServer = String(body.brokerServer || '').trim();
+      let brokerName = String(body.brokerName || '').trim() || 'MT5 Verified Broker';
+      let rawLogin = String(body.login || '').trim();
+      let initialDeposit = Math.max(100, Number(body.initialDeposit) || 10000);
+      let candidatePositions: unknown[] = Array.isArray(body.mt5Positions) ? body.mt5Positions : [];
+
+      if (verificationChannel === 'LIVE_BRIDGE') {
+        const bridgeKey =
+          typeof req.headers['x-tallynx-api-key'] === 'string'
+            ? req.headers['x-tallynx-api-key'].trim()
+            : typeof req.headers['x-tredyn-api-key'] === 'string'
+              ? req.headers['x-tredyn-api-key'].trim()
+              : '';
+        const serverFeed = bridgeKey && isValidTredynApiKey(bridgeKey) ? getLiveBridgeFeed(bridgeKey) : null;
+        if (serverFeed && serverFeed.positions.length > 0) {
+          proofOrigin = 'SERVER_LIVE_BRIDGE';
+          candidatePositions = serverFeed.positions;
+          rawLogin = serverFeed.meta.login || rawLogin;
+          brokerName = serverFeed.meta.broker || brokerName;
+          brokerServer = serverFeed.meta.server || brokerServer;
+          if (serverFeed.meta.initialDeposit >= 100) {
+            initialDeposit = serverFeed.meta.initialDeposit;
+          }
+        } else {
+          // Do not award LIVE_BRIDGE server-verified status to unverified client-submitted snapshots.
+          verificationChannel = 'MANUAL_XLSX';
+          proofOrigin = 'CLIENT_SUBMITTED';
+        }
+      }
+
       if (!rawLogin || rawLogin.length < 3) {
         res.status(400).json({
           ok: false,
@@ -1698,17 +1794,16 @@ export function createApp() {
         return;
       }
 
-      const { valid: verifiedPositions } = validateVerifiedMt5Positions(body.mt5Positions || []);
+      const { valid: verifiedPositions } = validateVerifiedMt5Positions(candidatePositions);
       if (verifiedPositions.length === 0) {
         res.status(400).json({
           ok: false,
           error:
-            'ไม่พบประวัติออเดอร์ MT5 จริงที่ผ่านการตรวจสอบ (ต้องซิงก์ผ่าน Investor Password, Live Bridge .ex5 หรือ Report .xlsx ก่อนลงขาย)',
+            'ไม่พบประวัติออเดอร์ MT5 จริงที่ผ่านการตรวจสอบ (ต้องซิงก์ผ่าน Live Bridge .ex5, Cloud API ทางการ หรือ Report .xlsx ก่อนเผยแพร่)',
         });
         return;
       }
 
-      const initialDeposit = Math.max(100, Number(body.initialDeposit) || 10000);
       const metrics = computeVerifiedSetupMetrics(verifiedPositions, initialDeposit);
 
       const verifiedAt = new Date().toISOString();
@@ -1717,6 +1812,7 @@ export function createApp() {
         login: rawLogin,
         brokerServer: brokerServer || brokerName,
         verificationChannel,
+        proofOrigin,
         tradeCount: metrics.tradeCount,
         netProfitUsd: metrics.netProfitUsd,
         firstTicket: verifiedPositions[0].ticket,
@@ -1762,6 +1858,7 @@ export function createApp() {
         brokerServer: brokerServer || brokerName,
         maskedLogin: maskMt5Login(rawLogin),
         proofHash,
+        proofOrigin,
         verifiedAt,
         createdAt: verifiedAt,
         buyerCount: 0,
@@ -1806,11 +1903,28 @@ export function createApp() {
       }
 
       loadMarketplaceStore();
-      const target = marketplaceMemoryStore.get(setupId);
-      if (target) {
-        target.buyerCount = (target.buyerCount || 0) + 1;
-        saveMarketplaceSetup(target);
+      let target = marketplaceMemoryStore.get(setupId);
+      if (!target) {
+        const allListings = await getMarketplaceListings();
+        target = allListings.find((item) => item.id === setupId);
       }
+      if (!target) {
+        res.status(404).json({ ok: false, error: 'Marketplace setup not found.' });
+        return;
+      }
+
+      // Never unlock paid listings for free when no real billing checkout gateway is configured.
+      if (target.priceUsd > 0 && target.sellerUid !== caller.uid) {
+        res.status(501).json({
+          ok: false,
+          error: 'PAYMENT_GATEWAY_REQUIRED',
+          message: 'Paid marketplace checkout is not yet active. Free community blueprints ($0) are available now.',
+        });
+        return;
+      }
+
+      target.buyerCount = (target.buyerCount || 0) + 1;
+      saveMarketplaceSetup(target);
 
       if (DEFAULT_SOVEREIGN_MT5_BASE_URL) {
         await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/purchase`, {
@@ -1825,7 +1939,7 @@ export function createApp() {
         ok: true,
         setupId,
         purchasedAt: new Date().toISOString(),
-        buyerCount: target?.buyerCount ?? 1,
+        buyerCount: target.buyerCount,
       });
     } catch (err: unknown) {
       res.status(500).json({
@@ -1843,20 +1957,57 @@ export function createApp() {
         return;
       }
       const id = String(req.params.id || '').trim();
+      if (!id) {
+        res.status(400).json({ ok: false, error: 'Missing listing id' });
+        return;
+      }
+
       loadMarketplaceStore();
-      const target = marketplaceMemoryStore.get(id);
-      if (target && target.sellerUid !== caller.uid) {
+      const localTarget = marketplaceMemoryStore.get(id);
+      if (localTarget && localTarget.sellerUid !== caller.uid) {
         res.status(403).json({ ok: false, error: 'คุณไม่มีสิทธิ์ลบ Setup ของผู้ขายรายอื่น' });
         return;
       }
-      removeMarketplaceSetup(id);
+
+      if (!localTarget) {
+        if (!DEFAULT_SOVEREIGN_MT5_BASE_URL) {
+          res.status(404).json({ ok: false, error: 'ไม่พบ Setup ที่ต้องการลบ' });
+          return;
+        }
+        const remoteListings = await getMarketplaceListings();
+        const remoteTarget = remoteListings.find((item) => item.id === id);
+        if (!remoteTarget) {
+          res.status(404).json({ ok: false, error: 'ไม่พบ Setup ที่ต้องการลบ' });
+          return;
+        }
+        if (remoteTarget.sellerUid !== caller.uid) {
+          res.status(403).json({ ok: false, error: 'คุณไม่มีสิทธิ์ลบ Setup ของผู้ขายรายอื่น' });
+          return;
+        }
+      }
+
       if (DEFAULT_SOVEREIGN_MT5_BASE_URL) {
-        await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/delete`, {
+        const delResp = await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/delete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id }),
+          body: JSON.stringify({ id, sellerUid: caller.uid }),
           signal: AbortSignal.timeout(3000),
         }).catch(() => null);
+        if (delResp && (delResp.status === 403 || delResp.status === 404)) {
+          res.status(delResp.status).json({
+            ok: false,
+            error: delResp.status === 403 ? 'คุณไม่มีสิทธิ์ลบ Setup ของผู้ขายรายอื่น' : 'ไม่พบ Setup ที่ต้องการลบ',
+          });
+          return;
+        }
+        if (!localTarget && (!delResp || !delResp.ok)) {
+          res.status(502).json({ ok: false, error: 'ไม่สามารถยืนยันการลบกับเซิร์ฟเวอร์จัดเก็บข้อมูลได้' });
+          return;
+        }
+      }
+
+      if (localTarget) {
+        removeMarketplaceSetup(id);
       }
       res.json({ ok: true, id });
     } catch (err: unknown) {
@@ -2630,7 +2781,17 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     return devEphemeralSsoSecret;
   }
 
-  const signSsoPayload = (payload: { handle: string; sub: string; exp: number; nonce: string }, key: string) => {
+  const signSsoPayload = (
+    payload: {
+      handle: string;
+      sub: string;
+      email?: string;
+      displayName?: string;
+      exp: number;
+      nonce: string;
+    },
+    key: string
+  ) => {
     const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
     const sig = crypto.createHmac('sha256', key).update(encoded).digest('base64url');
     return `${encoded}.${sig}`;
@@ -2668,23 +2829,45 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     }
   };
 
-  app.post('/api/auth/sso-handoff', (req, res) => {
+  app.post('/api/auth/sso-handoff', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
+    const caller = await verifyFirebaseBearerToken(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ ok: false, error: 'Authentication required for SSO handoff.' });
+      return;
+    }
     const ssoHmacKey = getSsoSigningKey();
     if (!ssoHmacKey) {
       res.status(503).json({ ok: false, error: 'TALLYNX_SSO_SECRET is not configured on the server.' });
       return;
     }
-    const rawHandle = typeof req.body?.handle === 'string' ? req.body.handle.trim() : '@alex_quant';
-    const handle = rawHandle.startsWith('@') ? rawHandle : `@${rawHandle}`;
+    const email = caller.email?.trim() || undefined;
+    const displayName = caller.displayName?.trim() || (email ? email.split('@')[0] : undefined);
+    const rawBase = (email ? email.split('@')[0] : displayName || `trader_${caller.uid.slice(0, 8)}`)
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 32);
+    const handle = `@${rawBase || `trader_${caller.uid.slice(0, 8)}`}`;
     const expSec = Math.floor(Date.now() / 1000) + 300;
     const ssoToken = signSsoPayload({
       handle,
-      sub: handle.replace(/^@/, ''),
+      sub: caller.uid,
+      ...(email ? { email } : {}),
+      ...(displayName ? { displayName } : {}),
       exp: expSec,
       nonce: crypto.randomUUID(),
     }, ssoHmacKey);
-    res.json({ ok: true, token: ssoToken, ssoToken, handle, expiresInSec: 300 });
+    res.json({
+      ok: true,
+      token: ssoToken,
+      ssoToken,
+      handle,
+      ...(email ? { email } : {}),
+      ...(displayName ? { displayName } : {}),
+      expiresInSec: 300,
+    });
   });
 
   const handleDeskSsoExchange = (req: express.Request, res: express.Response) => {
@@ -2723,6 +2906,7 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     listings: getMarketplaceListings,
     localListings: loadMarketplaceStore,
     verifyUser: verifyFirebaseBearerToken,
+    hasActiveBridgeFeed: (bridgeKey) => Boolean(bridgeKey && isValidTredynApiKey(bridgeKey) && getLiveBridgeFeed(bridgeKey)),
     connectedSnapshot: async (uid, channel, accountId) => connectedMallSnapshots.get(mallSourceKey(uid, channel, accountId)),
     bridgeSnapshot: (bridgeKey) => {
       if (!bridgeKey || !isValidTredynApiKey(bridgeKey)) return undefined;
@@ -2741,11 +2925,39 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     },
   }));
 
-  // Live Telemetry SSE stream (Real-Time Bridge Push + Room Updates + Heartbeat)
-  app.get('/api/telemetry/stream', (req, res) => {
+  // Live Telemetry SSE stream (Authenticated & tenant-scoped Bridge Push + Room Updates + Heartbeat)
+  app.get('/api/telemetry/stream', async (req, res) => {
+    const authHeader =
+      req.headers.authorization ||
+      (typeof req.query.token === 'string' && req.query.token.trim()
+        ? `Bearer ${req.query.token.trim()}`
+        : undefined);
+    const caller = await verifyFirebaseBearerToken(authHeader, false);
+    if (!caller) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(401).json({ ok: false, code: 'AUTH_REQUIRED', error: 'Authentication required for live telemetry stream.' });
+      return;
+    }
+
+    const subscribedKeyHashes = new Set<string>();
+    const rawHashes = typeof req.query.keyHashes === 'string' ? req.query.keyHashes : '';
+    for (const part of rawHashes.split(',').slice(0, 16)) {
+      const clean = part.trim().toLowerCase();
+      if (/^[a-f0-9]{64}$/.test(clean)) {
+        const existingOwner = bridgeKeyOwners.get(clean);
+        if (!existingOwner || existingOwner === caller.uid) {
+          subscribedKeyHashes.add(clean);
+        }
+      }
+    }
+
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('retry: 10000\n\n');
+
     const sendEvent = (eventName: string, data: unknown) => {
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ event: eventName, payload: data, ts: new Date().toISOString() })}\n\n`);
@@ -2753,7 +2965,16 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     };
     sendEvent('account.heartbeat', { stream: 'SSE_LIVE', readOnlyVerified: true });
 
-    const onBridgePush = (data: unknown) => sendEvent('bridge.push', data);
+    const onBridgePush = (evt: unknown) => {
+      const record = asRecord(evt);
+      const keyHash = typeof record?.keyHash === 'string' ? record.keyHash : '';
+      if (!keyHash) return;
+      const ownerUid = bridgeKeyOwners.get(keyHash) ?? (typeof record?.ownerUid === 'string' ? record.ownerUid : null);
+      // Strictly isolate bridge telemetry to the authenticated owner (never broadcast cross-tenant).
+      const allowed = ownerUid ? ownerUid === caller.uid : subscribedKeyHashes.has(keyHash);
+      if (!allowed) return;
+      sendEvent('bridge.push', record?.payload ?? {});
+    };
     const onDeskUpdate = (data: unknown) => sendEvent('desk.room', data);
     const onMallChat = (data: unknown) => sendEvent('mall.chat', data);
     const onMallPresence = (data: unknown) => sendEvent('mall.presence', data);
@@ -2765,13 +2986,28 @@ ${safeChart ? `\n=== Live Chart Context ===\n${safeChart}` : ''}${SAFE_HARBOR_RE
     const timer = setInterval(() => {
       sendEvent('account.heartbeat', { stream: 'SSE_LIVE' });
     }, 15000);
-    res.on('close', () => {
+    // Cleanly close before serverless timeout so clients reconnect via retry directive.
+    const maxLifetimeMs = process.env.VERCEL || process.env.VERCEL_ENV ? 25_000 : 5 * 60_000;
+    const lifetimeTimer = setTimeout(() => {
+      if (!res.writableEnded) {
+        sendEvent('account.heartbeat', { stream: 'SSE_LIVE', reconnect: true });
+        res.end();
+      }
+    }, maxLifetimeMs);
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(timer);
+      clearTimeout(lifetimeTimer);
       telemetryBus.off('bridge_push', onBridgePush);
       telemetryBus.off('desk_room_update', onDeskUpdate);
       telemetryBus.off('mall.chat', onMallChat);
       telemetryBus.off('mall.presence', onMallPresence);
-    });
+    };
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
   });
 
   // Real-time Official Prop Firm Rules Probe (Strict Allowlist Only)

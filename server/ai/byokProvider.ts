@@ -7,7 +7,13 @@ import {
   normalizeAiModel, normalizeAiProvider, normalizeCodexAccountId, normalizeHeaderSecret,
   type ByokProvider,
 } from '../../src/utils/aiProviderConfig.js';
-import { executeWithModelFailover, isOpenWeightGemmaModel, planModelRoute } from '../../src/utils/geminiOrchestrator.js';
+import {
+  executeWithModelFailover,
+  isOpenWeightGemmaModel,
+  modelSupportsGoogleSearch,
+  modelSupportsPdf,
+  planModelRoute,
+} from '../../src/utils/geminiOrchestrator.js';
 import type { PlatformAiPrivilege, VerifiedAiCaller } from './platformPrivilege.js';
 
 export const BYOK_REQUIRED_MESSAGE = 'Connect a valid provider key in Settings → API Keys / Codex OAuth.';
@@ -348,18 +354,33 @@ export async function streamOrGenerateCoachReply(
   }
   const model = connection.model ?? AI_MODEL_CATALOG.google[0];
   const ai = createGoogleAiClient(connection.key, undefined, options.fetcher);
+  const isGemma = isOpenWeightGemmaModel(model);
+  const allowPdf = modelSupportsPdf(model);
+  const shouldSearch = Boolean(input.webSearch) && modelSupportsGoogleSearch(model);
+  const filteredAttachments = (input.attachments ?? []).filter(att => allowPdf || att.mimeType !== 'application/pdf');
+  const historyContents = (input.history ?? []).map(item => ({
+    role: item.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: item.content }],
+  }));
+  const userTurn = {
+    role: 'user',
+    parts: [{ text: input.prompt }, ...filteredAttachments.map(inlineData => ({ inlineData }))],
+  };
+  const contents = isGemma
+    ? [
+        { role: 'user', parts: [{ text: `[System Directives — Strictly Follow]\n${input.system}` }] },
+        { role: 'model', parts: [{ text: 'Understood. I will strictly follow these directives and risk-only Safe Harbor rules.' }] },
+        ...historyContents,
+        userTurn,
+      ]
+    : [...historyContents, userTurn];
   const request = {
     model,
-    contents: [
-      ...(input.history ?? []).map(item => ({
-        role: item.role === 'assistant' ? 'model' : 'user', parts: [{ text: item.content }],
-      })),
-      { role: 'user', parts: [{ text: input.prompt }, ...(input.attachments ?? []).map(inlineData => ({ inlineData }))] },
-    ],
+    contents,
     config: {
-      systemInstruction: input.system,
+      ...(isGemma ? {} : { systemInstruction: input.system }),
       abortSignal: options.signal,
-      ...(input.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
+      ...(shouldSearch ? { tools: [{ googleSearch: {} }] } : {}),
     },
   };
   const sourceMap = new Map<string, { title: string; uri: string }>();
@@ -406,17 +427,30 @@ export async function generateStructuredRiskSupervision(
     }
   }
   const ai = createGoogleAiClient(connection.key);
-  const generate = async (model: string) => (await ai.models.generateContent({
-    model,
-    contents: input.prompt,
-    config: {
-      systemInstruction: input.system,
-      responseMimeType: 'application/json',
-      responseJsonSchema: input.schema,
-      maxOutputTokens: 3_000,
-      abortSignal: signal,
-    },
-  })).text ?? '';
+  const generate = async (model: string) => {
+    if (isOpenWeightGemmaModel(model)) {
+      const gemmaPrompt = `[System Directives — Strictly Follow]\n${input.system}\nReturn one valid JSON object matching this schema (no markdown fences):\n${JSON.stringify(input.schema)}\n\n${input.prompt}`;
+      return (await ai.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: [{ text: gemmaPrompt }] }],
+        config: {
+          maxOutputTokens: 3_000,
+          abortSignal: signal,
+        },
+      })).text ?? '';
+    }
+    return (await ai.models.generateContent({
+      model,
+      contents: input.prompt,
+      config: {
+        systemInstruction: input.system,
+        responseMimeType: 'application/json',
+        responseJsonSchema: input.schema,
+        maxOutputTokens: 3_000,
+        abortSignal: signal,
+      },
+    })).text ?? '';
+  };
   if (connection.provider === 'google') {
     const model = connection.model ?? AI_MODEL_CATALOG.google[0];
     return { model, reply: await generate(model) };

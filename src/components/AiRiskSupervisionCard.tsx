@@ -27,6 +27,7 @@ interface AiRiskSupervisionCardProps {
   initialTimeframe: string;
   portfolio?: QuantPortfolioInput;
   accountScope: string;
+  platformAccessAllowed?: boolean;
 }
 
 const OVERLAYS = [
@@ -222,7 +223,7 @@ const FALLBACK_COPY: Record<RiskSupervisionFallbackReason, [string, string]> = {
 };
 
 function SupervisionAudit({
-  feed, candles, snapshot, portfolio, lang, uid,
+  feed, candles, snapshot, portfolio, lang, uid, platformAccessAllowed = false,
 }: {
   feed: LiveChartTelemetry;
   candles: MarketCandle[];
@@ -230,10 +231,11 @@ function SupervisionAudit({
   portfolio?: QuantPortfolioInput;
   lang: DeskLanguage;
   uid: string | null;
+  platformAccessAllowed?: boolean;
 }) {
   const byok = useByokCredentials(uid);
   const connection = selectDeskAiCredential(byok);
-  const activeAiStatus = getActiveDeskAiStatus(byok, uid);
+  const activeAiStatus = getActiveDeskAiStatus(byok, uid, undefined, platformAccessAllowed);
   const model = connection && connection.provider !== 'platform'
     ? connection.model ?? AI_MODEL_CATALOG[connection.provider][0] : undefined;
   const [result, setResult] = useState<AiRiskSupervisionReport | null>(null);
@@ -315,7 +317,9 @@ function SupervisionAudit({
               ? t('AI connected', 'AI เชื่อมต่อแล้ว')
               : activeAiStatus.state === 'expired'
                 ? t('AI token expired', 'โทเค็น AI หมดอายุ')
-                : t('AI not connected', 'AI ยังไม่เชื่อม')}
+                : uid && !platformAccessAllowed
+                  ? t('BYOK required', 'ต้องใช้คีย์ของคุณ')
+                  : t('AI not connected', 'AI ยังไม่เชื่อม')}
           </span>
           {(result?.model ?? (!result && model)) && <span className="mono">{result?.model ?? model}</span>}
           {result && <time dateTime={result.generatedAt} className="mono">
@@ -323,7 +327,7 @@ function SupervisionAudit({
           </time>}
         </div>
         <div className="byok-actions">
-          <AiAndDataKeysDialogButton uid={uid} lang={lang} />
+          <AiAndDataKeysDialogButton uid={uid} lang={lang} platformAccessAllowed={platformAccessAllowed} />
           <button type="button" className="btn primary" disabled={pending} onClick={() => void runAudit()}>
             <ShieldCheck size={16} aria-hidden="true" />
             {pending ? t('Running risk audit…', 'กำลังตรวจสอบความเสี่ยง…') : t('Run AI Risk Audit', 'ตรวจสอบความเสี่ยงด้วย AI')}
@@ -373,7 +377,13 @@ function SupervisionAudit({
   );
 }
 
-export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accountScope }: AiRiskSupervisionCardProps) {
+export function AiRiskSupervisionCard({
+  lang,
+  initialTimeframe,
+  portfolio,
+  accountScope,
+  platformAccessAllowed = false,
+}: AiRiskSupervisionCardProps) {
   const [uid, setUid] = useState<string | null>(() => auth.currentUser?.uid ?? null);
   useEffect(() => auth.onAuthStateChanged(user => setUid(user?.uid ?? null)), []);
   const {
@@ -452,7 +462,8 @@ export function AiRiskSupervisionCard({ lang, initialTimeframe, portfolio, accou
             ))}
           </dl>
           <SupervisionAudit key={JSON.stringify([marketKey, lang, accountScope, Boolean(safePortfolio), uid])}
-            feed={feed} candles={candles} snapshot={snapshot} portfolio={safePortfolio} lang={lang} uid={uid} />
+            feed={feed} candles={candles} snapshot={snapshot} portfolio={safePortfolio} lang={lang} uid={uid}
+            platformAccessAllowed={platformAccessAllowed} />
         </>
       )}
       <footer className="risk-sv-footer"><ShieldCheck size={14} aria-hidden="true" /> Analytical &amp; Risk Supervision Only · No Trade Signals</footer>

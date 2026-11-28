@@ -141,16 +141,25 @@ var SAFE_HARBOR_REMINDER = "\n\n[Decision-1 Compliance Guard]: User query may re
 function isPlatformFrontierGeminiModel(raw) {
   return typeof raw === "string" && PLATFORM_FRONTIER_GEMINI_MODELS.includes(raw);
 }
+function isOpenWeightGemmaModel(model) {
+  const clean = model.trim().toLowerCase().replace(/^models\//, "");
+  return clean === GEMMA_4_31B_IT || clean === GEMMA_4_26B_A4B_IT || clean.startsWith("gemma-");
+}
 function modelSupportsGoogleSearch(model) {
+  if (isOpenWeightGemmaModel(model)) return false;
   if (isPlatformFrontierGeminiModel(model)) return true;
-  return MODEL_CAPABILITY_MAP[model]?.supportsGoogleSearch ?? false;
+  if (Object.hasOwn(MODEL_CAPABILITY_MAP, model)) {
+    return MODEL_CAPABILITY_MAP[model].supportsGoogleSearch;
+  }
+  return /^gemini-/i.test(model.trim().replace(/^models\//, ""));
 }
 function modelSupportsPdf(model) {
+  if (isOpenWeightGemmaModel(model)) return false;
   if (isPlatformFrontierGeminiModel(model)) return true;
-  return MODEL_CAPABILITY_MAP[model]?.supportsPdf ?? false;
-}
-function isOpenWeightGemmaModel(model) {
-  return model === GEMMA_4_31B_IT || model === GEMMA_4_26B_A4B_IT;
+  if (Object.hasOwn(MODEL_CAPABILITY_MAP, model)) {
+    return MODEL_CAPABILITY_MAP[model].supportsPdf;
+  }
+  return /^gemini-/i.test(model.trim().replace(/^models\//, ""));
 }
 function normalizeChatModelPreference(raw) {
   if (typeof raw === "string" && FREE_TIER_CHAT_MODELS.includes(raw)) {
@@ -1991,9 +2000,33 @@ function createMallRouter(options) {
   function verifyInternalSnapshot(snapshot, proof) {
     return typeof proof === "string" && /^[a-f0-9]{64}$/.test(proof) && timingSafeEqual2(Buffer.from(proof, "hex"), Buffer.from(snapshotSignature(snapshot), "hex"));
   }
+  function readBridgeKey(req) {
+    const key = (req.get("X-TallyNX-Api-Key") || req.get("X-Tredyn-Api-Key") || "").trim();
+    return key || void 0;
+  }
+  async function requireMallAuth(req, res) {
+    const caller = await options.verifyUser(req.headers.authorization).catch(() => null);
+    if (caller) {
+      const base = caller.email ? caller.email.split("@")[0] : caller.displayName || `trader_${caller.uid.slice(0, 8)}`;
+      return { uid: caller.uid, derivedHandle: mallHandle(base), authenticatedBy: "firebase" };
+    }
+    const bridgeKey = readBridgeKey(req);
+    const hasBridge = bridgeKey ? Boolean(options.hasActiveBridgeFeed?.(bridgeKey) || options.bridgeSnapshot(bridgeKey)) : false;
+    if (hasBridge) {
+      return { authenticatedBy: "bridge_key" };
+    }
+    res.status(401).json({
+      ok: false,
+      code: "AUTH_REQUIRED",
+      error: "Sign in with Google or connect an active Live Bridge key to interact in Community Mall.",
+      reasonEn: "Sign in with Google or connect an active Live Bridge key to interact in Community Mall.",
+      reasonTh: "\u0E01\u0E23\u0E38\u0E13\u0E32\u0E40\u0E02\u0E49\u0E32\u0E2A\u0E39\u0E48\u0E23\u0E30\u0E1A\u0E1A\u0E14\u0E49\u0E27\u0E22 Google \u0E2B\u0E23\u0E37\u0E2D\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D Live Bridge \u0E01\u0E48\u0E2D\u0E19\u0E42\u0E1E\u0E2A\u0E15\u0E4C \u0E01\u0E14\u0E23\u0E35\u0E41\u0E2D\u0E47\u0E01\u0E0A\u0E31\u0E19 \u0E2B\u0E23\u0E37\u0E2D\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E2A\u0E16\u0E32\u0E19\u0E30\u0E43\u0E19 Community Mall"
+    });
+    return null;
+  }
   async function resolveSource(req, channel) {
     if (channel === "LIVE_BRIDGE") {
-      return options.bridgeSnapshot(req.get("X-Tredyn-Api-Key"));
+      return options.bridgeSnapshot(readBridgeKey(req));
     }
     if (channel !== "FUNDEDNEXT_MCP" && channel !== "MYFXBOOK_API") return void 0;
     const accountId = req.get("X-TallyNX-Mall-Account");
@@ -2061,13 +2094,18 @@ function createMallRouter(options) {
   });
   async function postMessage(req, res, zoneId, legacyRequest = false) {
     try {
+      const authCaller = await requireMallAuth(req, res);
+      if (!authCaller) return;
       const body = legacyRequest ? {
-        handle: req.body?.handle,
+        handle: authCaller.derivedHandle ?? req.body?.handle,
         symbol: req.body?.symbol,
         text: String(req.body?.text || "").slice(0, 500),
         clientMessageId: req.body?.clientMessageId || req.body?.id || randomUUID2(),
         isTradeIdea: req.body?.isTradeIdea === true
-      } : req.body || {};
+      } : {
+        ...req.body || {},
+        ...authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}
+      };
       const rawListingId = body.setupBlueprint?.listingId;
       let setupBlueprint;
       const reference = REFERENCE_WORKSHEETS.find((item) => item.id === rawListingId);
@@ -2097,7 +2135,7 @@ function createMallRouter(options) {
         }
       }
       const source = await resolveSource(req, "verifiedChannel" in body ? body.verifiedChannel : void 0);
-      const output = engine.post(zoneId, body, req.ip || req.socket.remoteAddress || "unknown", {
+      const output = engine.post(zoneId, body, authCaller.uid ?? (req.ip || req.socket.remoteAddress || "unknown"), {
         setupBlueprint,
         verifiedBadge: source?.verifiedBadge,
         verifyInternalSnapshot
@@ -2113,19 +2151,32 @@ function createMallRouter(options) {
     if (!isMallZoneId(zoneId)) return res.status(404).json({ ok: false, code: "ZONE_NOT_FOUND" });
     void postMessage(req, res, zoneId).catch(next);
   });
-  router.post("/mall/zones/:zoneId/messages/:messageId/reactions", (req, res) => {
+  router.post("/mall/zones/:zoneId/messages/:messageId/reactions", (req, res, next) => {
     const { zoneId, messageId } = req.params;
     if (!isMallZoneId(zoneId)) return res.status(404).json({ ok: false, code: "ZONE_NOT_FOUND" });
-    try {
-      const { message, changed } = engine.react(zoneId, messageId, req.body || {});
-      if (changed) emit({ type: "reaction", zoneId, message });
-      res.json({ ok: true, message });
-    } catch (error) {
-      respondError(res, error);
-    }
+    void (async () => {
+      try {
+        const authCaller = await requireMallAuth(req, res);
+        if (!authCaller) return;
+        const payload = {
+          ...req.body || {},
+          ...authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}
+        };
+        const { message, changed } = engine.react(zoneId, messageId, payload);
+        if (changed) emit({ type: "reaction", zoneId, message });
+        res.json({ ok: true, message });
+      } catch (error) {
+        respondError(res, error);
+      }
+    })().catch(next);
   });
   async function updatePresence(req, res, zoneId, legacyRequest = false) {
-    const body = req.body || {};
+    const authCaller = await requireMallAuth(req, res);
+    if (!authCaller) return;
+    const body = {
+      ...req.body || {},
+      ...authCaller.derivedHandle ? { handle: authCaller.derivedHandle } : {}
+    };
     const source = await resolveSource(req, body.verifiedChannel);
     const local = engine.updatePresence(zoneId, body, source?.verifiedBadge.channel);
     if (zoneId === DESK_ROOM_ZONE_ID && legacyBaseUrl) {
@@ -2167,6 +2218,7 @@ function createMallRouter(options) {
       "X-Accel-Buffering": "no"
     });
     res.flushHeaders();
+    res.write("retry: 10000\n\n");
     const send = (event, payload) => {
       if (!res.writableEnded) res.write("data: " + JSON.stringify({ event, payload, ts: (/* @__PURE__ */ new Date()).toISOString() }) + "\n\n");
     };
@@ -2177,11 +2229,24 @@ function createMallRouter(options) {
     telemetryBus2.on("mall.presence", presence);
     heartbeat();
     const timer = setInterval(heartbeat, 15e3);
-    res.on("close", () => {
+    const maxLifetimeMs = process.env.VERCEL || process.env.VERCEL_ENV ? 25e3 : 5 * 6e4;
+    const lifetimeTimer = setTimeout(() => {
+      if (!res.writableEnded) {
+        send("mall.heartbeat", { reconnect: true });
+        res.end();
+      }
+    }, maxLifetimeMs);
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(timer);
+      clearTimeout(lifetimeTimer);
       telemetryBus2.off("mall.chat", chat);
       telemetryBus2.off("mall.presence", presence);
-    });
+    };
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
   });
   router.get("/desk-room", (_req, res, next) => {
     void readLegacyHistory().then(() => res.json({
@@ -2453,7 +2518,9 @@ var AI_MODEL_CATALOG = {
     "gemini-4-hydrogen",
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite"
+    "gemini-3.1-flash-lite",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it"
   ],
   google: [
     "gemini-4-neon",
@@ -2463,7 +2530,8 @@ var AI_MODEL_CATALOG = {
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemma-4-31b-it"
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it"
   ],
   openrouter: [
     "google/gemini-4-neon",
@@ -3153,19 +3221,32 @@ async function streamOrGenerateCoachReply(connection, input, options) {
   }
   const model = connection.model ?? AI_MODEL_CATALOG.google[0];
   const ai = createGoogleAiClient(connection.key, void 0, options.fetcher);
+  const isGemma = isOpenWeightGemmaModel(model);
+  const allowPdf = modelSupportsPdf(model);
+  const shouldSearch = Boolean(input.webSearch) && modelSupportsGoogleSearch(model);
+  const filteredAttachments = (input.attachments ?? []).filter((att) => allowPdf || att.mimeType !== "application/pdf");
+  const historyContents = (input.history ?? []).map((item) => ({
+    role: item.role === "assistant" ? "model" : "user",
+    parts: [{ text: item.content }]
+  }));
+  const userTurn = {
+    role: "user",
+    parts: [{ text: input.prompt }, ...filteredAttachments.map((inlineData) => ({ inlineData }))]
+  };
+  const contents = isGemma ? [
+    { role: "user", parts: [{ text: `[System Directives \u2014 Strictly Follow]
+${input.system}` }] },
+    { role: "model", parts: [{ text: "Understood. I will strictly follow these directives and risk-only Safe Harbor rules." }] },
+    ...historyContents,
+    userTurn
+  ] : [...historyContents, userTurn];
   const request = {
     model,
-    contents: [
-      ...(input.history ?? []).map((item) => ({
-        role: item.role === "assistant" ? "model" : "user",
-        parts: [{ text: item.content }]
-      })),
-      { role: "user", parts: [{ text: input.prompt }, ...(input.attachments ?? []).map((inlineData) => ({ inlineData }))] }
-    ],
+    contents,
     config: {
-      systemInstruction: input.system,
+      ...isGemma ? {} : { systemInstruction: input.system },
       abortSignal: options.signal,
-      ...input.webSearch ? { tools: [{ googleSearch: {} }] } : {}
+      ...shouldSearch ? { tools: [{ googleSearch: {} }] } : {}
     }
   };
   const sourceMap = /* @__PURE__ */ new Map();
@@ -3210,17 +3291,35 @@ ${JSON.stringify(input.schema)}`
     }
   }
   const ai = createGoogleAiClient(connection.key);
-  const generate = async (model) => (await ai.models.generateContent({
-    model,
-    contents: input.prompt,
-    config: {
-      systemInstruction: input.system,
-      responseMimeType: "application/json",
-      responseJsonSchema: input.schema,
-      maxOutputTokens: 3e3,
-      abortSignal: signal
+  const generate = async (model) => {
+    if (isOpenWeightGemmaModel(model)) {
+      const gemmaPrompt = `[System Directives \u2014 Strictly Follow]
+${input.system}
+Return one valid JSON object matching this schema (no markdown fences):
+${JSON.stringify(input.schema)}
+
+${input.prompt}`;
+      return (await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: gemmaPrompt }] }],
+        config: {
+          maxOutputTokens: 3e3,
+          abortSignal: signal
+        }
+      })).text ?? "";
     }
-  })).text ?? "";
+    return (await ai.models.generateContent({
+      model,
+      contents: input.prompt,
+      config: {
+        systemInstruction: input.system,
+        responseMimeType: "application/json",
+        responseJsonSchema: input.schema,
+        maxOutputTokens: 3e3,
+        abortSignal: signal
+      }
+    })).text ?? "";
+  };
   if (connection.provider === "google") {
     const model = connection.model ?? AI_MODEL_CATALOG.google[0];
     return { model, reply: await generate(model) };
@@ -4320,9 +4419,31 @@ function createSiteTrafficRouter(options = {}) {
   const env = options.env ?? process.env;
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? Date.now;
+  const rateLimitMax = options.rateLimitMax ?? 60;
+  const rateLimitWindowMs = options.rateLimitWindowMs ?? 15 * 60 * 1e3;
+  const postRateBuckets = /* @__PURE__ */ new Map();
+  let nextSweepAt = 0;
   const recordMemory = createMemoryTrafficStore(
     options.storeFile ?? join2(tmpdir2(), "tallynx_site_traffic_v1.json")
   );
+  function checkTrafficRateLimit(ipKey, nowMs) {
+    const windowStart = nowMs - rateLimitWindowMs;
+    if (nowMs >= nextSweepAt) {
+      for (const [key, stamps2] of postRateBuckets) {
+        if ((stamps2.at(-1) ?? 0) <= windowStart) postRateBuckets.delete(key);
+      }
+      nextSweepAt = nowMs + rateLimitWindowMs;
+    }
+    const stamps = (postRateBuckets.get(ipKey) ?? []).filter((ts) => ts > windowStart);
+    if (stamps.length >= rateLimitMax) {
+      const oldest = stamps[0] ?? nowMs;
+      postRateBuckets.set(ipKey, stamps);
+      return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((oldest + rateLimitWindowMs - nowMs) / 1e3)) };
+    }
+    stamps.push(nowMs);
+    postRateBuckets.set(ipKey, stamps);
+    return { allowed: true, retryAfterSec: 0 };
+  }
   function applyCors(req, res) {
     const origin = req.headers.origin;
     if (typeof origin === "string" && isAllowedCorsOrigin(origin)) {
@@ -4354,12 +4475,23 @@ function createSiteTrafficRouter(options = {}) {
   router.post("/telemetry/traffic", async (req, res) => {
     applyCors(req, res);
     res.setHeader("Cache-Control", "no-store");
-    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const nowMs = now();
+    const clientIp = (process.env.VERCEL === "1" ? req.get("x-vercel-forwarded-for")?.split(",")[0]?.trim() : void 0) || req.ip || req.socket?.remoteAddress || "unknown";
+    const rate = checkTrafficRateLimit(clientIp, nowMs);
+    if (!rate.allowed) {
+      res.setHeader("Retry-After", String(rate.retryAfterSec));
+      return res.status(429).json({
+        ok: false,
+        code: "RATE_LIMITED",
+        error: "Too many traffic telemetry pings. Try again later."
+      });
+    }
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
     const site = normalizeTrafficSite(body.site, defaultSite);
     const isBot = isLikelyBotUserAgent(req.headers["user-agent"]);
-    const sessionId = isBot ? null : normalizeSessionId(body.sessionId);
+    const rawSessionId = typeof body.sessionId === "string" && body.sessionId.length <= 128 ? body.sessionId : null;
+    const sessionId = isBot ? null : normalizeSessionId(rawSessionId);
     const pageView = !isBot && body.pageView === true && Boolean(sessionId);
-    const nowMs = now();
     const redisConfig = resolveUpstashConfig(env);
     if (redisConfig) {
       try {
@@ -4378,10 +4510,12 @@ function readFirebaseLookupCaller(payload, requireVerifiedEmail) {
   const users = asRecord(payload)?.users;
   const user = asRecord(Array.isArray(users) ? users[0] : void 0);
   if (!user || typeof user.localId !== "string" || !user.localId.trim() || user.disabled === true || requireVerifiedEmail && user.emailVerified !== true) return null;
+  const displayName = typeof user.displayName === "string" && user.displayName.trim() ? user.displayName.trim().slice(0, 80) : void 0;
   return {
     uid: user.localId,
     email: typeof user.email === "string" ? user.email : "",
     emailVerified: user.emailVerified === true,
+    ...displayName ? { displayName } : {},
     customAttributes: typeof user.customAttributes === "string" ? user.customAttributes : void 0
   };
 }
@@ -5683,23 +5817,64 @@ function createApp() {
     }
     return localRate;
   }
+  const bridgeKeyOwners = /* @__PURE__ */ new Map();
+  function bindBridgeKeyOwner(apiKey, uid) {
+    if (!uid) return;
+    const keyHash = hashTredynApiKey(apiKey);
+    bridgeKeyOwners.set(keyHash, uid);
+    if (bridgeKeyOwners.size > 2048) {
+      const oldest = bridgeKeyOwners.keys().next().value;
+      if (oldest) bridgeKeyOwners.delete(oldest);
+    }
+  }
   app2.get("/api/mt5/engine-status", (_req, res) => {
+    const eaBinExists = fs.existsSync(path.join(process.cwd(), "scripts", "TredynLiveBridge.ex5"));
+    const eaSrcExists = fs.existsSync(path.join(process.cwd(), "scripts", "TredynLiveBridge.mq5"));
+    const liveBridgeReady = eaBinExists && eaSrcExists;
+    const fundedNextGatewayReady = Boolean(fundedNextVpsBaseUrl);
+    const sovereignStoreReady = Boolean(DEFAULT_SOVEREIGN_MT5_BASE_URL);
+    res.setHeader("Cache-Control", "no-store");
     res.json({
       ok: true,
-      liveBridgeReady: true,
+      liveBridgeReady,
       cloudConnectorsReady: true,
+      fundedNextGatewayReady,
+      sovereignStoreReady,
       sharedVpsDisabled: true,
-      engineReady: true
+      engineReady: liveBridgeReady,
+      activeBridgeFeeds: liveBridgeMemoryStore.size,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
   app2.post("/api/mt5/live-bridge/push", async (req, res) => {
     try {
+      const ipRate = checkChatRateLimit(`live_bridge_push_ip:${req.ip || req.socket.remoteAddress || "unknown"}`, Date.now(), 900);
+      if (!ipRate.allowed) {
+        res.setHeader("Retry-After", String(ipRate.retryAfterSec));
+        res.status(429).json({
+          ok: false,
+          code: "RATE_LIMITED",
+          error: `Live Bridge push rate limit exceeded; retry in ${ipRate.retryAfterSec}s`
+        });
+        return;
+      }
       const body = req.body || {};
       const headerKey = typeof req.headers["x-tallynx-api-key"] === "string" ? req.headers["x-tallynx-api-key"].trim() : typeof req.headers["x-tredyn-api-key"] === "string" ? req.headers["x-tredyn-api-key"].trim() : typeof body.tallynxApiKey === "string" ? body.tallynxApiKey.trim() : typeof body.tredynApiKey === "string" ? body.tredynApiKey.trim() : "";
       if (!isValidTredynApiKey(headerKey)) {
         res.status(401).json({
           ok: false,
           error: "Invalid or missing X-TallyNX-Api-Key (or X-Tredyn-Api-Key) header"
+        });
+        return;
+      }
+      const keyHash = hashTredynApiKey(headerKey);
+      const keyRate = checkChatRateLimit(`live_bridge_push_key:${keyHash}`, Date.now(), 600);
+      if (!keyRate.allowed) {
+        res.setHeader("Retry-After", String(keyRate.retryAfterSec));
+        res.status(429).json({
+          ok: false,
+          code: "RATE_LIMITED",
+          error: `Live Bridge push rate limit exceeded for this key; retry in ${keyRate.retryAfterSec}s`
         });
         return;
       }
@@ -5713,7 +5888,7 @@ function createApp() {
         syncedAt,
         reason: typeof body.reason === "string" ? body.reason : "MT5_EA_PUSH",
         meta: {
-          holderName: String(rawMeta.holderName || rawMeta.name || "Tredyn MT5 Trader"),
+          holderName: String(rawMeta.holderName || rawMeta.name || "TallyNX MT5 Trader"),
           login: String(rawMeta.login || rawMeta.accountLogin || ""),
           broker: String(rawMeta.broker || rawMeta.company || "MT5 Live Bridge"),
           server: String(rawMeta.server || ""),
@@ -5727,22 +5902,27 @@ function createApp() {
       };
       saveLiveBridgeFeed(headerKey, entry);
       telemetryBus.emit("bridge_push", {
-        login: entry.meta.login,
-        broker: entry.meta.broker,
-        initialDeposit: entry.meta.initialDeposit,
-        summaryNetProfit: entry.meta.summaryNetProfit,
-        receivedPositions: positions.length,
-        openPositionsCount: liveState.openPositions.length,
-        balance: liveState.balance,
-        equity: liveState.equity,
-        floatingPnl: liveState.floatingPnl,
-        syncedAt
+        keyHash,
+        ownerUid: bridgeKeyOwners.get(keyHash) ?? null,
+        payload: {
+          login: entry.meta.login,
+          broker: entry.meta.broker,
+          initialDeposit: entry.meta.initialDeposit,
+          summaryNetProfit: entry.meta.summaryNetProfit,
+          receivedPositions: positions.length,
+          openPositionsCount: liveState.openPositions.length,
+          balance: liveState.balance,
+          equity: liveState.equity,
+          floatingPnl: liveState.floatingPnl,
+          syncedAt
+        }
       });
       if (DEFAULT_SOVEREIGN_MT5_BASE_URL) {
         await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/live-bridge/push`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "X-TallyNX-Api-Key": headerKey,
             "X-Tredyn-Api-Key": headerKey
           },
           body: JSON.stringify({
@@ -5780,6 +5960,10 @@ function createApp() {
       });
       return;
     }
+    if (req.headers.authorization) {
+      const caller = await verifyFirebaseBearerToken(req.headers.authorization, false).catch(() => null);
+      if (caller) bindBridgeKeyOwner(headerKey, caller.uid);
+    }
     const rate = checkChatRateLimit(`live_bridge:${hashTredynApiKey(headerKey)}`, Date.now(), 450);
     if (!rate.allowed) {
       res.status(429).json({
@@ -5799,6 +5983,7 @@ function createApp() {
             method: "GET",
             headers: {
               Accept: "application/json",
+              "X-TallyNX-Api-Key": headerKey,
               "X-Tredyn-Api-Key": headerKey
             },
             signal: AbortSignal.timeout(4e3)
@@ -5814,7 +5999,7 @@ function createApp() {
               syncedAt: String(pullData.entry.syncedAt || (/* @__PURE__ */ new Date()).toISOString()),
               reason: "VPS01_PERSISTENT_STORE",
               meta: {
-                holderName: String(rawMeta.holderName || rawMeta.name || "Tredyn MT5 Trader"),
+                holderName: String(rawMeta.holderName || rawMeta.name || "TallyNX MT5 Trader"),
                 login: String(rawMeta.login || ""),
                 broker: String(rawMeta.broker || "MT5 Live Bridge"),
                 server: String(rawMeta.server || ""),
@@ -5836,7 +6021,7 @@ function createApp() {
     if (!feed) {
       res.status(404).json({
         ok: false,
-        error: "Waiting for MT5 Live Bridge heartbeat for this tredyn-api-key",
+        error: "Waiting for MT5 Live Bridge heartbeat for this bridge API key",
         code: "LIVE_BRIDGE_WAITING"
       });
       return;
@@ -5950,14 +6135,15 @@ function createApp() {
       const userToken = typeof body.token === "string" ? body.token.trim() : "";
       const mt5TimeOffset = normalizeMt5TimeOffsetSetting(body.mt5TimeOffset);
       if (provider === "LIVE_BRIDGE") {
-        const tredynApiKey = typeof body.tredynApiKey === "string" && body.tredynApiKey.trim() ? body.tredynApiKey.trim() : userToken;
+        const tredynApiKey = typeof body.tallynxApiKey === "string" && body.tallynxApiKey.trim() ? body.tallynxApiKey.trim() : typeof body.tredynApiKey === "string" && body.tredynApiKey.trim() ? body.tredynApiKey.trim() : userToken;
         if (!isValidTredynApiKey(tredynApiKey)) {
           res.status(400).json({
-            error: "\u0E01\u0E23\u0E38\u0E13\u0E32\u0E23\u0E30\u0E1A\u0E38 tredyn-api-key \u0E17\u0E35\u0E48\u0E16\u0E39\u0E01\u0E15\u0E49\u0E2D\u0E07 (\u0E40\u0E0A\u0E48\u0E19 trd_live_...)",
+            error: "\u0E01\u0E23\u0E38\u0E13\u0E32\u0E23\u0E30\u0E1A\u0E38 Live Bridge API key \u0E17\u0E35\u0E48\u0E16\u0E39\u0E01\u0E15\u0E49\u0E2D\u0E07 (\u0E40\u0E0A\u0E48\u0E19 trd_live_...)",
             code: "INVALID_TREDYN_API_KEY"
           });
           return;
         }
+        if (caller) bindBridgeKeyOwner(tredynApiKey, caller.uid);
         let feed = getLiveBridgeFeed(tredynApiKey);
         if (!feed && DEFAULT_SOVEREIGN_MT5_BASE_URL) {
           try {
@@ -5967,6 +6153,7 @@ function createApp() {
                 method: "GET",
                 headers: {
                   Accept: "application/json",
+                  "X-TallyNX-Api-Key": tredynApiKey,
                   "X-Tredyn-Api-Key": tredynApiKey
                 },
                 signal: AbortSignal.timeout(6e3)
@@ -5986,7 +6173,7 @@ function createApp() {
                   syncedAt: String(pullData.entry.syncedAt || (/* @__PURE__ */ new Date()).toISOString()),
                   reason: "VPS01_PERSISTENT_STORE",
                   meta: {
-                    holderName: String(rawMeta.holderName || rawMeta.name || "Tredyn MT5 Trader"),
+                    holderName: String(rawMeta.holderName || rawMeta.name || "TallyNX MT5 Trader"),
                     login: String(rawMeta.login || ""),
                     broker: String(rawMeta.broker || "MT5 Live Bridge"),
                     server: String(rawMeta.server || ""),
@@ -6006,7 +6193,7 @@ function createApp() {
         }
         if (!feed) {
           res.status(404).json({
-            error: "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E31\u0E1A\u0E2A\u0E31\u0E0D\u0E0D\u0E32\u0E13\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01 MT5 Live Bridge \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A tredyn-api-key \u0E19\u0E35\u0E49 \u2014 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E15\u0E34\u0E14\u0E15\u0E31\u0E49\u0E07 TredynLiveBridge.ex5 \u0E25\u0E07\u0E1A\u0E19\u0E01\u0E23\u0E32\u0E1F\u0E43\u0E19 MT5 \u0E41\u0E25\u0E30\u0E40\u0E1B\u0E34\u0E14 Allow WebRequest",
+            error: "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E31\u0E1A\u0E2A\u0E31\u0E0D\u0E0D\u0E32\u0E13\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01 MT5 Live Bridge \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A API key \u0E19\u0E35\u0E49 \u2014 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E15\u0E34\u0E14\u0E15\u0E31\u0E49\u0E07 TredynLiveBridge.ex5 \u0E25\u0E07\u0E1A\u0E19\u0E01\u0E23\u0E32\u0E1F\u0E43\u0E19 MT5 \u0E41\u0E25\u0E30\u0E40\u0E1B\u0E34\u0E14 Allow WebRequest",
             code: "LIVE_BRIDGE_WAITING"
           });
           return;
@@ -6264,21 +6451,48 @@ function createApp() {
         res.status(400).json({ ok: false, error: "\u0E01\u0E23\u0E38\u0E13\u0E32\u0E15\u0E31\u0E49\u0E07\u0E0A\u0E37\u0E48\u0E2D Setup \u0E2D\u0E22\u0E48\u0E32\u0E07\u0E19\u0E49\u0E2D\u0E22 4 \u0E15\u0E31\u0E27\u0E2D\u0E31\u0E01\u0E29\u0E23" });
         return;
       }
+      const rawChannel = typeof body.verificationChannel === "string" ? body.verificationChannel.trim() : "";
+      if (rawChannel === "DIRECT_INVESTOR" || rawChannel === "METAAPI_CLOUD" || rawChannel === "BRIDGE_API") {
+        res.status(410).json({
+          ok: false,
+          code: "DEPRECATED_CHANNEL",
+          error: "\u0E0A\u0E48\u0E2D\u0E07\u0E17\u0E32\u0E07\u0E25\u0E47\u0E2D\u0E01\u0E2D\u0E34\u0E19 Investor Password / MetaApi Cloud / Shared VPS \u0E16\u0E39\u0E01\u0E16\u0E2D\u0E14\u0E2D\u0E2D\u0E01\u0E16\u0E32\u0E27\u0E23\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E1B\u0E49\u0E2D\u0E07\u0E01\u0E31\u0E19\u0E04\u0E27\u0E32\u0E21\u0E40\u0E2A\u0E35\u0E48\u0E22\u0E07\u0E1C\u0E34\u0E14\u0E01\u0E0E Shared IP \u0E02\u0E2D\u0E07\u0E01\u0E2D\u0E07\u0E17\u0E38\u0E19 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E43\u0E0A\u0E49 Live Bridge (.ex5), Myfxbook API, FundedNext MCP, ProjectX API \u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E1F\u0E25\u0E4C .xlsx"
+        });
+        return;
+      }
       const allowedChannels = [
         "LIVE_BRIDGE",
-        "DIRECT_INVESTOR",
-        "METAAPI_CLOUD",
         "MANUAL_XLSX",
         "FUNDEDNEXT_MCP",
         "MYFXBOOK_API",
         "PROJECTX_API"
       ];
-      const verificationChannel = allowedChannels.includes(
-        body.verificationChannel
-      ) ? body.verificationChannel : "MANUAL_XLSX";
-      const brokerServer = String(body.brokerServer || "").trim();
-      const brokerName = String(body.brokerName || "").trim() || "MT5 Verified Broker";
-      const rawLogin = String(body.login || "").trim();
+      let verificationChannel = allowedChannels.includes(
+        rawChannel
+      ) ? rawChannel : "MANUAL_XLSX";
+      let proofOrigin = "CLIENT_SUBMITTED";
+      let brokerServer = String(body.brokerServer || "").trim();
+      let brokerName = String(body.brokerName || "").trim() || "MT5 Verified Broker";
+      let rawLogin = String(body.login || "").trim();
+      let initialDeposit = Math.max(100, Number(body.initialDeposit) || 1e4);
+      let candidatePositions = Array.isArray(body.mt5Positions) ? body.mt5Positions : [];
+      if (verificationChannel === "LIVE_BRIDGE") {
+        const bridgeKey = typeof req.headers["x-tallynx-api-key"] === "string" ? req.headers["x-tallynx-api-key"].trim() : typeof req.headers["x-tredyn-api-key"] === "string" ? req.headers["x-tredyn-api-key"].trim() : "";
+        const serverFeed = bridgeKey && isValidTredynApiKey(bridgeKey) ? getLiveBridgeFeed(bridgeKey) : null;
+        if (serverFeed && serverFeed.positions.length > 0) {
+          proofOrigin = "SERVER_LIVE_BRIDGE";
+          candidatePositions = serverFeed.positions;
+          rawLogin = serverFeed.meta.login || rawLogin;
+          brokerName = serverFeed.meta.broker || brokerName;
+          brokerServer = serverFeed.meta.server || brokerServer;
+          if (serverFeed.meta.initialDeposit >= 100) {
+            initialDeposit = serverFeed.meta.initialDeposit;
+          }
+        } else {
+          verificationChannel = "MANUAL_XLSX";
+          proofOrigin = "CLIENT_SUBMITTED";
+        }
+      }
       if (!rawLogin || rawLogin.length < 3) {
         res.status(400).json({
           ok: false,
@@ -6286,15 +6500,14 @@ function createApp() {
         });
         return;
       }
-      const { valid: verifiedPositions } = validateVerifiedMt5Positions(body.mt5Positions || []);
+      const { valid: verifiedPositions } = validateVerifiedMt5Positions(candidatePositions);
       if (verifiedPositions.length === 0) {
         res.status(400).json({
           ok: false,
-          error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E2D\u0E2D\u0E40\u0E14\u0E2D\u0E23\u0E4C MT5 \u0E08\u0E23\u0E34\u0E07\u0E17\u0E35\u0E48\u0E1C\u0E48\u0E32\u0E19\u0E01\u0E32\u0E23\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A (\u0E15\u0E49\u0E2D\u0E07\u0E0B\u0E34\u0E07\u0E01\u0E4C\u0E1C\u0E48\u0E32\u0E19 Investor Password, Live Bridge .ex5 \u0E2B\u0E23\u0E37\u0E2D Report .xlsx \u0E01\u0E48\u0E2D\u0E19\u0E25\u0E07\u0E02\u0E32\u0E22)"
+          error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E2D\u0E2D\u0E40\u0E14\u0E2D\u0E23\u0E4C MT5 \u0E08\u0E23\u0E34\u0E07\u0E17\u0E35\u0E48\u0E1C\u0E48\u0E32\u0E19\u0E01\u0E32\u0E23\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A (\u0E15\u0E49\u0E2D\u0E07\u0E0B\u0E34\u0E07\u0E01\u0E4C\u0E1C\u0E48\u0E32\u0E19 Live Bridge .ex5, Cloud API \u0E17\u0E32\u0E07\u0E01\u0E32\u0E23 \u0E2B\u0E23\u0E37\u0E2D Report .xlsx \u0E01\u0E48\u0E2D\u0E19\u0E40\u0E1C\u0E22\u0E41\u0E1E\u0E23\u0E48)"
         });
         return;
       }
-      const initialDeposit = Math.max(100, Number(body.initialDeposit) || 1e4);
       const metrics = computeVerifiedSetupMetrics(verifiedPositions, initialDeposit);
       const verifiedAt = (/* @__PURE__ */ new Date()).toISOString();
       const proofPayload = JSON.stringify({
@@ -6302,6 +6515,7 @@ function createApp() {
         login: rawLogin,
         brokerServer: brokerServer || brokerName,
         verificationChannel,
+        proofOrigin,
         tradeCount: metrics.tradeCount,
         netProfitUsd: metrics.netProfitUsd,
         firstTicket: verifiedPositions[0].ticket,
@@ -6336,6 +6550,7 @@ function createApp() {
         brokerServer: brokerServer || brokerName,
         maskedLogin: maskMt5Login(rawLogin),
         proofHash,
+        proofOrigin,
         verifiedAt,
         createdAt: verifiedAt,
         buyerCount: 0,
@@ -6375,11 +6590,25 @@ function createApp() {
         return;
       }
       loadMarketplaceStore();
-      const target = marketplaceMemoryStore.get(setupId);
-      if (target) {
-        target.buyerCount = (target.buyerCount || 0) + 1;
-        saveMarketplaceSetup(target);
+      let target = marketplaceMemoryStore.get(setupId);
+      if (!target) {
+        const allListings = await getMarketplaceListings();
+        target = allListings.find((item) => item.id === setupId);
       }
+      if (!target) {
+        res.status(404).json({ ok: false, error: "Marketplace setup not found." });
+        return;
+      }
+      if (target.priceUsd > 0 && target.sellerUid !== caller.uid) {
+        res.status(501).json({
+          ok: false,
+          error: "PAYMENT_GATEWAY_REQUIRED",
+          message: "Paid marketplace checkout is not yet active. Free community blueprints ($0) are available now."
+        });
+        return;
+      }
+      target.buyerCount = (target.buyerCount || 0) + 1;
+      saveMarketplaceSetup(target);
       if (DEFAULT_SOVEREIGN_MT5_BASE_URL) {
         await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/purchase`, {
           method: "POST",
@@ -6392,7 +6621,7 @@ function createApp() {
         ok: true,
         setupId,
         purchasedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        buyerCount: target?.buyerCount ?? 1
+        buyerCount: target.buyerCount
       });
     } catch (err) {
       res.status(500).json({
@@ -6409,20 +6638,53 @@ function createApp() {
         return;
       }
       const id = String(req.params.id || "").trim();
+      if (!id) {
+        res.status(400).json({ ok: false, error: "Missing listing id" });
+        return;
+      }
       loadMarketplaceStore();
-      const target = marketplaceMemoryStore.get(id);
-      if (target && target.sellerUid !== caller.uid) {
+      const localTarget = marketplaceMemoryStore.get(id);
+      if (localTarget && localTarget.sellerUid !== caller.uid) {
         res.status(403).json({ ok: false, error: "\u0E04\u0E38\u0E13\u0E44\u0E21\u0E48\u0E21\u0E35\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E4C\u0E25\u0E1A Setup \u0E02\u0E2D\u0E07\u0E1C\u0E39\u0E49\u0E02\u0E32\u0E22\u0E23\u0E32\u0E22\u0E2D\u0E37\u0E48\u0E19" });
         return;
       }
-      removeMarketplaceSetup(id);
+      if (!localTarget) {
+        if (!DEFAULT_SOVEREIGN_MT5_BASE_URL) {
+          res.status(404).json({ ok: false, error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A Setup \u0E17\u0E35\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E25\u0E1A" });
+          return;
+        }
+        const remoteListings = await getMarketplaceListings();
+        const remoteTarget = remoteListings.find((item) => item.id === id);
+        if (!remoteTarget) {
+          res.status(404).json({ ok: false, error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A Setup \u0E17\u0E35\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E25\u0E1A" });
+          return;
+        }
+        if (remoteTarget.sellerUid !== caller.uid) {
+          res.status(403).json({ ok: false, error: "\u0E04\u0E38\u0E13\u0E44\u0E21\u0E48\u0E21\u0E35\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E4C\u0E25\u0E1A Setup \u0E02\u0E2D\u0E07\u0E1C\u0E39\u0E49\u0E02\u0E32\u0E22\u0E23\u0E32\u0E22\u0E2D\u0E37\u0E48\u0E19" });
+          return;
+        }
+      }
       if (DEFAULT_SOVEREIGN_MT5_BASE_URL) {
-        await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/delete`, {
+        const delResp = await fetch(`${DEFAULT_SOVEREIGN_MT5_BASE_URL}/marketplace/delete`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id }),
+          body: JSON.stringify({ id, sellerUid: caller.uid }),
           signal: AbortSignal.timeout(3e3)
         }).catch(() => null);
+        if (delResp && (delResp.status === 403 || delResp.status === 404)) {
+          res.status(delResp.status).json({
+            ok: false,
+            error: delResp.status === 403 ? "\u0E04\u0E38\u0E13\u0E44\u0E21\u0E48\u0E21\u0E35\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E4C\u0E25\u0E1A Setup \u0E02\u0E2D\u0E07\u0E1C\u0E39\u0E49\u0E02\u0E32\u0E22\u0E23\u0E32\u0E22\u0E2D\u0E37\u0E48\u0E19" : "\u0E44\u0E21\u0E48\u0E1E\u0E1A Setup \u0E17\u0E35\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E25\u0E1A"
+          });
+          return;
+        }
+        if (!localTarget && (!delResp || !delResp.ok)) {
+          res.status(502).json({ ok: false, error: "\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E22\u0E37\u0E19\u0E22\u0E31\u0E19\u0E01\u0E32\u0E23\u0E25\u0E1A\u0E01\u0E31\u0E1A\u0E40\u0E0B\u0E34\u0E23\u0E4C\u0E1F\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E08\u0E31\u0E14\u0E40\u0E01\u0E47\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E44\u0E14\u0E49" });
+          return;
+        }
+      }
+      if (localTarget) {
+        removeMarketplaceSetup(id);
       }
       res.json({ ok: true, id });
     } catch (err) {
@@ -7167,23 +7429,40 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       return null;
     }
   };
-  app2.post("/api/auth/sso-handoff", (req, res) => {
+  app2.post("/api/auth/sso-handoff", async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
+    const caller = await verifyFirebaseBearerToken(req.headers.authorization);
+    if (!caller) {
+      res.status(401).json({ ok: false, error: "Authentication required for SSO handoff." });
+      return;
+    }
     const ssoHmacKey = getSsoSigningKey();
     if (!ssoHmacKey) {
       res.status(503).json({ ok: false, error: "TALLYNX_SSO_SECRET is not configured on the server." });
       return;
     }
-    const rawHandle = typeof req.body?.handle === "string" ? req.body.handle.trim() : "@alex_quant";
-    const handle = rawHandle.startsWith("@") ? rawHandle : `@${rawHandle}`;
+    const email = caller.email?.trim() || void 0;
+    const displayName = caller.displayName?.trim() || (email ? email.split("@")[0] : void 0);
+    const rawBase = (email ? email.split("@")[0] : displayName || `trader_${caller.uid.slice(0, 8)}`).normalize("NFKC").toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+    const handle = `@${rawBase || `trader_${caller.uid.slice(0, 8)}`}`;
     const expSec = Math.floor(Date.now() / 1e3) + 300;
     const ssoToken = signSsoPayload({
       handle,
-      sub: handle.replace(/^@/, ""),
+      sub: caller.uid,
+      ...email ? { email } : {},
+      ...displayName ? { displayName } : {},
       exp: expSec,
       nonce: crypto2.randomUUID()
     }, ssoHmacKey);
-    res.json({ ok: true, token: ssoToken, ssoToken, handle, expiresInSec: 300 });
+    res.json({
+      ok: true,
+      token: ssoToken,
+      ssoToken,
+      handle,
+      ...email ? { email } : {},
+      ...displayName ? { displayName } : {},
+      expiresInSec: 300
+    });
   });
   const handleDeskSsoExchange = (req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -7214,6 +7493,7 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
     listings: getMarketplaceListings,
     localListings: loadMarketplaceStore,
     verifyUser: verifyFirebaseBearerToken,
+    hasActiveBridgeFeed: (bridgeKey) => Boolean(bridgeKey && isValidTredynApiKey(bridgeKey) && getLiveBridgeFeed(bridgeKey)),
     connectedSnapshot: async (uid, channel, accountId) => connectedMallSnapshots.get(mallSourceKey(uid, channel, accountId)),
     bridgeSnapshot: (bridgeKey) => {
       if (!bridgeKey || !isValidTredynApiKey(bridgeKey)) return void 0;
@@ -7230,10 +7510,31 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       };
     }
   }));
-  app2.get("/api/telemetry/stream", (req, res) => {
+  app2.get("/api/telemetry/stream", async (req, res) => {
+    const authHeader = req.headers.authorization || (typeof req.query.token === "string" && req.query.token.trim() ? `Bearer ${req.query.token.trim()}` : void 0);
+    const caller = await verifyFirebaseBearerToken(authHeader, false);
+    if (!caller) {
+      res.setHeader("Cache-Control", "no-store");
+      res.status(401).json({ ok: false, code: "AUTH_REQUIRED", error: "Authentication required for live telemetry stream." });
+      return;
+    }
+    const subscribedKeyHashes = /* @__PURE__ */ new Set();
+    const rawHashes = typeof req.query.keyHashes === "string" ? req.query.keyHashes : "";
+    for (const part of rawHashes.split(",").slice(0, 16)) {
+      const clean = part.trim().toLowerCase();
+      if (/^[a-f0-9]{64}$/.test(clean)) {
+        const existingOwner = bridgeKeyOwners.get(clean);
+        if (!existingOwner || existingOwner === caller.uid) {
+          subscribedKeyHashes.add(clean);
+        }
+      }
+    }
     res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    res.write("retry: 10000\n\n");
     const sendEvent = (eventName, data) => {
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ event: eventName, payload: data, ts: (/* @__PURE__ */ new Date()).toISOString() })}
@@ -7242,7 +7543,15 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
       }
     };
     sendEvent("account.heartbeat", { stream: "SSE_LIVE", readOnlyVerified: true });
-    const onBridgePush = (data) => sendEvent("bridge.push", data);
+    const onBridgePush = (evt) => {
+      const record = asRecord(evt);
+      const keyHash = typeof record?.keyHash === "string" ? record.keyHash : "";
+      if (!keyHash) return;
+      const ownerUid = bridgeKeyOwners.get(keyHash) ?? (typeof record?.ownerUid === "string" ? record.ownerUid : null);
+      const allowed = ownerUid ? ownerUid === caller.uid : subscribedKeyHashes.has(keyHash);
+      if (!allowed) return;
+      sendEvent("bridge.push", record?.payload ?? {});
+    };
     const onDeskUpdate = (data) => sendEvent("desk.room", data);
     const onMallChat = (data) => sendEvent("mall.chat", data);
     const onMallPresence = (data) => sendEvent("mall.presence", data);
@@ -7253,13 +7562,26 @@ ${safeChart}` : ""}${SAFE_HARBOR_REMINDER}`;
     const timer = setInterval(() => {
       sendEvent("account.heartbeat", { stream: "SSE_LIVE" });
     }, 15e3);
-    res.on("close", () => {
+    const maxLifetimeMs = process.env.VERCEL || process.env.VERCEL_ENV ? 25e3 : 5 * 6e4;
+    const lifetimeTimer = setTimeout(() => {
+      if (!res.writableEnded) {
+        sendEvent("account.heartbeat", { stream: "SSE_LIVE", reconnect: true });
+        res.end();
+      }
+    }, maxLifetimeMs);
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(timer);
+      clearTimeout(lifetimeTimer);
       telemetryBus.off("bridge_push", onBridgePush);
       telemetryBus.off("desk_room_update", onDeskUpdate);
       telemetryBus.off("mall.chat", onMallChat);
       telemetryBus.off("mall.presence", onMallPresence);
-    });
+    };
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
   });
   app2.get("/api/proprules/live", async (req, res) => {
     const forceRefresh = req.query.refresh === "1" || req.query.refresh === "true";

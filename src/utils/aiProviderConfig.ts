@@ -19,6 +19,8 @@ export const AI_MODEL_CATALOG = {
     'gemini-3.8-flash',
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
+    'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it',
   ],
   google: [
     'gemini-4-neon',
@@ -29,6 +31,7 @@ export const AI_MODEL_CATALOG = {
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
     'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it',
   ],
   openrouter: [
     'google/gemini-4-neon',
@@ -75,6 +78,7 @@ export const AI_MODEL_BADGES: Readonly<Record<string, string>> = {
   'gemini-3.5-flash-lite': 'Lite · Balanced',
   'gemini-3.1-flash-lite': 'Lite · Ultra-Fast',
   'gemma-4-31b-it': 'Open · 31B',
+  'gemma-4-26b-a4b-it': 'Open · 26B MoE',
   'gpt-6.2-astra': 'Flagship · Codex',
   'gpt-6.2-sol': 'Daily · Codex',
   'gpt-6.1-sol': 'Fast · Codex',
@@ -159,6 +163,7 @@ export function getActiveDeskAiStatus(
   credentials: ProviderStatusInput & { provider?: AiProvider },
   uid: string | null | undefined,
   now = Date.now(),
+  platformAccessAllowed = false,
 ): { provider: AiProvider | null; state: ProviderConnectionState } {
   const provider = credentials.provider ?? null;
   if (provider === 'google' || provider === 'openrouter' || provider === 'codex_oauth') {
@@ -168,14 +173,17 @@ export function getActiveDeskAiStatus(
     };
   }
   if (provider === 'platform') {
-    return { provider: 'platform', state: uid ? 'connected' : 'disconnected' };
+    return { provider: 'platform', state: uid && platformAccessAllowed ? 'connected' : 'disconnected' };
   }
-  // No explicit provider selected yet: check whether any personal key is saved, or signed-in platform default.
+  // No explicit provider selected yet: check whether any personal key is saved, or an eligible platform account.
   for (const candidate of ['google', 'codex_oauth', 'openrouter'] as const) {
     const state = getAiProviderConnectionState(candidate, credentials, null, now);
     if (state === 'connected') return { provider: candidate, state };
   }
-  return { provider: uid ? 'platform' : null, state: uid ? 'connected' : 'disconnected' };
+  if (uid && platformAccessAllowed) {
+    return { provider: 'platform', state: 'connected' };
+  }
+  return { provider: null, state: 'disconnected' };
 }
 
 export interface CodexJwtMetadata {
