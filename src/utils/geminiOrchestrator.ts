@@ -227,18 +227,27 @@ export function isPlatformFrontierGeminiModel(raw: unknown): raw is PlatformFron
   return typeof raw === 'string' && (PLATFORM_FRONTIER_GEMINI_MODELS as readonly string[]).includes(raw);
 }
 
-export function modelSupportsGoogleSearch(model: GeminiCandidateModel): boolean {
-  if (isPlatformFrontierGeminiModel(model)) return true;
-  return MODEL_CAPABILITY_MAP[model]?.supportsGoogleSearch ?? false;
+export function isOpenWeightGemmaModel(model: string): boolean {
+  const clean = model.trim().toLowerCase().replace(/^models\//, '');
+  return clean === GEMMA_4_31B_IT || clean === GEMMA_4_26B_A4B_IT || clean.startsWith('gemma-');
 }
 
-export function modelSupportsPdf(model: GeminiCandidateModel): boolean {
+export function modelSupportsGoogleSearch(model: string): boolean {
+  if (isOpenWeightGemmaModel(model)) return false;
   if (isPlatformFrontierGeminiModel(model)) return true;
-  return MODEL_CAPABILITY_MAP[model]?.supportsPdf ?? false;
+  if (Object.hasOwn(MODEL_CAPABILITY_MAP, model)) {
+    return MODEL_CAPABILITY_MAP[model as GeminiGenerationModel].supportsGoogleSearch;
+  }
+  return /^gemini-/i.test(model.trim().replace(/^models\//, ''));
 }
 
-export function isOpenWeightGemmaModel(model: GeminiCandidateModel): boolean {
-  return model === GEMMA_4_31B_IT || model === GEMMA_4_26B_A4B_IT;
+export function modelSupportsPdf(model: string): boolean {
+  if (isOpenWeightGemmaModel(model)) return false;
+  if (isPlatformFrontierGeminiModel(model)) return true;
+  if (Object.hasOwn(MODEL_CAPABILITY_MAP, model)) {
+    return MODEL_CAPABILITY_MAP[model as GeminiGenerationModel].supportsPdf;
+  }
+  return /^gemini-/i.test(model.trim().replace(/^models\//, ''));
 }
 
 export function normalizeChatModelPreference(raw: unknown): ChatModelPreference {

@@ -74,6 +74,7 @@ import {
   formatPilotAmount,
   FUNDEDNEXT_POLL_MS,
   isPilotReconnect,
+  isPilotReconnectStatus,
   LIVE_TELEMETRY_POLL_MS,
   listPilotAccounts,
   loadCachedPilotSnapshot,
@@ -3003,6 +3004,70 @@ export default function App() {
     }
     return headers;
   }, [currentUser, mallAccount, mallBridgeKey, mallChannel, state.privacyMasked]);
+
+  const platformAiAccessAllowed = useMemo(() => {
+    if (!currentUser) return false;
+    if (isAdminUser(currentUser, entitlement, isClaimAdmin)) return true;
+    return entitlement?.status === 'ACTIVE' && (entitlement.plan === 'LIFETIME' || entitlement.plan === 'ADMIN');
+  }, [currentUser, entitlement, isClaimAdmin]);
+
+  const brokerConnectionCounts = useMemo(() => {
+    let mt5Live = 0;
+    let mt5Configured = 0;
+    let fundedNextConnected = 0;
+    let fundedNextReconnect = 0;
+    const nowMs = Date.now();
+    for (const account of Object.values(state.accounts)) {
+      const isFundedNext = Boolean(
+        account.fundedNextConnectionId ||
+        account.fundedNextAccountId ||
+        account.syncProvider === 'FUNDEDNEXT_MCP'
+      );
+      if (isFundedNext) {
+        const feed = pilotFeeds[account.id];
+        const needsReconnect = Boolean(
+          feed?.reconnect ||
+          feed?.error ||
+          isPilotReconnectStatus(feed?.data?.syncStatus) ||
+          isPilotReconnectStatus(feed?.data?.snapshot?.status)
+        );
+        if (needsReconnect) {
+          fundedNextReconnect += 1;
+        } else if (
+          firebaseUid &&
+          account.fundedNextAccountId &&
+          (feed
+            ? Boolean(feed.data?.snapshot || feed.data?.syncStatus)
+            : Boolean(cachedPilotSnapshotsByPort[account.id]))
+        ) {
+          fundedNextConnected += 1;
+        }
+        continue;
+      }
+
+      // Ignore deprecated metaApiAccountId; only active non-custodial channels count as MT5 bridge/cloud configs.
+      const isMt5Configured =
+        account.syncProvider === 'LIVE_BRIDGE' ||
+        account.syncProvider === 'MYFXBOOK_API' ||
+        account.syncProvider === 'PROJECTX_API' ||
+        Boolean(account.tredynApiKey?.trim() || account.bridgeUrl?.trim());
+      if (!isMt5Configured) continue;
+      mt5Configured += 1;
+
+      const bridgeSyncedAt = liveBridgeByPort[account.id]?.data?.syncedAt;
+      const bridgeSyncedMs = bridgeSyncedAt ? Date.parse(bridgeSyncedAt) : NaN;
+      const hasRecentBridgeHeartbeat = Number.isFinite(bridgeSyncedMs) && nowMs - bridgeSyncedMs <= 5 * 60_000;
+      const syncMeta = liveSyncMetaByPort[account.id];
+      const hasLiveMeta = Boolean(syncMeta?.lastSyncAt && !syncMeta.error);
+      const hasCloudSyncReport =
+        (account.syncProvider === 'MYFXBOOK_API' || account.syncProvider === 'PROJECTX_API') &&
+        Boolean(account.lastMt5SyncAt || state.mt5RawReports?.[account.id]?.importedAt);
+      if (hasRecentBridgeHeartbeat || hasLiveMeta || hasCloudSyncReport) {
+        mt5Live += 1;
+      }
+    }
+    return { mt5Live, mt5Configured, fundedNextConnected, fundedNextReconnect };
+  }, [state.accounts, state.mt5RawReports, liveBridgeByPort, liveSyncMetaByPort, pilotFeeds, cachedPilotSnapshotsByPort, firebaseUid]);
   const cycleRuleStatus = useMemo(() => {
     const rule = getActiveConsistencyRule(state);
     return {
@@ -4296,6 +4361,7 @@ export default function App() {
                   initialTimeframe="5m"
                   portfolio={state.privacyMasked ? undefined : riskSupervisionPortfolio}
                   accountScope={state.activePort}
+                  platformAccessAllowed={platformAiAccessAllowed}
                 />
               </div>
             )}
@@ -4934,13 +5000,10 @@ export default function App() {
                 syncContent={renderDbSyncCenter()}
                 brandingContent={brandingForm}
                 onOpenMt5Sync={handleOpenMt5SyncModal}
-                mt5ConnectedCount={Object.values(state.accounts).filter((acc) =>
-                  (acc.syncProvider && acc.syncProvider !== 'MANUAL_XLSX' && acc.syncProvider !== 'FUNDEDNEXT_MCP') ||
-                  Boolean(acc.tredynApiKey || acc.metaApiAccountId || acc.bridgeUrl)
-                ).length}
-                fundedNextConnectedCount={Object.values(state.accounts).filter((acc) =>
-                  Boolean(acc.fundedNextConnectionId || acc.fundedNextAccountId || acc.syncProvider === 'FUNDEDNEXT_MCP')
-                ).length}
+                mt5ConnectedCount={brokerConnectionCounts.mt5Live}
+                mt5ConfiguredCount={brokerConnectionCounts.mt5Configured}
+                fundedNextConnectedCount={brokerConnectionCounts.fundedNextConnected}
+                fundedNextReconnectCount={brokerConnectionCounts.fundedNextReconnect}
               />
             )}
           </React.Suspense>
@@ -5006,6 +5069,7 @@ export default function App() {
                 alerts={behavioralAlerts}
                 analytics={realtimeAnalytics}
                 currentUserUid={currentUser?.uid ?? null}
+                platformAccessAllowed={platformAiAccessAllowed}
                 currentUserLabel={mallHandle}
                 rMultipleToday={mallSessionR}
                 status={mallStatus}

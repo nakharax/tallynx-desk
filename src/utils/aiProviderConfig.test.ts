@@ -91,11 +91,16 @@ test('reports per-provider connection state accurately across connected, expired
   assert.equal(getAiProviderConnectionState('codex_oauth', {}, null, now), 'disconnected');
   assert.equal(isDatabentoConnected('db-valid-key'), true);
   assert.equal(isDatabentoConnected(undefined), false);
+  assert.equal(normalizeAiModel('platform', 'gemma-4-31b-it'), 'gemma-4-31b-it');
+  assert.equal(normalizeAiModel('platform', 'gemma-4-26b-a4b-it'), 'gemma-4-26b-a4b-it');
   assert.deepEqual(getActiveDeskAiStatus({ provider: 'google', googleKey: google }, null, now), { provider: 'google', state: 'connected' });
   assert.deepEqual(getActiveDeskAiStatus({ provider: 'codex_oauth' }, null, now), { provider: 'codex_oauth', state: 'disconnected' });
   assert.deepEqual(getActiveDeskAiStatus({ provider: 'codex_oauth', codex: { accessToken: expiredJwt, expiresAt: now - 1_000 } }, null, now), { provider: 'codex_oauth', state: 'expired' });
-  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, 'founder-uid', now), { provider: 'platform', state: 'connected' });
-  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, null, now), { provider: 'platform', state: 'disconnected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, 'founder-uid', now, true), { provider: 'platform', state: 'connected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, 'free-user-uid', now, false), { provider: 'platform', state: 'disconnected' });
+  assert.deepEqual(getActiveDeskAiStatus({}, 'free-user-uid', now, false), { provider: null, state: 'disconnected' });
+  assert.deepEqual(getActiveDeskAiStatus({}, 'founder-uid', now, true), { provider: 'platform', state: 'connected' });
+  assert.deepEqual(getActiveDeskAiStatus({ provider: 'platform' }, null, now, true), { provider: 'platform', state: 'disconnected' });
   assert.deepEqual(getActiveDeskAiStatus({}, null, now), { provider: null, state: 'disconnected' });
 });
 
@@ -336,4 +341,27 @@ test('uses a completed Codex output item when streamed deltas and terminal outpu
       ].join('\n\n') + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } }),
     });
   assert.equal(result.reply, 'Observed risk');
+});
+
+test('Google BYOK Gemma models omit systemInstruction and googleSearch and fold directives into contents', async () => {
+  const result = await streamOrGenerateCoachReply(
+    { provider: 'google', key: google, model: 'gemma-4-31b-it' },
+    { system: 'Follow Safe Harbor.', prompt: 'Audit my lot sizing.', webSearch: true },
+    {
+      signal: AbortSignal.timeout(1000),
+      fetcher: async (url, init) => {
+        assert.match(String(url), /gemma-4-31b-it:generateContent/);
+        const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        assert.equal(payload.systemInstruction, undefined);
+        assert.equal(payload.tools, undefined);
+        const contents = payload.contents as Array<{ role: string; parts: Array<{ text?: string }> }>;
+        assert.ok(Array.isArray(contents) && contents.length >= 3);
+        assert.match(contents[0].parts[0].text ?? '', /Follow Safe Harbor\./);
+        assert.equal(contents[contents.length - 1].parts[0].text, 'Audit my lot sizing.');
+        return Response.json({ candidates: [{ content: { parts: [{ text: 'Gemma risk audit complete.' }] }, finishReason: 'STOP' }] });
+      },
+    },
+  );
+  assert.equal(result.reply, 'Gemma risk audit complete.');
+  assert.equal(result.model, 'gemma-4-31b-it');
 });

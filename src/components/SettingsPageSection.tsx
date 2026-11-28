@@ -23,7 +23,9 @@ interface SettingsPageSectionProps {
   onTogglePrivacyMask: () => void;
   onOpenMt5Sync: () => void;
   mt5ConnectedCount?: number;
+  mt5ConfiguredCount?: number;
   fundedNextConnectedCount?: number;
+  fundedNextReconnectCount?: number;
   brandingContent: React.ReactNode;
   accountsContent: React.ReactNode;
   syncContent: React.ReactNode;
@@ -45,13 +47,33 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
   onTogglePrivacyMask,
   onOpenMt5Sync,
   mt5ConnectedCount = 0,
+  mt5ConfiguredCount = 0,
   fundedNextConnectedCount = 0,
+  fundedNextReconnectCount = 0,
   brandingContent,
   accountsContent,
   syncContent,
 }) => {
   const ui = DESK_I18N[lang];
   const t = (en: string, th: string) => deskText(lang, en, th);
+
+  const mt5PillState = mt5ConnectedCount > 0 ? 'connected' : mt5ConfiguredCount > 0 ? 'unavailable' : 'disconnected';
+  const mt5PillLabel = mt5ConnectedCount > 0
+    ? t(`MT5 live (${mt5ConnectedCount})`, `MT5 เชื่อมสด (${mt5ConnectedCount} พอร์ต)`)
+    : mt5ConfiguredCount > 0
+      ? t(`MT5 configured (${mt5ConfiguredCount}) · awaiting heartbeat`, `ตั้งค่า MT5 แล้ว (${mt5ConfiguredCount} พอร์ต) · รอสัญญาณ`)
+      : t('MT5 not connected', 'MT5 ยังไม่เชื่อม');
+
+  const fundedNextPillState = fundedNextConnectedCount > 0
+    ? 'connected'
+    : fundedNextReconnectCount > 0
+      ? 'expired'
+      : 'disconnected';
+  const fundedNextPillLabel = fundedNextConnectedCount > 0
+    ? t(`FundedNext MCP (${fundedNextConnectedCount})`, `FundedNext MCP เชื่อมต่อแล้ว (${fundedNextConnectedCount} พอร์ต)`)
+    : fundedNextReconnectCount > 0
+      ? t(`FundedNext reconnect required (${fundedNextReconnectCount})`, `FundedNext ต้องเชื่อมต่อใหม่ (${fundedNextReconnectCount} พอร์ต)`)
+      : t('FundedNext MCP not connected', 'FundedNext MCP ยังไม่เชื่อม');
 
   const panels: Record<SettingsTab, React.ReactNode> = {
     display: <>
@@ -166,17 +188,13 @@ export const SettingsPageSection: React.FC<SettingsPageSectionProps> = ({
         <div>
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
             <h2 className="card-title">{t('MT5 & Broker Bridge', 'การเชื่อมต่อ MT5 และโบรกเกอร์')}</h2>
-            <span className="desk-conn-pill" data-state={mt5ConnectedCount > 0 ? 'connected' : 'disconnected'}>
-              <span className="desk-conn-dot" data-state={mt5ConnectedCount > 0 ? 'connected' : 'disconnected'} aria-hidden="true" />
-              {mt5ConnectedCount > 0
-                ? t(`MT5 connected (${mt5ConnectedCount})`, `MT5 เชื่อมต่อแล้ว (${mt5ConnectedCount} พอร์ต)`)
-                : t('MT5 not connected', 'MT5 ยังไม่เชื่อม')}
+            <span className="desk-conn-pill" data-state={mt5PillState}>
+              <span className="desk-conn-dot" data-state={mt5PillState} aria-hidden="true" />
+              {mt5PillLabel}
             </span>
-            <span className="desk-conn-pill" data-state={fundedNextConnectedCount > 0 ? 'connected' : 'disconnected'}>
-              <span className="desk-conn-dot" data-state={fundedNextConnectedCount > 0 ? 'connected' : 'disconnected'} aria-hidden="true" />
-              {fundedNextConnectedCount > 0
-                ? t(`FundedNext MCP (${fundedNextConnectedCount})`, `FundedNext MCP เชื่อมต่อแล้ว (${fundedNextConnectedCount} พอร์ต)`)
-                : t('FundedNext MCP not connected', 'FundedNext MCP ยังไม่เชื่อม')}
+            <span className="desk-conn-pill" data-state={fundedNextPillState}>
+              <span className="desk-conn-dot" data-state={fundedNextPillState} aria-hidden="true" />
+              {fundedNextPillLabel}
             </span>
           </div>
           <p>{t('Manage read-only connections or import an MT5 statement.', 'จัดการการเชื่อมต่อแบบอ่านอย่างเดียวหรือนำเข้ารายงาน MT5')}</p>

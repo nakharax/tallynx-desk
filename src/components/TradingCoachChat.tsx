@@ -98,6 +98,7 @@ interface TradingCoachChatProps {
   state: GhrWorkspaceState;
   isOnline: boolean;
   currentUserUid?: string | null;
+  platformAccessAllowed?: boolean;
   onUpdateMessages: (messages: ChatMessage[]) => void;
   onUpdateModel: (model: ChatModelId) => void;
   onResetChat: () => void;
@@ -723,6 +724,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   state,
   isOnline,
   currentUserUid = null,
+  platformAccessAllowed = false,
   onUpdateMessages,
   onUpdateModel,
   onResetChat,
@@ -749,12 +751,14 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
   const providerLabel = textCredential?.provider === 'google' ? 'Google Gemini'
     : textCredential?.provider === 'openrouter' ? 'OpenRouter'
       : textCredential?.provider === 'codex_oauth' ? (byok.openAiKey ? 'OpenAI API' : 'Codex OAuth') : undefined;
-  const activeAiStatus = getActiveDeskAiStatus(byok, currentUserUid);
+  const activeAiStatus = getActiveDeskAiStatus(byok, currentUserUid, undefined, platformAccessAllowed);
   const aiStatusCopy = activeAiStatus.state === 'connected'
     ? t('Connected', 'เชื่อมต่อแล้ว')
     : activeAiStatus.state === 'expired'
       ? t('Expired', 'หมดอายุ')
-      : t('Not connected', 'ยังไม่เชื่อม');
+      : currentUserUid && !platformAccessAllowed
+        ? t('BYOK required', 'ต้องใช้คีย์ของคุณ')
+        : t('Not connected', 'ยังไม่เชื่อม');
   const canCloudVoice = isOnline && canRequestDeskAi(byok, currentUserUid, 'voice');
   const voiceCredential = selectDeskAiCredential(byok, 'voice');
   const voiceProvider = voiceCredential?.provider;
@@ -2062,7 +2066,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
               <code>gemini-3.8-live</code>{' '}
               {t('Connect your Google Gemini key to use Live voice.', 'เชื่อมต่อคีย์ Google Gemini ของคุณเพื่อใช้เสียง Live')}
             </div>
-            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
+            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} platformAccessAllowed={platformAccessAllowed} />
           </div>
         ) : (
           <>
@@ -2293,7 +2297,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
           }}
         >
           <span>{formatCoachError(errorBanner, lang, 'The Coach could not complete the last request.')}</span>
-          <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
+          <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} platformAccessAllowed={platformAccessAllowed} />
         </div>
       )}
 
@@ -2600,7 +2604,7 @@ export const TradingCoachChat: React.FC<TradingCoachChatProps> = ({
                 </option>
               ))}
             </select>}
-            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} />
+            <AiAndDataKeysDialogButton uid={currentUserUid} lang={lang} platformAccessAllowed={platformAccessAllowed} />
 
             {chatMode !== 'live' && (
               <>

@@ -40,6 +40,7 @@ interface RightDockPanelProps {
   alerts: GuardrailAlert[];
   analytics: RealtimeAnalyticsSummary;
   currentUserUid?: string | null;
+  platformAccessAllowed?: boolean;
   currentUserLabel: string;
   rMultipleToday?: number;
   status: LiveDeskParticipant['status'];
@@ -107,6 +108,7 @@ export const RightDockPanel: React.FC<RightDockPanelProps> = ({
   alerts,
   analytics,
   currentUserUid,
+  platformAccessAllowed = false,
   currentUserLabel: _currentUserLabel,
   rMultipleToday: _rMultipleToday,
   status: _myStatus,
@@ -495,6 +497,7 @@ export const RightDockPanel: React.FC<RightDockPanelProps> = ({
               compactDock
               lang={lang}
               currentUserUid={currentUserUid}
+              platformAccessAllowed={platformAccessAllowed}
               state={workspaceState}
               pageSnapshot={pageSnapshot}
               isOnline={isOnline}

@@ -104,12 +104,16 @@ function ScopedComexBridgePanel({ lang, uid, onCopyText }: ComexBridgePanelProps
   const databentoPillState: ProviderConnectionState = snapshot?.databentoUsed
     ? 'connected'
     : hasDatabentoKey
-      ? (snapshot && snapshot.databentoStatus !== 'public' ? 'unavailable' : 'connected')
+      ? 'unavailable'
       : 'disconnected';
-  const databentoPillLabel = databentoPillState === 'connected'
+  const databentoPillLabel = snapshot?.databentoUsed
     ? t('Databento connected', 'Databento เชื่อมต่อแล้ว')
-    : databentoPillState === 'unavailable'
-      ? t('Databento fallback (public)', 'คีย์ Databento มีปัญหา · ใช้ข้อมูลสาธารณะ')
+    : hasDatabentoKey
+      ? loading
+        ? t('Databento checking…', 'กำลังตรวจสอบ Databento…')
+        : !snapshot
+          ? t('Databento unavailable', 'Databento ไม่พร้อมใช้งาน')
+          : t('Databento fallback (public)', 'คีย์ Databento มีปัญหา · ใช้ข้อมูลสาธารณะ')
       : t('Databento not connected · Public feed', 'ยังไม่เชื่อม Databento · ใช้ข้อมูลสาธารณะ');
 
   return (
@@ -146,7 +150,13 @@ function ScopedComexBridgePanel({ lang, uid, onCopyText }: ComexBridgePanelProps
           <button type="button" className="btn xs" onClick={() => setRefresh(previous => previous + 1)} disabled={loading}>
             <RefreshCw size={13} aria-hidden="true" />{t('Refresh', 'รีเฟรช')}
           </button>
-          <AiAndDataKeysDialogButton uid={uid} lang={lang} statusScope="databento" buttonLabel={t('Databento Key (BYOK)', 'คีย์ Databento (BYOK)')} />
+          <AiAndDataKeysDialogButton
+            uid={uid}
+            lang={lang}
+            statusScope="databento"
+            statusOverride={databentoPillState}
+            buttonLabel={t('Databento Key (BYOK)', 'คีย์ Databento (BYOK)')}
+          />
         </div>
       </header>
 
