@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { ArrowRight, Clock3, Radio, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { deskText, type DeskLanguage } from '../utils/deskI18n';
-import { evaluateNewsBlackoutWindow } from '../utils/newsGuard';
+import { DEFAULT_US_MACRO_SCHEDULE, evaluateNewsBlackoutWindow } from '../utils/newsGuard';
 
 interface NewsBlackoutRadarProps {
   lang: DeskLanguage;
@@ -34,7 +34,10 @@ export const NewsBlackoutRadar: React.FC<NewsBlackoutRadarProps> = React.memo(
     const titleId = useId();
     const [now, setNow] = useState(Date.now);
 
-    const reading = useMemo(() => evaluateNewsBlackoutWindow(now, firmId), [now, firmId]);
+    const reading = useMemo(
+      () => evaluateNewsBlackoutWindow(now, firmId, DEFAULT_US_MACRO_SCHEDULE),
+      [now, firmId],
+    );
     const pollMs = reading.status === 'CLEAR' ? 30_000 : 10_000;
 
     useEffect(() => {
@@ -125,8 +128,8 @@ export const NewsBlackoutRadar: React.FC<NewsBlackoutRadarProps> = React.memo(
         </p>
         <p className="news-radar-coverage">
           {t(
-            'Schedule model for USD, XAU and EUR. Recurring NFP and Jobless Claims use 19:30 Bangkok time. CPI, FOMC and one-off releases require supplied dates.',
-            'ปฏิทินจำลองสำหรับ USD, XAU และ EUR ใช้เวลา 19:30 น. ของไทยสำหรับข่าว NFP และยอดขอรับสวัสดิการว่างงาน ส่วน CPI, FOMC และข่าวเฉพาะกิจต้องระบุวันประกาศ'
+            'US Macro Calendar · DST-aware. Tracks NFP, US Jobless Claims, US CPI, and FOMC Rate Decisions (12:30/18:00 UTC in EDT · 13:30/19:00 UTC in EST). Verify one-off releases with your firm.',
+            'ปฏิทินข่าวเศรษฐกิจสหรัฐฯ · ปรับเวลา DST อัตโนมัติ ติดตาม NFP, ยอดขอรับสวัสดิการว่างงาน, CPI และ FOMC (19:30/01:00 น. ช่วง EDT · 20:30/02:00 น. ช่วง EST) โปรดตรวจข่าวเฉพาะกิจกับกองทุนของคุณ'
           )}
         </p>
       </section>

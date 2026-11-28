@@ -141,7 +141,7 @@ function main() {
     allErrors.forEach((v) => console.error(`  - ${v}`));
     process.exit(1);
   }
-  console.log('[PASS] All Tredyn Desk CI policy gates passed cleanly.');
+  console.log('[PASS] All TallyNX Desk CI policy gates passed cleanly.');
 }
 
 main();

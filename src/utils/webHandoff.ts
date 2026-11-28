@@ -41,6 +41,7 @@ export interface WebSandboxPreset {
   symbol: keyof typeof PIP_VALUE_PER_LOT;
   mode: 'prop' | 'personal';
   dailyDd: number;
+  cooldownMinutes?: number;
   source?: string;
   connectedVia?: 'xlsx' | 'cloud' | 'ex5';
 }
@@ -52,9 +53,11 @@ export const WEB_SANDBOX_LIMITS = {
   dailyDd: { min: 1, max: 12, step: 0.1 },
 } as const;
 
+export const WEB_COOLDOWN_LIMITS = { min: 1, max: 240 } as const;
+
 const TRANSIENT_PARAMS = [
   'balance', 'risk_pct', 'sl_pips', 'symbol', 'mode', 'daily_dd',
-  'source', 'connected_via', 'consistency_cap', 'day_share', 'step',
+  'cooldown_minutes', 'source', 'connected_via', 'consistency_cap', 'day_share', 'step',
 ];
 
 export function resolveBrandHomeSection(hostname: string): DeskSectionId {
@@ -118,12 +121,20 @@ function readNumber(params: URLSearchParams, key: string, field: keyof typeof WE
   return inRange(value, WEB_SANDBOX_LIMITS[field]) ? value : undefined;
 }
 
+export function parseWebCooldownMinutes(search: string): number | undefined {
+  const raw = new URLSearchParams(search).get('cooldown_minutes')?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && inRange(value, WEB_COOLDOWN_LIMITS) ? value : undefined;
+}
+
 export function parseWebHandoff(search: string): WebSandboxPreset | undefined {
   const params = new URLSearchParams(search);
   const balance = readNumber(params, 'balance', 'balance');
   const riskPct = readNumber(params, 'risk_pct', 'riskPct');
   const slPips = readNumber(params, 'sl_pips', 'slPips');
   const dailyDd = readNumber(params, 'daily_dd', 'dailyDd');
+  const cooldownMinutes = parseWebCooldownMinutes(search);
   const rawSymbol = params.get('symbol')?.trim().toUpperCase();
   const symbol = rawSymbol === 'XAUUSD' || rawSymbol === 'EURUSD' || rawSymbol === 'NAS100'
     ? rawSymbol
@@ -141,6 +152,7 @@ export function parseWebHandoff(search: string): WebSandboxPreset | undefined {
     symbol: symbol ?? 'XAUUSD',
     mode: mode ?? 'prop',
     dailyDd: dailyDd ?? (mode === 'personal' ? 5 : 4),
+    ...(cooldownMinutes !== undefined ? { cooldownMinutes } : {}),
     ...(source && /^[a-z0-9_-]{1,64}$/i.test(source) ? { source } : {}),
     ...(connectedVia === 'xlsx' || connectedVia === 'cloud' || connectedVia === 'ex5'
       ? { connectedVia } : {}),

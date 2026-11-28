@@ -27,6 +27,27 @@ const JOBLESS_CLAIMS = { name: 'US Jobless Claims', nameTh: 'ยอดขอร�
 const CPI = { name: 'US CPI', nameTh: 'ดัชนีราคาผู้บริโภคสหรัฐฯ (CPI)' };
 const FOMC = { name: 'FOMC Rate Decision', nameTh: 'ผลการประชุมอัตราดอกเบี้ยของเฟด (FOMC)' };
 
+/** Returns true when a calendar date (year, 0-based month, day) falls in US Eastern Daylight Time (EDT, UTC-4). */
+export function isUsEasternDstDate(year: number, monthIndex: number, day: number): boolean {
+  if (monthIndex > 2 && monthIndex < 10) return true;
+  if (monthIndex < 2 || monthIndex > 10) return false;
+  if (monthIndex === 2) {
+    // 2nd Sunday of March
+    const firstWeekday = new Date(Date.UTC(year, 2, 1)).getUTCDay();
+    const secondSunday = 1 + ((7 - firstWeekday) % 7) + 7;
+    return day >= secondSunday;
+  }
+  // 1st Sunday of November
+  const firstWeekday = new Date(Date.UTC(year, 10, 1)).getUTCDay();
+  const firstSunday = 1 + ((7 - firstWeekday) % 7);
+  return day < firstSunday;
+}
+
+/** 08:30 AM US Eastern Time expressed in UTC hours (12 during EDT, 13 during EST). */
+export function usEastern830UtcHour(year: number, monthIndex: number, day: number): 12 | 13 {
+  return isUsEasternDstDate(year, monthIndex, day) ? 12 : 13;
+}
+
 /** Build dated releases from timestamps with an explicit UTC or Bangkok offset. */
 export function buildUsMacroSchedule({ cpi = [], fomc = [] }: {
   cpi?: readonly string[];
@@ -43,22 +64,54 @@ export function buildUsMacroSchedule({ cpi = [], fomc = [] }: {
   return events.sort((a, b) => a.timestampMs - b.timestampMs);
 }
 
+/** Curated DST-aware 2026–2027 US CPI (08:30 ET) and FOMC Rate Decision (14:00 ET) release schedule. */
+export const DEFAULT_US_MACRO_SCHEDULE: readonly MacroNewsEvent[] = Object.freeze(
+  buildUsMacroSchedule({
+    cpi: [
+      '2026-01-13T13:30:00Z', '2026-02-11T13:30:00Z', '2026-03-11T12:30:00Z', '2026-04-10T12:30:00Z',
+      '2026-05-12T12:30:00Z', '2026-06-10T12:30:00Z', '2026-07-14T12:30:00Z', '2026-08-12T12:30:00Z',
+      '2026-09-11T12:30:00Z', '2026-10-14T12:30:00Z', '2026-11-10T13:30:00Z', '2026-12-10T13:30:00Z',
+      '2027-01-13T13:30:00Z', '2027-02-10T13:30:00Z', '2027-03-10T13:30:00Z', '2027-04-14T12:30:00Z',
+      '2027-05-12T12:30:00Z', '2027-06-10T12:30:00Z', '2027-07-14T12:30:00Z', '2027-08-11T12:30:00Z',
+      '2027-09-15T12:30:00Z', '2027-10-13T12:30:00Z', '2027-11-10T13:30:00Z', '2027-12-10T13:30:00Z',
+    ],
+    fomc: [
+      '2026-01-28T19:00:00Z', '2026-03-18T18:00:00Z', '2026-04-29T18:00:00Z', '2026-06-17T18:00:00Z',
+      '2026-07-29T18:00:00Z', '2026-09-16T18:00:00Z', '2026-10-28T18:00:00Z', '2026-12-09T19:00:00Z',
+      '2027-01-27T19:00:00Z', '2027-03-17T18:00:00Z', '2027-04-28T18:00:00Z', '2027-06-09T18:00:00Z',
+      '2027-07-28T18:00:00Z', '2027-09-15T18:00:00Z', '2027-10-27T18:00:00Z', '2027-12-08T19:00:00Z',
+    ],
+  }),
+);
+
+function utcTimestampAtUsEastern830(year: number, monthIndex: number, day: number): number {
+  const normalized = new Date(Date.UTC(year, monthIndex, day));
+  const y = normalized.getUTCFullYear();
+  const m = normalized.getUTCMonth();
+  const d = normalized.getUTCDate();
+  return Date.UTC(y, m, d, usEastern830UtcHour(y, m, d), 30);
+}
+
 function recurringEvents(nowMs: number): MacroNewsEvent[] {
   const bangkok = new Date(nowMs + BANGKOK_OFFSET_MS);
   const year = bangkok.getUTCFullYear();
   const month = bangkok.getUTCMonth();
   const day = bangkok.getUTCDate();
   const latestThursday = day - ((bangkok.getUTCDay() + 7 - 4) % 7);
-  // The modeled recurring calendar uses 19:30 Bangkok time, or 12:30 UTC.
+  // Recurring US 08:30 ET releases shift automatically between 12:30 UTC (EDT) and 13:30 UTC (EST).
   const events = [latestThursday, latestThursday + 7].map((dayOfMonth) => ({
     ...JOBLESS_CLAIMS,
-    timestampMs: Date.UTC(year, month, dayOfMonth, 12, 30),
+    timestampMs: utcTimestampAtUsEastern830(year, month, dayOfMonth),
   }));
 
   for (const releaseMonth of [month - 1, month, month + 1]) {
-    const firstWeekday = new Date(Date.UTC(year, releaseMonth, 1)).getUTCDay();
+    const firstOfMonth = new Date(Date.UTC(year, releaseMonth, 1));
+    const firstWeekday = firstOfMonth.getUTCDay();
     const firstFriday = 1 + ((5 + 7 - firstWeekday) % 7);
-    events.push({ ...NON_FARM_PAYROLLS, timestampMs: Date.UTC(year, releaseMonth, firstFriday, 12, 30) });
+    events.push({
+      ...NON_FARM_PAYROLLS,
+      timestampMs: utcTimestampAtUsEastern830(firstOfMonth.getUTCFullYear(), firstOfMonth.getUTCMonth(), firstFriday),
+    });
   }
   return events;
 }

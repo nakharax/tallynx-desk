@@ -1,4 +1,4 @@
-name: Tredyn Desk CI & Production Release
+name: TallyNX Desk CI & Production Release
 
 on:
   push:
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-      - name: Run Tredyn Desk Policy & EA Parity Guard
+      - name: Run TallyNX Desk Policy & EA Parity Guard
         run: node scripts/ci-policy-guard.mjs
 
   # Gate 4: Typecheck, Unit Tests & Vite Build
@@ -105,7 +105,7 @@ jobs:
       - name: Typecheck
         run: npm run lint
       - name: Run Unit Tests
-        run: npx tsx --test src/utils/*.test.ts
+        run: npm test
       - name: Verify Production Vite Build
         run: npm run build
 
@@ -181,7 +181,7 @@ jobs:
               errors.push("non-draft PR cannot defer heavy checks");
             }
             const receipt = {
-              repo: "tredyn-desk",
+              repo: "tallynx-desk",
               sha: e.SHA,
               event: e.EVENT_NAME,
               approved: errors.length === 0,
@@ -338,7 +338,7 @@ jobs:
           STATUS_CODE=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 15 "https://desk.tallynx.com/api/health")
           echo "Live HTTP check https://desk.tallynx.com/api/health -> $STATUS_CODE"
           test "$STATUS_CODE" = 200
-          echo "### Tredyn Desk Production Release Receipt" >> "$GITHUB_STEP_SUMMARY"
+          echo "### TallyNX Desk Production Release Receipt" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Deployment URL:** $URL" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Production Domain:** https://desk.tallynx.com (HTTP $STATUS_CODE)" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Commit:** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

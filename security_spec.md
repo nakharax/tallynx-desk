@@ -1,4 +1,4 @@
-# Security Specification — Tredyn GHR v3.2 Commercial Desk
+# Security Specification — TallyNX GHR v3.2 Commercial Desk
 
 ## 1. Data Invariants
 1. **Identity Isolation (`/workspaces/{userId}`)**: Can ONLY be read, created, updated, or deleted by the authenticated user whose `request.auth.uid == userId` and `request.auth.token.email_verified == true`.

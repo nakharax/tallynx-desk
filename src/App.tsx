@@ -232,6 +232,7 @@ import {
 import {
   buildWebPortalUrl,
   deskThemeToWeb,
+  parseWebCooldownMinutes,
   parseWebHandoff,
   resolveBrandHomeSection,
   resolveDeskSection,
@@ -399,6 +400,7 @@ export default function App() {
     const sandbox = parseWebHandoff(search);
     return {
       sandbox,
+      cooldownMinutes: parseWebCooldownMinutes(search),
       theme: resolveDeskTheme(search),
       section: resolveDeskSection(search, hash, pathname)
         ?? (sandbox ? 'sec-calc' : resolveBrandHomeSection(hostname)),
@@ -1257,6 +1259,17 @@ export default function App() {
     } catch {
       // The calculator remains available when history replacement is restricted.
     }
+    if (initialHandoff.cooldownMinutes) {
+      const mins = initialHandoff.cooldownMinutes;
+      commitWorkspaceChange((prev) => ({
+        ...prev,
+        cooldownUntil: Date.now() + mins * 60_000,
+      }));
+      addToast(
+        `Started a ${mins}-minute trading cooldown from TallyNX Web.`,
+        `เริ่มจับเวลาพักเทรด ${mins} นาทีจาก TallyNX Web แล้ว`,
+      );
+    }
     if (initialHandoff.sandbox) {
       addToast(
         'Loaded Web Sandbox values into the calculator.',
@@ -1269,7 +1282,7 @@ export default function App() {
         },
       );
     }
-  }, [addToast, handleSwitchPage, initialHandoff]);
+  }, [addToast, commitWorkspaceChange, handleSwitchPage, initialHandoff]);
 
   useEffect(() => {
     const syncUrlPage = () => {
@@ -1666,9 +1679,10 @@ export default function App() {
 
   const exportFullDatabaseJSON = useCallback(() => {
     const backupPayload = {
-      app: 'TREDYN_GHR_v3.2',
+      app: 'TALLYNX_DESK_v5.7',
+      legacyCompat: 'TREDYN_GHR_v3.2',
       exportedAt: new Date().toISOString(),
-      version: '3.2',
+      version: '5.7.0',
       state: stateRef.current,
     };
     const jsonStr = JSON.stringify(backupPayload, null, 2);
@@ -1676,7 +1690,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `TREDYN_GHR_Database_${getBangkokIsoDate()}.json`;
+    a.download = `TALLYNX_Desk_Database_${getBangkokIsoDate()}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
